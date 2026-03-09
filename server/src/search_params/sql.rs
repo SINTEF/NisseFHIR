@@ -85,11 +85,7 @@ fn push_string_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath, v
     }
 }
 
-fn push_string_array_or_scalar(
-    query: &mut QueryBuilder<'_, Postgres>,
-    field: &str,
-    pattern: &str,
-) {
+fn push_string_array_or_scalar(query: &mut QueryBuilder<'_, Postgres>, field: &str, pattern: &str) {
     // Search within arrays or scalar values. This handles:
     // - Scalar strings: resource->>'field' ILIKE pattern
     // - Arrays of strings: any element matches
@@ -99,7 +95,9 @@ fn push_string_array_or_scalar(
     query.push("') LIKE ");
     query.push_bind(pattern.to_owned());
     let arr_expr = safe_array_elements(&format!("resource->'{field}'"));
-    query.push(&format!(" OR EXISTS (SELECT 1 FROM {arr_expr} AS elem WHERE lower(elem::text) LIKE "));
+    query.push(&format!(
+        " OR EXISTS (SELECT 1 FROM {arr_expr} AS elem WHERE lower(elem::text) LIKE "
+    ));
     query.push_bind(pattern.to_owned());
     query.push("))");
 }
@@ -117,7 +115,9 @@ fn push_string_nested_field(
         let child = segments[1];
         // Parent might be an array of objects
         let arr = safe_array_elements(&format!("resource->'{parent}'"));
-        query.push(&format!(" AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE lower(elem->>'"));
+        query.push(&format!(
+            " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE lower(elem->>'"
+        ));
         query.push(child);
         query.push("') LIKE ");
         query.push_bind(pattern.to_owned());
@@ -134,7 +134,9 @@ fn push_string_nested_field(
         let mid = segments[1];
         let child = segments[2];
         let arr = safe_array_elements(&format!("resource->'{parent}'"));
-        query.push(&format!(" AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE lower(elem->'"));
+        query.push(&format!(
+            " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE lower(elem->'"
+        ));
         query.push(mid);
         query.push("'->>'");
         query.push(child);
@@ -154,7 +156,9 @@ fn push_string_where_filter(
 ) {
     let base_path = build_jsonb_path("resource", base);
     let arr = safe_array_elements(&base_path);
-    query.push(&format!(" AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"));
+    query.push(&format!(
+        " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"
+    ));
     query.push(filter_field);
     query.push("' = '");
     query.push(filter_value);
@@ -264,7 +268,9 @@ fn push_token_single_field(
             query.push(")");
 
             // Check array of identifiers
-            query.push(&format!(" OR EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'value' = "));
+            query.push(&format!(
+                " OR EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'value' = "
+            ));
             query.push_bind(code.to_owned());
 
             if let Some(sys) = system {
@@ -321,7 +327,9 @@ fn push_token_nested_field(
         query.push(" AND (");
 
         // Direct value in nested object
-        query.push(&format!("EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"));
+        query.push(&format!(
+            "EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"
+        ));
         query.push(child);
         query.push("' = ");
         query.push_bind(code.to_owned());
@@ -329,7 +337,9 @@ fn push_token_nested_field(
         query.push(")");
 
         // Also check CodeableConcept (child has .coding array)
-        query.push(&format!(" OR EXISTS (SELECT 1 FROM {arr} AS elem, jsonb_array_elements(COALESCE(elem->'"));
+        query.push(&format!(
+            " OR EXISTS (SELECT 1 FROM {arr} AS elem, jsonb_array_elements(COALESCE(elem->'"
+        ));
         query.push(child);
         query.push("'->'coding', '[]'::jsonb)) AS coding WHERE coding->>'code' = ");
         query.push_bind(code.to_owned());
@@ -362,7 +372,9 @@ fn push_token_where_filter(
 ) {
     let base_path = build_jsonb_path("resource", base);
     let arr = safe_array_elements(&base_path);
-    query.push(&format!(" AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"));
+    query.push(&format!(
+        " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"
+    ));
     query.push(filter_field);
     query.push("' = '");
     query.push(filter_value);
@@ -435,7 +447,9 @@ fn push_reference_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath
 
                 // Or it's an array of references
                 let arr = safe_array_elements(&format!("resource->'{field}'"));
-                query.push(&format!(" OR EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'reference' = "));
+                query.push(&format!(
+                    " OR EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'reference' = "
+                ));
                 query.push_bind(value.to_owned());
                 query.push("))");
             } else {
@@ -458,7 +472,9 @@ fn push_reference_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath
 
                     // Also check array case
                     let arr = safe_array_elements(&jsonb_path);
-                    query.push(&format!(" OR EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'reference' = "));
+                    query.push(&format!(
+                        " OR EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'reference' = "
+                    ));
                     query.push_bind(value.to_owned());
                     query.push("))");
                 }
@@ -472,7 +488,9 @@ fn push_reference_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath
         } => {
             let base_path = build_jsonb_path("resource", base);
             let arr = safe_array_elements(&base_path);
-            query.push(&format!(" AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"));
+            query.push(&format!(
+                " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"
+            ));
             query.push(filter_field);
             query.push("' = '");
             query.push(filter_value);
@@ -529,7 +547,9 @@ fn push_date_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath, val
         } => {
             let base_path = build_jsonb_path("resource", base);
             let arr = safe_array_elements(&base_path);
-            query.push(&format!(" AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"));
+            query.push(&format!(
+                " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"
+            ));
             query.push(filter_field);
             query.push("' = '");
             query.push(filter_value);
@@ -812,7 +832,10 @@ mod tests {
 
     #[test]
     fn build_jsonb_path_single() {
-        assert_eq!(build_jsonb_path("resource", &["status"]), "resource->'status'");
+        assert_eq!(
+            build_jsonb_path("resource", &["status"]),
+            "resource->'status'"
+        );
     }
 
     #[test]
@@ -898,8 +921,7 @@ mod tests {
 
     #[test]
     fn near_filter_produces_earth_distance_sql() {
-        let mut query: QueryBuilder<'_, Postgres> =
-            QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
         push_near_filter(&mut query, &["position"], "42.36|-71.06|10|km");
         let sql = query.into_sql();
         assert!(
@@ -918,8 +940,7 @@ mod tests {
 
     #[test]
     fn near_filter_skips_invalid_value() {
-        let mut query: QueryBuilder<'_, Postgres> =
-            QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
         push_near_filter(&mut query, &["position"], "invalid");
         let sql = query.into_sql();
         // Should not add any condition for invalid input

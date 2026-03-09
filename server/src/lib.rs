@@ -67,6 +67,7 @@ pub struct AppState {
         fhir::search_resources,
         fhir::create_resource,
         fhir::read_resource,
+        fhir::read_resource_history,
         fhir::update_resource,
         fhir::patch_resource,
         fhir::delete_resource,

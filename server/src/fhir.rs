@@ -31,6 +31,10 @@ pub fn routes() -> Router<AppState> {
                 .patch(patch_resource)
                 .delete(delete_resource),
         )
+        .route(
+            "/fhir/{resource_type}/{id}/_history",
+            get(read_resource_history),
+        )
 }
 
 #[derive(Debug)]
@@ -183,6 +187,41 @@ pub async fn read_resource(
     );
 
     Ok((StatusCode::OK, response_headers, Json(resource.resource)).into_response())
+}
+
+#[utoipa::path(get, path = "/fhir/{resource_type}/{id}/_history",
+    params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
+    responses((status = 200, description = "Resource history Bundle"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 404, description = "Not found")),
+    security(("bearer_auth" = [])))]
+pub async fn read_resource_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((resource_type, id)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let access = extract_access_context(&headers, &state.auth)?;
+    if !access.can_read || !access.can_access_resource_type(&resource_type) {
+        return Err(AppError::Forbidden);
+    }
+
+    let history = state
+        .store
+        .read_history(&access.tenant_id, &resource_type, &id)
+        .await?;
+
+    if history.is_empty() {
+        return Err(AppError::NotFound);
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(build_history_bundle(
+            &state.fhir_base_url,
+            &resource_type,
+            &id,
+            history,
+        )),
+    )
+        .into_response())
 }
 
 #[utoipa::path(put, path = "/fhir/{resource_type}/{id}",
@@ -410,6 +449,47 @@ fn build_search_bundle(
     })
 }
 
+fn build_history_bundle(
+    base_url: &str,
+    resource_type: &str,
+    id: &str,
+    history: Vec<crate::store::HistoricalResource>,
+) -> Value {
+    let base_url = base_url.trim_end_matches('/');
+    let self_url = format!("{base_url}/{resource_type}/{id}/_history");
+    let total = history.len() as i64;
+
+    let entry = history
+        .into_iter()
+        .map(|version| {
+            json!({
+                "fullUrl": format!("{base_url}/{resource_type}/{}/_history/{}", version.id, version.version_id),
+                "resource": version.resource,
+                "request": {
+                    "method": if version.deleted { "DELETE" } else { "PUT" },
+                    "url": format!("{resource_type}/{}", version.id),
+                },
+                "response": {
+                    "status": if version.deleted { "410 Gone" } else { "200 OK" },
+                    "etag": format!("W/\"{}\"", version.version_id),
+                    "lastModified": version.last_updated.to_rfc3339(),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "resourceType": "Bundle",
+        "type": "history",
+        "total": total,
+        "link": [{
+            "relation": "self",
+            "url": self_url,
+        }],
+        "entry": entry,
+    })
+}
+
 fn parse_search_params(
     resource_type: &str,
     query: BTreeMap<String, String>,
@@ -536,15 +616,15 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        SearchPage, build_search_bundle, parse_search_params, validate_identifier_value,
-        validate_resource_payload,
+        SearchPage, build_history_bundle, build_search_bundle, parse_search_params,
+        validate_identifier_value, validate_resource_payload,
     };
     use crate::{
         AppState, SearchConfig,
         auth::AuthConfig,
         build_router,
         error::AppError,
-        store::{PgStore, StoredResource},
+        store::{HistoricalResource, PgStore, StoredResource},
         validation::FhirSchemaValidator,
     };
     use chrono::Utc;
@@ -598,6 +678,46 @@ mod tests {
             "http://localhost:8080/fhir/Patient?_count=1&_after_id=example"
         );
         assert_eq!(bundle["entry"][0]["resource"]["id"], "example");
+    }
+
+    #[test]
+    fn history_bundle_contains_versions_including_deletes() {
+        let now = Utc::now();
+        let bundle = build_history_bundle(
+            "http://localhost:8080/fhir",
+            "Patient",
+            "example",
+            vec![
+                HistoricalResource {
+                    id: "example".to_owned(),
+                    version_id: 2,
+                    last_updated: now,
+                    deleted: true,
+                    resource: json!({
+                        "resourceType": "Patient",
+                        "id": "example"
+                    }),
+                },
+                HistoricalResource {
+                    id: "example".to_owned(),
+                    version_id: 1,
+                    last_updated: now,
+                    deleted: false,
+                    resource: json!({
+                        "resourceType": "Patient",
+                        "id": "example"
+                    }),
+                },
+            ],
+        );
+
+        assert_eq!(bundle["resourceType"], "Bundle");
+        assert_eq!(bundle["type"], "history");
+        assert_eq!(bundle["total"], 2);
+        assert_eq!(bundle["link"][0]["relation"], "self");
+        assert_eq!(bundle["entry"][0]["response"]["status"], "410 Gone");
+        assert_eq!(bundle["entry"][0]["response"]["etag"], "W/\"2\"");
+        assert_eq!(bundle["entry"][1]["response"]["status"], "200 OK");
     }
 
     #[test]

@@ -150,6 +150,10 @@ We should run some simple performance checks, to assert that the server is not p
 
 But are we testing everything ? Please maintain a TEST_OVERVIEW.md file in the root folder that gives an overview of the current tests we have, what is missing, and what should be done next. Eventually, everything MUST be tested.
 
+## Code Coverage
+
+Consider using the code coverage tools, such as llvm-cov, to check that we have good enough code coverage. We shouldn't have unrealistic or stupid tests, but we should make sure that everything is tested to some extent.
+
 ## Final Words
 
 You will work isolated and iterate by yourself. Be methodical, be profesional, and make sure to write good tests, to use them, to document your progress, your ideas, your tasks, and to maintain a good code base overall.

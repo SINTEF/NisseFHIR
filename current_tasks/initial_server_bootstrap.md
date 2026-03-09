@@ -24,13 +24,13 @@
 - Security headers via tower-helmet
 - Request body size limit (50 MB) with HTTP 413 + OperationOutcome for oversized payloads
 - JSON Patch support (RFC 6902) via `PATCH /fhir/:type/:id` with 11 integration tests
+- Instance history endpoint via `GET /fhir/:type/:id/_history`, returning FHIR history Bundles backed by `fhir_resource_history`, including delete tombstones and version ETags
 
 ## Remaining (near-term)
 
-1. Add history endpoint for reading previous versions of a resource.
-2. Add conditional interactions (If-Match on update/delete, If-None-Exist on create).
-3. Add transaction/batch Bundle processing.
-4. Expand search support to additional resource types and closer FHIR semantics where needed.
-5. Add ND-JSON bulk data export support.
-6. Add CI pipeline with disposable PostgreSQL and run the Python E2E harness in both native and Docker modes.
-7. Extend secondary validation beyond the current slice: decimal precision/range, string length limits, and additional complex datatype invariants that JSON Schema does not enforce (`Timing`, `SampledData`, `Range`, `Ratio`, etc.).
+1. Add conditional interactions (If-Match on update/delete, If-None-Exist on create).
+2. Add transaction/batch Bundle processing.
+3. Expand search support to additional resource types and closer FHIR semantics where needed.
+4. Add ND-JSON bulk data export support.
+5. Add CI pipeline with disposable PostgreSQL and run the Python E2E harness in both native and Docker modes.
+6. Extend secondary validation beyond the current slice: decimal precision/range, string length limits, and additional complex datatype invariants that JSON Schema does not enforce (`Timing`, `SampledData`, `Range`, `Ratio`, etc.).

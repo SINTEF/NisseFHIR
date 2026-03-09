@@ -6,6 +6,7 @@ pub fn capability_statement(base_url: &str) -> Value {
     let generic_interactions = json!([
         {"code": "create"},
         {"code": "read"},
+        {"code": "history-instance"},
         {"code": "update"},
         {"code": "patch"},
         {"code": "delete"},
@@ -148,6 +149,7 @@ mod tests {
             .collect();
         assert!(codes.contains(&"create"));
         assert!(codes.contains(&"read"));
+        assert!(codes.contains(&"history-instance"));
         assert!(codes.contains(&"update"));
         assert!(codes.contains(&"patch"));
         assert!(codes.contains(&"delete"));

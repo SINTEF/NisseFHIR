@@ -23,6 +23,14 @@ pub struct SearchResults {
     pub next_after_id: Option<String>,
 }
 
+pub struct HistoricalResource {
+    pub id: String,
+    pub version_id: i64,
+    pub last_updated: DateTime<Utc>,
+    pub deleted: bool,
+    pub resource: Value,
+}
+
 impl PgStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -245,5 +253,37 @@ impl PgStore {
             resources,
             next_after_id,
         })
+    }
+
+    pub async fn read_history(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<Vec<HistoricalResource>, AppError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT version_id, last_updated, deleted, resource
+            FROM fhir_resource_history
+            WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+            ORDER BY version_id DESC
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| HistoricalResource {
+                id: id.to_owned(),
+                version_id: row.get::<i64, _>("version_id"),
+                last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
+                deleted: row.get::<bool, _>("deleted"),
+                resource: row.get::<Value, _>("resource"),
+            })
+            .collect())
     }
 }

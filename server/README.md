@@ -15,6 +15,7 @@ Initial lightweight FHIR 6.0 server implementation in Rust.
   - `GET /metadata`
   - `POST /fhir/:resource_type`
   - `GET /fhir/:resource_type/:id`
+  - `GET /fhir/:resource_type/:id/_history`
   - `PUT /fhir/:resource_type/:id`
   - `DELETE /fhir/:resource_type/:id`
   - `GET /fhir/:resource_type` with `_count` and `_after_id`
@@ -159,7 +160,7 @@ What it does:
 
 ## Notes
 
-- Capability statement advertises create/read/update/delete/search-type interactions.
+- Capability statement advertises create/read/history-instance/update/patch/delete/search-type interactions.
 - Collection search uses cursor pagination ordered by resource id. Clients request the first page with `_count` and follow the returned `next` link using `_after_id`.
 - Create and update requests validate both the FHIR envelope (`resourceType`, `id`) and the resource-specific JSON Schema definition.
 - Invalid JSON, schema failures, auth failures, and missing resources return FHIR-shaped `OperationOutcome` bodies.

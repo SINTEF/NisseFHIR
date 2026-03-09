@@ -220,3 +220,9 @@ I think the ci.yml in the workflows is not using the new ARM nodes from github, 
 ## VScode GPT-5.4/autopilot
 
 Can we update the CI for the chart release that when we tag, we replace the chart version and the app version in the Chart.yaml automatically? I always forget, it's annoying.
+
+---
+## VScode GPT-5.3-Codex/autopilot
+file:fhir-specs.md
+---
+Excellent! did you make good tests related to the history feature ? can you use the code coverage tool (llvm-cov?) to make sure we are doing that well too ?

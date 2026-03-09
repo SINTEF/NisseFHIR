@@ -2,7 +2,7 @@
 
 ## Current Coverage
 
-### Unit Tests (66 tests in `server/src/`)
+### Unit Tests (67 tests in `server/src/`)
 
 - `auth::tests` — JWT validation, scope parsing, resource allow-list case sensitivity, tenant claim precedence, missing-exp rejection, malformed bearer rejection, JWKS missing/unknown kid rejection, dev-mode self-verification.
 - `capability::tests` — Capability statement shape: resource type, FHIR version, status, server mode, supported interactions (create/read/update/delete/patch/search-type), generic search parameters, Patient/Observation resource-specific search parameters, patchFormat, implementation URL, JSON-only format.
@@ -10,13 +10,14 @@
 - `fhir::tests` — ID generation for create, resourceType mismatch rejection, search bundle cursor-link structure, resource-specific search parameter parsing, identifier filter parsing, schema validation OperationOutcome, malformed JSON OperationOutcome.
 - `validation::tests` — Schema validator plus secondary datatype checks: accepts minimal and named Patient, minimal Observation with any code string for status, integer boundary values, and fragment canonical values; rejects unknown resource types, additional properties, wrong types, invalid calendar dates/dateTimes, fractional or out-of-range integer fields, invalid positiveInt/unsignedInt values, overflowing integer64 strings, invalid `uri`/`url`/`canonical` values, `ContactPoint.value` without `system`, `Attachment.data` without `contentType`, `Quantity.code` without `system`, and `Period.start > end`. Validator caching and multi-type support.
 
-### Integration Tests (108 tests in `server/tests/`)
+### Integration Tests (114 tests in `server/tests/`)
 
 - `auth.rs` — Missing/expired/wrong-secret/missing-exp tokens rejected, read-only/write-only scope enforcement on create/read/PUT, resource type restrictions on create/read, tenant isolation and same-ID-different-tenant coexistence, tenant claim precedence over sub.
 - `crud.rs` (20 tests) — Create returns 201 with correct headers (ETag, Last-Modified, Location), ID generation, database persistence, initial version=1, read-after-create roundtrip, ETag/Last-Modified on read, 404 for nonexistent/wrong-type, update returns 200 with incremented version, mismatched ID/type rejection, multi-resource-type roundtrip, field preservation on update, healthz, metadata endpoint, double-create upsert.
 - `delete.rs` (8 tests) — Delete returns 204, nonexistent returns 404, deleted resource no longer readable, count reduction after delete, write scope required, resource type restriction enforced, tenant isolation on delete, unauthenticated rejection when auth required.
 - `http_config.rs` (8 tests) — Docs route disabled by default, can be enabled, CORS allows only configured origin, CORS rejects unconfigured origin, dev token endpoint mints valid tokens, dev token defaults on empty body, dev token endpoint hidden in static mode, dev-minted tokens authenticate requests.
 - `patch.rs` (11 tests) — PATCH add/replace/remove field operations, 404 for nonexistent resource, 400 for invalid patch ops, version increment on patch, rejection of resourceType change, write scope required, resource type restriction enforced, read-after-patch roundtrip, schema validation of patched result.
+- `history.rs` (6 tests) — `GET /fhir/{type}/{id}/_history` bundle shape and descending version order, delete tombstone (`410 Gone`) entries, read-scope enforcement, resource restriction enforcement, tenant isolation, and 404 for missing resources.
 - `search.rs` — Searchset bundle shape and total, cursor pagination with `_count`/`_after_id` and next links, multi-page filtered traversal across a moderate generated dataset, tenant isolation, forbidden resource type, `_count` above limit rejected, legacy `_offset` rejection, Patient search by `name`/`birthdate`/`identifier`, Observation search by `code`/`status`/`subject`, filtered pagination links, unsupported parameter rejection, malformed identifier rejection.
 - `validation.rs` (30 tests) — Acceptance of comprehensive Patient/Observation/Organization/Practitioner/Encounter/Condition/Procedure/DiagnosticReport examples. Rejection of extra properties, invalid types, unsupported resource types, missing resourceType, type mismatch, malformed/truncated/empty JSON, invalid calendar birth dates, invalid positiveInt extension values, invalid identifier URIs, `ContactPoint.value` without `system`, `Quantity.code` without `system`, `Period.start > end`, case-insensitive path matching, multiple validation errors, diagnostics content.
 
@@ -34,7 +35,6 @@ Current full-scan baseline:
 
 ## What Is Missing
 
-- History interaction (read previous versions of a resource).
 - Conditional create/update/delete (If-None-Exist, If-Match headers).
 - Transaction/batch Bundle processing.
 - Search parameters beyond the current first slice. Patient now supports `name`, `birthdate`, and `identifier`; Observation now supports `code`, `status`, and `subject`. Other resource-specific filters remain unimplemented.
@@ -46,8 +46,7 @@ Current full-scan baseline:
 
 ## Recommended Next Steps
 
-1. Add history endpoint (`GET /fhir/{type}/{id}/_history`) with version tracking.
-2. Add conditional interaction support (If-Match on update/delete).
-3. Add transaction/batch Bundle endpoint.
-4. Expand search support to more resource types and closer FHIR semantics where needed.
-5. Wire the external Python E2E harness into CI once the pipeline is added.
+1. Add conditional interaction support (If-Match on update/delete).
+2. Add transaction/batch Bundle endpoint.
+3. Expand search support to more resource types and closer FHIR semantics where needed.
+4. Wire the external Python E2E harness into CI once the pipeline is added.
