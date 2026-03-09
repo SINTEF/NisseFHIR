@@ -837,6 +837,63 @@ mod tests {
     }
 
     #[test]
+    fn algorithm_for_jwk_octet_key_pair() {
+        use jsonwebtoken::jwk::{
+            AlgorithmParameters, CommonParameters, Jwk, OctetKeyPairParameters,
+            EllipticCurve,
+        };
+
+        let jwk = Jwk {
+            common: CommonParameters {
+                public_key_use: None,
+                key_operations: None,
+                key_algorithm: None,
+                key_id: None,
+                x509_url: None,
+                x509_chain: None,
+                x509_sha1_fingerprint: None,
+                x509_sha256_fingerprint: None,
+            },
+            algorithm: AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
+                key_type: Default::default(),
+                curve: EllipticCurve::Ed25519,
+                x: "x".to_owned(),
+            }),
+        };
+
+        assert_eq!(super::algorithm_for_jwk(&jwk), Some(Algorithm::EdDSA));
+    }
+
+    #[test]
+    fn algorithm_for_jwk_unsupported_ec_curve() {
+        use jsonwebtoken::jwk::{
+            AlgorithmParameters, CommonParameters, EllipticCurve,
+            EllipticCurveKeyParameters, Jwk,
+        };
+
+        let jwk = Jwk {
+            common: CommonParameters {
+                public_key_use: None,
+                key_operations: None,
+                key_algorithm: None,
+                key_id: None,
+                x509_url: None,
+                x509_chain: None,
+                x509_sha1_fingerprint: None,
+                x509_sha256_fingerprint: None,
+            },
+            algorithm: AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+                key_type: Default::default(),
+                curve: EllipticCurve::P521,
+                x: "x".to_owned(),
+                y: "y".to_owned(),
+            }),
+        };
+
+        assert_eq!(super::algorithm_for_jwk(&jwk), None);
+    }
+
+    #[test]
     fn algorithm_for_jwk_uses_key_algorithm_when_present() {
         use jsonwebtoken::jwk::{
             AlgorithmParameters, CommonParameters, Jwk, KeyAlgorithm,

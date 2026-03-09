@@ -238,3 +238,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Coverage reports
+coverage-report/
