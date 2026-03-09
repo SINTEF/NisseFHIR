@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState, SearchConfig, auth::extract_access_context, capability::capability_statement,
-    error::AppError, store::SearchFilter,
+    error::AppError, search_params,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -37,7 +37,7 @@ pub fn routes() -> Router<AppState> {
 pub struct ParsedSearchParams {
     count: u32,
     after_id: Option<String>,
-    filters: Vec<SearchFilter>,
+    filters: Vec<search_params::SearchFilter>,
     canonical_filters: Vec<(String, String)>,
 }
 
@@ -420,6 +420,9 @@ fn parse_search_params(
     let mut filters = Vec::new();
     let mut canonical_filters = Vec::new();
 
+    // Look up the search parameters supported for this resource type
+    let supported_params = search_params::search_params_for(resource_type);
+
     for (key, value) in query {
         match key.as_str() {
             "_count" => {
@@ -444,38 +447,27 @@ fn parse_search_params(
                     "_offset is no longer supported; use _after_id cursor pagination".to_owned(),
                 ));
             }
-            "name" if resource_type.eq_ignore_ascii_case("Patient") => {
-                filters.push(SearchFilter::PatientName(value.clone()));
-                canonical_filters.push((key, value));
-            }
-            "birthdate" if resource_type.eq_ignore_ascii_case("Patient") => {
-                filters.push(SearchFilter::PatientBirthDate(value.clone()));
-                canonical_filters.push((key, value));
-            }
-            "identifier" if resource_type.eq_ignore_ascii_case("Patient") => {
-                let (system, identifier_value) = parse_identifier_filter(&value)?;
-                filters.push(SearchFilter::PatientIdentifier {
-                    system,
-                    value: identifier_value,
-                });
-                canonical_filters.push((key, value));
-            }
-            "code" if resource_type.eq_ignore_ascii_case("Observation") => {
-                filters.push(SearchFilter::ObservationCode(value.clone()));
-                canonical_filters.push((key, value));
-            }
-            "status" if resource_type.eq_ignore_ascii_case("Observation") => {
-                filters.push(SearchFilter::ObservationStatus(value.clone()));
-                canonical_filters.push((key, value));
-            }
-            "subject" if resource_type.eq_ignore_ascii_case("Observation") => {
-                filters.push(SearchFilter::ObservationSubject(value.clone()));
-                canonical_filters.push((key, value));
-            }
-            _ => {
-                return Err(AppError::BadRequest(format!(
-                    "unsupported search parameter '{key}' for resource type '{resource_type}'"
-                )));
+            param_code => {
+                // Look up the parameter in the registry
+                if let Some(param) = supported_params.iter().find(|p| p.code == param_code) {
+                    // Validate token-type parameters with pipe syntax
+                    if param.param_type == search_params::SearchParamType::Token
+                        && param_code == "identifier"
+                    {
+                        // Special validation for identifier tokens
+                        validate_identifier_value(&value)?;
+                    }
+
+                    filters.push(search_params::SearchFilter {
+                        param,
+                        value: value.clone(),
+                    });
+                    canonical_filters.push((key, value));
+                } else {
+                    return Err(AppError::BadRequest(format!(
+                        "unsupported search parameter '{param_code}' for resource type '{resource_type}'"
+                    )));
+                }
             }
         }
     }
@@ -488,30 +480,26 @@ fn parse_search_params(
     })
 }
 
-fn parse_u32_query_param(name: &str, value: &str) -> Result<u32, AppError> {
-    value
-        .parse::<u32>()
-        .map_err(|_| AppError::BadRequest(format!("{name} must be an unsigned integer")))
-}
-
-fn parse_identifier_filter(value: &str) -> Result<(Option<String>, String), AppError> {
-    if let Some((system, identifier_value)) = value.split_once('|') {
-        if system.is_empty() || identifier_value.is_empty() {
-            return Err(AppError::BadRequest(
-                "identifier must be 'value' or 'system|value'".to_owned(),
-            ));
-        }
-
-        return Ok((Some(system.to_owned()), identifier_value.to_owned()));
-    }
-
+fn validate_identifier_value(value: &str) -> Result<(), AppError> {
     if value.is_empty() {
         return Err(AppError::BadRequest(
             "identifier must be 'value' or 'system|value'".to_owned(),
         ));
     }
+    if let Some((system, id_value)) = value.split_once('|') {
+        if system.is_empty() || id_value.is_empty() {
+            return Err(AppError::BadRequest(
+                "identifier must be 'value' or 'system|value'".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
 
-    Ok((None, value.to_owned()))
+fn parse_u32_query_param(name: &str, value: &str) -> Result<u32, AppError> {
+    value
+        .parse::<u32>()
+        .map_err(|_| AppError::BadRequest(format!("{name} must be an unsigned integer")))
 }
 
 fn build_search_url(
@@ -548,7 +536,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        SearchPage, build_search_bundle, parse_identifier_filter, parse_search_params,
+        SearchPage, build_search_bundle, parse_search_params, validate_identifier_value,
         validate_resource_payload,
     };
     use crate::{
@@ -669,15 +657,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_identifier_filter_accepts_value_or_system_value() {
-        assert_eq!(
-            parse_identifier_filter("12345").unwrap(),
-            (None, "12345".to_owned())
-        );
-        assert_eq!(
-            parse_identifier_filter("urn:test|12345").unwrap(),
-            (Some("urn:test".to_owned()), "12345".to_owned())
-        );
+    fn validate_identifier_value_accepts_value_or_system_value() {
+        validate_identifier_value("12345").unwrap();
+        validate_identifier_value("urn:test|12345").unwrap();
+    }
+
+    #[test]
+    fn validate_identifier_value_rejects_empty() {
+        validate_identifier_value("").unwrap_err();
+        validate_identifier_value("|").unwrap_err();
+        validate_identifier_value("|12345").unwrap_err();
+        validate_identifier_value("urn:test|").unwrap_err();
     }
 
     #[tokio::test]

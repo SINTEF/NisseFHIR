@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod fhir;
 pub mod jwks;
+pub mod search_params;
 pub mod store;
 pub mod validation;
 

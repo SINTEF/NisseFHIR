@@ -193,3 +193,15 @@ I'm not sure I like the pagination: it seems to be based on offset and count, wh
 Is page size configurable ? do we have good tests on pagination ? Can we have a good test where we generate quite  afew documents, nothing dramatic, in which we can test pagination advanced scenarios ?
 ---
 I started postgresql, and you can keep iterating. make sure we get this perfect !
+---
+## VScode Claude Opus 4.6/autopilot
+Hi, I think we should support the rules and search parameters: having more rules, more indexes in the database, in a good way.
+
+For example we look at patient, are we using the patients correctly ?
+I look at location (https://build.fhir.org/location.html#search), I also see a lot of features regarding search, are we supporting them ?
+
+I would really enjoy if you make a file that is the list of all the ResourceTypes, you can compute that list programmatically I think, and you must iterate on the list resource type per resource type until all the search parameters and business rules of each resource type is correctly implemented. I do not want a simple patient and let's move on thing like it has been done too many time. this should be a proper fhir implementation that support ALL official ressource types. it's going to be a lot of code, so be methodical, organised, use files, memory, todo list, no shortcuts, take your time, iterate, run the tests, the linters, iterate again, don't get de-motivated. I count on you. you are the best !
+---
+sorry the submodules wern't checked out, you can read them again if you wish.
+---
+So it works, but do we have indexes for fast querying? Note that the indexes should handle when many documents have no/value for specific fields and so on. Not everything can have indexes too I assume.

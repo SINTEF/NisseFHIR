@@ -26,9 +26,11 @@ In early March 2026, using a mix of GPT-5.4 and Claude Opus 4.6, this did not wo
 
 Perhaps bruteforcing the problem with infinite money could make it work eventually, but I reverted to the classic human expert in the loop, guiding AI agents.
 
-The author did develop a FHIR 5 server in Golang for a healthcare company years ago, and had experience with the FHIR specifications. The server was used in production for years, and it eventually got replaced by something arguably better. Learning from this experience, it was easy to guide the AI agents, to not repeat the same mistakes but also quickly implement the important features.
+The author did develop a FHIR 5 server in Golang for a healthcare company years ago, and had experience with the FHIR specifications. The previous server implementation was used in production for years, and it eventually got replaced by something arguably better. Learning from this experience, it was easy to guide the AI agents, to not repeat the same mistakes but also quickly implement the important features.
 
-You can read the [PROMPTS.md](./PROMPTS.md) file for the list of prompts used during the development.
+You can read the [PROMPTS.md](./PROMPTS.md) file for the list of prompts used during the development. This is somewhat more involved than a "create a FHIR 6 server" prompt.
+
+The time gain with this method of development is huge, but it still requires a lot of human guidance and expertise. I think that compared to the C compiler experiment, what should be next is perhaps less obvious for an AI agent.
 
 ## Software Stack and Architecture
 
@@ -47,6 +49,24 @@ The author recommends setting up LUKS, and not relying on a checkbox convenientl
 The server is heavily tested, as vibe-coded projects should be, using thousands of test cases from the HL7 FHIR resources. Moreover, it features a comprehensive end-to-end test suite, a high code coverage with unit and integration tests.
 
 The data is also validated extensively using the official FHIR 6 JSON Schema.
+
+## Quick Start
+
+```bash
+# Define a strong JWT secret for local development
+export JWT_SECRET="$(openssl rand -hex 32)"
+
+# Start the server and the database
+docker-compose up -d
+
+# Generate a JWT token for local development
+python3 scripts/generate_static_jwt.py \
+  --tenant my-tenant \
+  --scope 'read write'
+
+# Open the documentation in the browser
+{ command -v xdg-open || command -v open; } >/dev/null && "$_" http://localhost:8080/docs/
+```
 
 ## License
 

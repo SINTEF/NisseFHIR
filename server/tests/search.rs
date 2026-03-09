@@ -431,7 +431,7 @@ async fn search_rejects_unsupported_resource_specific_parameter() {
     let app = build_test_app_auth_required(pool);
     let (status, body) = send_request(
         app,
-        search_resource_with_token("Organization", Some("name=hl7"), &token),
+        search_resource_with_token("Organization", Some("bogus-nonexistent-param=hl7"), &token),
     )
     .await;
 

@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+use crate::search_params::{RESOURCE_TYPES, SearchParamType, search_params_for};
+
 pub fn capability_statement(base_url: &str) -> Value {
     let generic_interactions = json!([
         {"code": "create"},
@@ -9,6 +11,66 @@ pub fn capability_statement(base_url: &str) -> Value {
         {"code": "delete"},
         {"code": "search-type"}
     ]);
+
+    let pagination_params = vec![
+        json!({
+            "name": "_count",
+            "type": "number",
+            "documentation": "Limits the number of resources returned per page."
+        }),
+        json!({
+            "name": "_after_id",
+            "type": "string",
+            "documentation": "Returns resources that sort after the supplied resource id cursor."
+        }),
+    ];
+
+    // Build resource entries dynamically from the search parameter registry
+    let mut resource_entries: Vec<Value> = Vec::with_capacity(RESOURCE_TYPES.len() + 1);
+
+    // Wildcard entry with shared pagination params
+    resource_entries.push(json!({
+        "type": "*",
+        "interaction": generic_interactions,
+        "searchParam": pagination_params,
+    }));
+
+    for &rt in RESOURCE_TYPES {
+        let params = search_params_for(rt);
+        if params.is_empty() {
+            // Still list the resource type even if it has no search params
+            resource_entries.push(json!({
+                "type": rt,
+                "interaction": generic_interactions,
+            }));
+            continue;
+        }
+
+        let mut search_params: Vec<Value> = pagination_params.clone();
+        for sp in params {
+            let type_str = match sp.param_type {
+                SearchParamType::String => "string",
+                SearchParamType::Token => "token",
+                SearchParamType::Reference => "reference",
+                SearchParamType::Date => "date",
+                SearchParamType::Quantity => "quantity",
+                SearchParamType::Number => "number",
+                SearchParamType::Uri => "uri",
+                SearchParamType::Composite => "composite",
+                SearchParamType::Special => "special",
+            };
+            search_params.push(json!({
+                "name": sp.code,
+                "type": type_str,
+            }));
+        }
+
+        resource_entries.push(json!({
+            "type": rt,
+            "interaction": generic_interactions,
+            "searchParam": search_params,
+        }));
+    }
 
     json!({
         "resourceType": "CapabilityStatement",
@@ -35,86 +97,7 @@ pub fn capability_statement(base_url: &str) -> Value {
                 ],
                 "description": "This server supports JWT Bearer Token authentication with static keys or a JWKS provider. Tokens encode tenant identity, read/write scopes, and optional resource type restrictions."
             },
-            "resource": [
-                {
-                    "type": "*",
-                    "interaction": generic_interactions,
-                    "searchParam": [
-                        {
-                            "name": "_count",
-                            "type": "number",
-                            "documentation": "Limits the number of resources returned per page."
-                        },
-                        {
-                            "name": "_after_id",
-                            "type": "string",
-                            "documentation": "Returns resources that sort after the supplied resource id cursor."
-                        }
-                    ]
-                },
-                {
-                    "type": "Patient",
-                    "interaction": generic_interactions,
-                    "searchParam": [
-                        {
-                            "name": "_count",
-                            "type": "number",
-                            "documentation": "Limits the number of resources returned per page."
-                        },
-                        {
-                            "name": "_after_id",
-                            "type": "string",
-                            "documentation": "Returns resources that sort after the supplied resource id cursor."
-                        },
-                        {
-                            "name": "name",
-                            "type": "string",
-                            "documentation": "Matches a patient's family or given names using case-insensitive partial matching."
-                        },
-                        {
-                            "name": "birthdate",
-                            "type": "date",
-                            "documentation": "Matches the patient's exact birthDate value."
-                        },
-                        {
-                            "name": "identifier",
-                            "type": "token",
-                            "documentation": "Matches a patient identifier by exact value or exact system|value pair."
-                        }
-                    ]
-                },
-                {
-                    "type": "Observation",
-                    "interaction": generic_interactions,
-                    "searchParam": [
-                        {
-                            "name": "_count",
-                            "type": "number",
-                            "documentation": "Limits the number of resources returned per page."
-                        },
-                        {
-                            "name": "_after_id",
-                            "type": "string",
-                            "documentation": "Returns resources that sort after the supplied resource id cursor."
-                        },
-                        {
-                            "name": "code",
-                            "type": "token",
-                            "documentation": "Matches an observation code.coding.code value exactly."
-                        },
-                        {
-                            "name": "status",
-                            "type": "token",
-                            "documentation": "Matches the observation status exactly."
-                        },
-                        {
-                            "name": "subject",
-                            "type": "reference",
-                            "documentation": "Matches the exact subject reference, for example Patient/example."
-                        }
-                    ]
-                }
-            ]
+            "resource": resource_entries
         }],
         "implementation": {
             "description": "Lightweight Rust FHIR server",

@@ -3,6 +3,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
 use crate::error::AppError;
+use crate::search_params::sql::SearchFilter;
 
 #[derive(Clone)]
 pub struct PgStore {
@@ -20,19 +21,6 @@ pub struct SearchResults {
     pub total: i64,
     pub resources: Vec<StoredResource>,
     pub next_after_id: Option<String>,
-}
-
-#[derive(Debug)]
-pub enum SearchFilter {
-    PatientName(String),
-    PatientBirthDate(String),
-    PatientIdentifier {
-        system: Option<String>,
-        value: String,
-    },
-    ObservationCode(String),
-    ObservationStatus(String),
-    ObservationSubject(String),
 }
 
 impl PgStore {
@@ -202,7 +190,7 @@ impl PgStore {
         total_query.push_bind(tenant_id);
         total_query.push(" AND resource_type = ");
         total_query.push_bind(resource_type);
-        push_search_filters(&mut total_query, filters);
+        crate::search_params::sql::push_search_filters(&mut total_query, filters);
 
         let total = total_query
             .build_query_scalar::<i64>()
@@ -223,7 +211,7 @@ impl PgStore {
         resource_query.push_bind(tenant_id);
         resource_query.push(" AND resource_type = ");
         resource_query.push_bind(resource_type);
-        push_search_filters(&mut resource_query, filters);
+        crate::search_params::sql::push_search_filters(&mut resource_query, filters);
 
         if let Some(after_id) = after_id {
             resource_query.push(" AND id > ");
@@ -257,69 +245,5 @@ impl PgStore {
             resources,
             next_after_id,
         })
-    }
-}
-
-fn push_search_filters(query: &mut QueryBuilder<'_, Postgres>, filters: &[SearchFilter]) {
-    for filter in filters {
-        match filter {
-            SearchFilter::PatientName(value) => {
-                let pattern = format!("%{}%", value.to_lowercase());
-                query.push(
-                    r#"
-                    AND EXISTS (
-                        SELECT 1
-                        FROM jsonb_array_elements(COALESCE(resource->'name', '[]'::jsonb)) AS patient_name
-                        WHERE lower(COALESCE(patient_name->>'family', '')) LIKE
-                    "#,
-                );
-                query.push_bind(pattern.clone());
-                query.push(
-                    r#"
-                        OR EXISTS (
-                            SELECT 1
-                            FROM jsonb_array_elements_text(COALESCE(patient_name->'given', '[]'::jsonb)) AS given_name(given)
-                            WHERE lower(given_name.given) LIKE
-                    "#,
-                );
-                query.push_bind(pattern);
-                query.push(
-                    r#"
-                        )
-                    )
-                    "#,
-                );
-            }
-            SearchFilter::PatientBirthDate(value) => {
-                query.push(" AND resource->>'birthDate' = ");
-                query.push_bind(value.clone());
-            }
-            SearchFilter::PatientIdentifier { system, value } => {
-                query.push(" AND COALESCE(resource->'identifier', '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('value', to_jsonb(");
-                query.push_bind(value.clone());
-                query.push("::text)");
-
-                if let Some(system) = system {
-                    query.push(", 'system', to_jsonb(");
-                    query.push_bind(system.clone());
-                    query.push("::text)");
-                }
-
-                query.push("))");
-            }
-            SearchFilter::ObservationCode(value) => {
-                query.push(" AND COALESCE(resource->'code'->'coding', '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('code', to_jsonb(");
-                query.push_bind(value.clone());
-                query.push("::text)))");
-            }
-            SearchFilter::ObservationStatus(value) => {
-                query.push(" AND resource->>'status' = ");
-                query.push_bind(value.clone());
-            }
-            SearchFilter::ObservationSubject(value) => {
-                query.push(" AND resource->'subject'->>'reference' = ");
-                query.push_bind(value.clone());
-            }
-        }
     }
 }
