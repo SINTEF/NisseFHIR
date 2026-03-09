@@ -32,7 +32,7 @@ impl FhirSchemaValidator {
         let issues: Vec<_> = validator
             .iter_errors(resource)
             .map(|error| {
-                let path = error.instance_path.to_string();
+                let path = error.instance_path().to_string();
                 let diagnostics = if path.is_empty() {
                     error.to_string()
                 } else {

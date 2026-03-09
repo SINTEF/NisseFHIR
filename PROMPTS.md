@@ -55,7 +55,17 @@ Initial implementation is fully completed and validated: Rust FHIR server scaffo
 Can you please continue the good work on this project following #file:fhir-specs.md ? I think we are getting there but the tests are severely lacking, while I insisted to be the core focus of the task… we have all the data to create excellent tests. feel free to write conversion to generate the tests data, I don't know, right now it sounds like the previous developers discovered what are tests a few hours ago.
 
 ---
+## VScode Claude Opus 4.6/autopilot
+
+Please develop using #file:fhir-specs.md
+
+I notice that we are using many outdated dependencies, let's use cargo outdated first, this is important to make sure we don't fight issues and bugs that long been fixed in the ecosystem.
+
+Also, are we executing the tests in parallel when we can? it looks a bit slow to run all the tests and I guess some parallelization could be possible, especially if we have a good strategy for test data isolation. Or perhaps we already do it and it's just a slow VM? Can you perhaps start by analysing the performance issue once you updated the dependencies?
 
 The database schema needs strong refinements. The current version is only one table, we should at least have some partitioning. I also don't understand the index on the jsonb?? But I think the specs requested one table per data type, right ? isn't that a good idea? Perhaps not? Please continue the good work. I think we should have some serious thoughts on this.
 
-Also, are we executing the tests in parallel when we can? it looks a bit slow to run all the tests and I guess some parallelization could be possible, especially if we have a good strategy for test data isolation. Or perhaps we already do it and it's just a slow VM?
+---
+is postgresql running sir?
+---
+Are we using a postgresql connection pool? Can we continue where we stopped?

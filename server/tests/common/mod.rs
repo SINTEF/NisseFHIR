@@ -1,6 +1,6 @@
 pub mod test_data;
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use axum::{
     body::{Body, to_bytes},
@@ -11,6 +11,13 @@ use jsonwebtoken::{EncodingKey, Header, encode};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tower::ServiceExt;
+
+use fhir_server::validation::FhirSchemaValidator;
+
+/// Shared validator instance — parsing the 3.8 MB FHIR schema once instead of
+/// per-test saves significant CPU time.
+static SHARED_VALIDATOR: LazyLock<Arc<FhirSchemaValidator>> =
+    LazyLock::new(|| Arc::new(FhirSchemaValidator::new().expect("validator should load")));
 
 /// Claims for JWT test tokens.
 #[derive(serde::Serialize)]
@@ -31,7 +38,6 @@ pub fn build_test_app(pool: PgPool) -> Router {
     use fhir_server::{AppState, build_router};
     use fhir_server::auth::AuthConfig;
     use fhir_server::store::PgStore;
-    use fhir_server::validation::FhirSchemaValidator;
 
     let state = AppState {
         store: PgStore::new(pool),
@@ -40,7 +46,7 @@ pub fn build_test_app(pool: PgPool) -> Router {
             allow_unauthenticated: true,
         },
         fhir_base_url: "http://localhost:8080/fhir".to_owned(),
-        validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
+        validator: Arc::clone(&SHARED_VALIDATOR),
     };
 
     build_router(state)
@@ -51,7 +57,6 @@ pub fn build_test_app_auth_required(pool: PgPool) -> Router {
     use fhir_server::{AppState, build_router};
     use fhir_server::auth::AuthConfig;
     use fhir_server::store::PgStore;
-    use fhir_server::validation::FhirSchemaValidator;
 
     let state = AppState {
         store: PgStore::new(pool),
@@ -60,7 +65,7 @@ pub fn build_test_app_auth_required(pool: PgPool) -> Router {
             allow_unauthenticated: false,
         },
         fhir_base_url: "http://localhost:8080/fhir".to_owned(),
-        validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
+        validator: Arc::clone(&SHARED_VALIDATOR),
     };
 
     build_router(state)
@@ -137,9 +142,9 @@ pub fn expired_token(tenant: &str) -> String {
 /// parallel share the database but use the default "public" tenant (when
 /// unauthenticated) or specific tenant identifiers, keeping data isolated.
 ///
-/// The table is cleaned once initially if the `CLEAN_TEST_DB` flag is set,
-/// but individual tests should not rely on an empty database — use unique
-/// resource IDs or specific tenant tokens to avoid collisions.
+/// Each test gets its own pool to avoid cross-runtime lifetime issues
+/// (each #[tokio::test] has its own runtime). The expensive part — parsing
+/// the FHIR schema — is shared via SHARED_VALIDATOR above.
 pub async fn setup_test_db() -> PgPool {
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1/fhir_test".to_owned());
