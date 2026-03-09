@@ -17,3 +17,7 @@ We are validating the JSON schema, but are we validating more using https://bui
 I'm not sure I like the pagination: it seems to be based on offset and count, which is like beginner level pagination and a bit shit to be honest. Can we instead use better pagination, IE: the one that sorts and use the afterId thingy. It's slower but better IMHO.
 
 Is page size configurable ? do we have good tests on pagination ? Can we have a good test where we generate quite  afew documents, nothing dramatic, in which we can test pagination advanced scenarios ?
+
+---
+
+Can you setup CI/CD with github actions? At the same time it would be neat if you add a helm chart to deploy it in kubernetes, with cloudnativepg support (assume it's already installed. You can look at rusty-valkey-forward-auth reference submodule in the root folder to find reference implementation. You can use the helm command (or install it if it's not there yet). We want to release the charts too, so one needs to create an empty gh-pages branch, somehow.

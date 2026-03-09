@@ -8,10 +8,11 @@
 - Added JWT tenant extraction with optional unauthenticated mode
 - Implemented `healthz`, `metadata`, and CRUD (create/read/update/delete) resource routes
 - Added JSON Schema validation against the bundled `fhir.schema.json` with per-resource-type validator caching
+- Added a schema-driven secondary datatype validation pass for calendar-valid `date`/`dateTime`/`instant` values and integer-family primitives (`integer`, `integer64`, `positiveInt`, `unsignedInt`)
 - Returned FHIR `OperationOutcome` bodies for all error responses
 - Added baseline collection search (`GET /fhir/:resource_type`) returning paged FHIR `searchset` Bundles
 - Added first-pass resource-specific search parameters: Patient (`name`, `birthdate`, `identifier`) and Observation (`code`, `status`, `subject`)
-- Comprehensive test suites: 47 unit tests + 96 integration tests (143 total)
+- Comprehensive test suites: 58 unit tests + 104 integration tests (162 total)
 - Capability statement with security metadata (JWT, CORS, scopes), patch interaction, patchFormat
 - Dockerfile for containerized deployment
 - Python E2E harness that boots native or Docker deployments, prefers local PostgreSQL for native runs, scans both the HL7 `examples/` directory and `fhir-test-cases/r5/examples/` in parallel by inferred `resourceType`, classifies accepted/invalid/unsupported/payload-too-large outcomes, and runs real CRUD/search checks over HTTP
@@ -31,3 +32,4 @@
 4. Expand search support to additional resource types and closer FHIR semantics where needed.
 5. Add ND-JSON bulk data export support.
 6. Add CI pipeline with disposable PostgreSQL and run the Python E2E harness in both native and Docker modes.
+7. Extend secondary validation beyond the current primitive slice: decimal precision/range, URI-like primitive semantics, and selected complex datatype invariants that JSON Schema does not enforce.

@@ -174,3 +174,10 @@ Let's simplify:
 Perhaps one could use a python script in the scripts folder to generate valid tokens in static mode, as long as they use the same JWT_SECRET ?
 
 what's the tenant by default btw ? do we use aud or iss ?
+
+---
+## VScode GPT-5.4/autopilot
+
+We are validating the JSON schema, but are we validating more using https://build.fhir.org/datatypes.html ? Is it part of the JSON schema ? Can you write some unit test to test the limits and see if we accept and refuse stuff, in a classic test driven development, and then implement what is needed based on the results, and iterate ?
+---
+yes I think you can continue to the next steps. For some of the validation, I assume that you can find existing crates? If it's too difficult? But good job. Let's continue on this task with a TDD approach. write the tests first, they should fail, implement, see, iterate. thank you.

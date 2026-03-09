@@ -16,7 +16,7 @@ Existing FHIR servers are [Not Invented Here](https://en.wikipedia.org/wiki/Not_
 
 Software development has changed dramastically in the last years with the arrival of AI agents. It is now possible to develop complex software in a matter of hours, which can be tailored to very specific needs. This is a dramatic change to software engineering, as before one would almost never reinvent a wheel and rather spend time adapting to existing software.
 
-While intimidating at first, a FHIR server is also not a huge piece of software.
+While intimidating at first, a FHIR server is also not a huge piece of software if you restrict yourself to the most common and useful features.
 
 ## AI Agents cannot write good enough FHIR servers on their own
 
@@ -24,13 +24,15 @@ Reading the [Anthropic advertising experiment](https://www.anthropic.com/enginee
 
 In early March 2026, using a mix of GPT-5.4 and Claude Opus 4.6, this did not work. Not at all.
 
-I therefore reverted to have a human expert in the loop, to guide the AI agents. The author did develop a FHIR 5 server in Golang for a healthcare company years before, and had experience with the FHIR specifications. The server was used in production for years, and it eventually got replaced by something arguably better. Learning from this experience, it was easy to guide the AI agents, to not repeat the same mistakes but also quickly implement the important features.
+Perhaps bruteforcing the problem with infinite money could make it work eventually, but I reverted to the classic human expert in the loop, guiding AI agents.
+
+The author did develop a FHIR 5 server in Golang for a healthcare company years ago, and had experience with the FHIR specifications. The server was used in production for years, and it eventually got replaced by something arguably better. Learning from this experience, it was easy to guide the AI agents, to not repeat the same mistakes but also quickly implement the important features.
 
 You can read the [PROMPTS.md](./PROMPTS.md) file for the list of prompts used during the development.
 
-## Software Stack
+## Software Stack and Architecture
 
-NisseFHIR is written in Rust, and uses PostgreSQL as the database.
+NisseFHIR is written in Rust, and uses PostgreSQL as the database. It is stateless and can scale horizontally.
 
 ## Security
 

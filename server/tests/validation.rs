@@ -241,6 +241,35 @@ async fn rejects_patient_with_wrong_type_birthdate() {
 }
 
 #[tokio::test]
+async fn rejects_patient_with_invalid_calendar_birthdate() {
+    let (app, token) = setup("validation-invalid-calendar-date").await;
+    let patient = json!({
+        "resourceType": "Patient",
+        "birthDate": "2024-02-30"
+    });
+
+    let (status, body) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_operation_outcome(&body, "invalid");
+}
+
+#[tokio::test]
+async fn rejects_patient_with_invalid_positive_int_extension() {
+    let (app, token) = setup("validation-invalid-positive-int").await;
+    let patient = json!({
+        "resourceType": "Patient",
+        "extension": [{
+            "url": "http://example.org/fhir/StructureDefinition/test-positive-int",
+            "valuePositiveInt": 0
+        }]
+    });
+
+    let (status, body) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_operation_outcome(&body, "invalid");
+}
+
+#[tokio::test]
 async fn rejects_unsupported_resource_type() {
     let (app, token) = setup("validation-unsupported-type").await;
     let resource = json!({
