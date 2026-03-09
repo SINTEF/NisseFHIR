@@ -15,7 +15,20 @@ pub fn capability_statement(base_url: &str) -> Value {
                     "interaction": [
                         {"code": "create"},
                         {"code": "read"},
-                        {"code": "update"}
+                        {"code": "update"},
+                        {"code": "search-type"}
+                    ],
+                    "searchParam": [
+                        {
+                            "name": "_count",
+                            "type": "number",
+                            "documentation": "Limits the number of resources returned per page."
+                        },
+                        {
+                            "name": "_offset",
+                            "type": "number",
+                            "documentation": "Skips a number of resources before returning the current page."
+                        }
                     ]
                 }
             ]
@@ -70,6 +83,22 @@ mod tests {
         assert!(codes.contains(&"create"));
         assert!(codes.contains(&"read"));
         assert!(codes.contains(&"update"));
+        assert!(codes.contains(&"search-type"));
+    }
+
+    #[test]
+    fn capability_lists_search_parameters() {
+        let value = capability_statement("http://localhost:8080/fhir");
+        let search_params = value["rest"][0]["resource"][0]["searchParam"]
+            .as_array()
+            .unwrap();
+        let names: Vec<&str> = search_params
+            .iter()
+            .map(|param| param["name"].as_str().unwrap())
+            .collect();
+
+        assert!(names.contains(&"_count"));
+        assert!(names.contains(&"_offset"));
     }
 
     #[test]

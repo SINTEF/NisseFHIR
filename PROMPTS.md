@@ -69,3 +69,11 @@ The database schema needs strong refinements. The current version is only one ta
 is postgresql running sir?
 ---
 Are we using a postgresql connection pool? Can we continue where we stopped?
+---
+## Vscode GPT-5.4/autopilot
+
+Can you continue the good work following #file:fhir-specs.md ?
+---
+## VScode Claude Opus 4.6/autopilot
+
+Can you review what is done and what is missing according to #file:fhir-specs.md ? And then make a plan, write relevant documents, and keep working on the project until it's finished in a correct satisfactory state? Thank you

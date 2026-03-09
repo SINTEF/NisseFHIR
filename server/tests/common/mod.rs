@@ -227,6 +227,34 @@ pub fn get_resource_with_token(resource_type: &str, id: &str, token: &str) -> Re
         .expect("request should build")
 }
 
+/// Build a GET request to search a FHIR resource collection.
+pub fn search_resource(resource_type: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!("/fhir/{resource_type}"))
+        .body(Body::empty())
+        .expect("request should build")
+}
+
+/// Build an authenticated GET request to search a FHIR resource collection.
+pub fn search_resource_with_token(
+    resource_type: &str,
+    query: Option<&str>,
+    token: &str,
+) -> Request<Body> {
+    let uri = match query {
+        Some(query) => format!("/fhir/{resource_type}?{query}"),
+        None => format!("/fhir/{resource_type}"),
+    };
+
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request should build")
+}
+
 /// Build a PUT request to update a FHIR resource.
 pub fn put_resource(resource_type: &str, id: &str, body: &Value) -> Request<Body> {
     Request::builder()

@@ -15,6 +15,11 @@ pub struct StoredResource {
     pub resource: Value,
 }
 
+pub struct SearchResults {
+    pub total: i64,
+    pub resources: Vec<StoredResource>,
+}
+
 impl PgStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -81,5 +86,52 @@ impl PgStore {
             last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
             resource: row.get::<Value, _>("resource"),
         })
+    }
+
+    pub async fn search(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<SearchResults, AppError> {
+        let total = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM fhir_resources
+            WHERE tenant_id = $1 AND resource_type = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT version_id, last_updated, resource
+            FROM fhir_resources
+            WHERE tenant_id = $1 AND resource_type = $2
+            ORDER BY last_updated DESC, id ASC
+            LIMIT $3 OFFSET $4
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let resources = rows
+            .into_iter()
+            .map(|row| StoredResource {
+                version_id: row.get::<i64, _>("version_id"),
+                last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
+                resource: row.get::<Value, _>("resource"),
+            })
+            .collect();
+
+        Ok(SearchResults { total, resources })
     }
 }
