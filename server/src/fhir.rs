@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use json_patch::patch as apply_json_patch;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -23,7 +24,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/fhir/{resource_type}/{id}",
-            get(read_resource).put(update_resource).delete(delete_resource),
+            get(read_resource)
+                .put(update_resource)
+                .patch(patch_resource)
+                .delete(delete_resource),
         )
 }
 
@@ -31,22 +35,27 @@ const DEFAULT_SEARCH_COUNT: u32 = 20;
 const MAX_SEARCH_COUNT: u32 = 100;
 
 #[derive(Debug, Default, Deserialize)]
-struct SearchParams {
+pub struct SearchParams {
     #[serde(rename = "_count")]
     count: Option<u32>,
     #[serde(rename = "_offset")]
     offset: Option<u32>,
 }
 
-async fn healthz() -> impl IntoResponse {
+#[utoipa::path(get, path = "/healthz", responses((status = 200, description = "Server is healthy")))]
+pub async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "ok"})))
 }
 
-async fn get_metadata(State(state): State<AppState>) -> impl IntoResponse {
+#[utoipa::path(get, path = "/metadata", responses((status = 200, description = "FHIR CapabilityStatement")))]
+pub async fn get_metadata(State(state): State<AppState>) -> impl IntoResponse {
     Json(capability_statement(&state.fhir_base_url))
 }
 
-async fn search_resources(
+#[utoipa::path(get, path = "/fhir/{resource_type}",
+    params(("resource_type" = String, Path, description = "FHIR resource type")),
+    responses((status = 200, description = "Search results Bundle"), (status = 403, description = "Forbidden")))]
+pub async fn search_resources(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(resource_type): Path<String>,
@@ -82,7 +91,10 @@ async fn search_resources(
     Ok((StatusCode::OK, response).into_response())
 }
 
-async fn create_resource(
+#[utoipa::path(post, path = "/fhir/{resource_type}",
+    params(("resource_type" = String, Path, description = "FHIR resource type")),
+    responses((status = 201, description = "Resource created"), (status = 400, description = "Validation error"), (status = 413, description = "Payload too large")))]
+pub async fn create_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(resource_type): Path<String>,
@@ -127,7 +139,10 @@ async fn create_resource(
     Ok((StatusCode::CREATED, response_headers, Json(stored.resource)).into_response())
 }
 
-async fn read_resource(
+#[utoipa::path(get, path = "/fhir/{resource_type}/{id}",
+    params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
+    responses((status = 200, description = "Resource found"), (status = 404, description = "Not found")))]
+pub async fn read_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((resource_type, id)): Path<(String, String)>,
@@ -159,7 +174,10 @@ async fn read_resource(
     Ok((StatusCode::OK, response_headers, Json(resource.resource)).into_response())
 }
 
-async fn update_resource(
+#[utoipa::path(put, path = "/fhir/{resource_type}/{id}",
+    params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
+    responses((status = 200, description = "Resource updated"), (status = 400, description = "Validation error"), (status = 413, description = "Payload too large")))]
+pub async fn update_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((resource_type, id)): Path<(String, String)>,
@@ -194,7 +212,10 @@ async fn update_resource(
     Ok((StatusCode::OK, response_headers, Json(stored.resource)).into_response())
 }
 
-async fn delete_resource(
+#[utoipa::path(delete, path = "/fhir/{resource_type}/{id}",
+    params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
+    responses((status = 204, description = "Resource deleted"), (status = 404, description = "Not found")))]
+pub async fn delete_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((resource_type, id)): Path<(String, String)>,
@@ -216,9 +237,77 @@ async fn delete_resource(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+#[utoipa::path(patch, path = "/fhir/{resource_type}/{id}",
+    params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
+    responses((status = 200, description = "Resource patched"), (status = 400, description = "Invalid patch"), (status = 404, description = "Not found")))]
+pub async fn patch_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((resource_type, id)): Path<(String, String)>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let access = extract_access_context(&headers, &state.auth)?;
+    if !access.can_write || !access.can_access_resource_type(&resource_type) {
+        return Err(AppError::Forbidden);
+    }
+
+    let Json(patch_body) = parse_json_payload(payload)?;
+    let patch_ops: json_patch::Patch = serde_json::from_value(patch_body)
+        .map_err(|e| AppError::BadRequest(format!("invalid JSON Patch document: {e}")))?;
+
+    let found = state
+        .store
+        .read(&access.tenant_id, &resource_type, &id)
+        .await?;
+
+    let existing = found.ok_or(AppError::NotFound)?;
+    let mut resource = existing.resource;
+
+    apply_json_patch(&mut resource, &patch_ops)
+        .map_err(|e| AppError::BadRequest(format!("JSON Patch failed: {e}")))?;
+
+    // Ensure resourceType and id are not altered by the patch
+    if resource.get("resourceType").and_then(Value::as_str) != Some(&resource_type) {
+        return Err(AppError::BadRequest(
+            "patch must not change resourceType".to_owned(),
+        ));
+    }
+    if resource.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+        return Err(AppError::BadRequest(
+            "patch must not change resource id".to_owned(),
+        ));
+    }
+
+    state.validator.validate_resource(&resource_type, &resource)?;
+
+    let stored = state
+        .store
+        .upsert(&access.tenant_id, &resource_type, &id, resource)
+        .await?;
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        "ETag",
+        HeaderValue::from_str(&format!("W/\"{}\"", stored.version_id))
+            .map_err(|e| AppError::Internal(format!("invalid ETag header: {e}")))?,
+    );
+    response_headers.insert(
+        "Last-Modified",
+        HeaderValue::from_str(&stored.last_updated.to_rfc3339())
+            .map_err(|e| AppError::Internal(format!("invalid Last-Modified header: {e}")))?,
+    );
+
+    Ok((StatusCode::OK, response_headers, Json(stored.resource)).into_response())
+}
+
 fn parse_json_payload(payload: Result<Json<Value>, JsonRejection>) -> Result<Json<Value>, AppError> {
     payload.map_err(|rejection| {
-        AppError::BadRequest(format!("invalid JSON payload: {}", rejection.body_text()))
+        let message = rejection.body_text();
+        if message.contains("length limit") || message.contains("payload too large") {
+            AppError::PayloadTooLarge
+        } else {
+            AppError::BadRequest(format!("invalid JSON payload: {message}"))
+        }
     })
 }
 

@@ -7,6 +7,7 @@ pub fn capability_statement(base_url: &str) -> Value {
         "kind": "instance",
         "fhirVersion": "6.0.0-ballot3",
         "format": ["json"],
+        "patchFormat": ["application/json-patch+json"],
         "rest": [{
             "mode": "server",
             "security": {
@@ -32,6 +33,7 @@ pub fn capability_statement(base_url: &str) -> Value {
                         {"code": "create"},
                         {"code": "read"},
                         {"code": "update"},
+                        {"code": "patch"},
                         {"code": "delete"},
                         {"code": "search-type"}
                     ],
@@ -100,6 +102,7 @@ mod tests {
         assert!(codes.contains(&"create"));
         assert!(codes.contains(&"read"));
         assert!(codes.contains(&"update"));
+        assert!(codes.contains(&"patch"));
         assert!(codes.contains(&"delete"));
         assert!(codes.contains(&"search-type"));
     }

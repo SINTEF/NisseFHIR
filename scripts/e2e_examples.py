@@ -30,6 +30,10 @@ EXAMPLES_DIR = ROOT_DIR / "examples"
 EXAMPLES_ZIP = EXAMPLES_DIR / "examples-json.zip"
 COMPOSE_FILE = ROOT_DIR / "docker-compose.e2e.yml"
 
+# Additional example directories from fhir-test-cases submodule
+FHIR_TEST_CASES_DIR = ROOT_DIR / "fhir-test-cases"
+R5_EXAMPLES_DIR = FHIR_TEST_CASES_DIR / "r5" / "examples"
+
 EXAMPLES_URL = "https://build.fhir.org/examples-json.zip"
 JWT_SECRET = "e2e-secret"
 JWT_ALGORITHM = "HS256"
@@ -413,19 +417,24 @@ def collect_all_example_files() -> tuple[list[tuple[str, Path]], list[str]]:
     discovered: list[tuple[str, Path]] = []
     skipped: list[str] = []
 
-    for path in sorted(EXAMPLES_DIR.glob("*.json")):
-        try:
-            payload = read_json_file(path)
-        except (OSError, json.JSONDecodeError) as exc:
-            skipped.append(f"{path.name}: unreadable JSON ({exc})")
-            continue
+    scan_dirs = [EXAMPLES_DIR]
+    if R5_EXAMPLES_DIR.is_dir():
+        scan_dirs.append(R5_EXAMPLES_DIR)
 
-        resource_type = payload.get("resourceType")
-        if not isinstance(resource_type, str):
-            skipped.append(f"{path.name}: missing resourceType")
-            continue
+    for scan_dir in scan_dirs:
+        for path in sorted(scan_dir.glob("*.json")):
+            try:
+                payload = read_json_file(path)
+            except (OSError, json.JSONDecodeError) as exc:
+                skipped.append(f"{path.name}: unreadable JSON ({exc})")
+                continue
 
-        discovered.append((resource_type, path))
+            resource_type = payload.get("resourceType")
+            if not isinstance(resource_type, str):
+                skipped.append(f"{path.name}: missing resourceType")
+                continue
+
+            discovered.append((resource_type, path))
 
     return discovered, skipped
 
@@ -519,6 +528,9 @@ def post_example_file(
         if "etag" not in response_headers or "location" not in response_headers:
             raise ExampleValidationError(f"POST response missing headers for {path.name}: {headers}")
         return "accepted", body
+
+    if status == 413:
+        return "payload-too-large", body or {}
 
     if status == 400 and is_operation_outcome(body):
         diagnostics = diagnostics_text(body)
@@ -728,6 +740,7 @@ def run_all_examples_validation(base_url: str, mode: str, workers: int) -> None:
     invalid_count = 0
     unsupported_count = 0
     transport_limited_count = 0
+    payload_too_large_count = 0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {
@@ -756,6 +769,9 @@ def run_all_examples_validation(base_url: str, mode: str, workers: int) -> None:
             elif outcome == "unsupported":
                 unsupported_count += 1
                 log(f"validated {resolved_type}/{resolved_path.name} -> unsupported resource type")
+            elif outcome == "payload-too-large":
+                payload_too_large_count += 1
+                log(f"validated {resolved_type}/{resolved_path.name} -> payload too large (413)")
             else:
                 failures.append(f"{resolved_type}/{resolved_path.name}: unexpected outcome {outcome}")
 
@@ -793,6 +809,9 @@ def run_all_examples_validation(base_url: str, mode: str, workers: int) -> None:
             elif outcome == "unsupported":
                 unsupported_count += 1
                 log(f"validated {resolved_type}/{resolved_path.name} -> unsupported resource type (serial retry)")
+            elif outcome == "payload-too-large":
+                payload_too_large_count += 1
+                log(f"validated {resolved_type}/{resolved_path.name} -> payload too large (serial retry)")
             else:
                 failures.append(f"{resolved_type}/{resolved_path.name}: unexpected outcome {outcome}")
 
@@ -809,7 +828,8 @@ def run_all_examples_validation(base_url: str, mode: str, workers: int) -> None:
     log(
         "validated all scanned examples successfully "
         f"({len(jobs)} files, {accepted_count} accepted, {invalid_count} invalid, "
-        f"{unsupported_count} unsupported, {transport_limited_count} transport-limited, "
+        f"{unsupported_count} unsupported, {payload_too_large_count} payload-too-large, "
+        f"{transport_limited_count} transport-limited, "
         f"{total_ids} stored ids)"
     )
     if skipped:

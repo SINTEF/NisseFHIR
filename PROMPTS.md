@@ -102,8 +102,14 @@ Also we only test 160 files out of 2410 files in the example folder. I think it'
 ---
 ## VScode Claude Opus 4.6/autopilot
 
-I see a lack of utoipa and tower-helmet like in the rusty-valkey-forward-auth example project, do you think we should add them? yes or no?
----
-## VScode Claude Opus 4.6/autopilot
-
 I found the repository fhir-test-cases (that I added as a submodule). It's a bit of a mess to be honest, so you can use it carefully, but I think some stuff may be useful ? can you run explore commands with specific tasks to find out what is useful and write documents about what could be done next?
+
+---
+Good, let's continue and work on this methodically. Here are some thoughts, please organise your work:
+
+- I see a lack of utoipa and tower-helmet like in the rusty-valkey-forward-auth example project, do you think we should add them? yes or no?
+- What is the request size limit? I think the e2e test fail on a 45MB bundle, should we support it?
+- Would you support the json-patch feature? json-patch = "4.1.0" ?
+- I quote: "A natural next step is to make the server return a proper HTTP 413 plus OperationOutcome for oversized payloads instead of letting that 45 MB bundle fail at the transport level.Expanded the E2E harness to scan all example files by parsed resourceType, classify accepted/invalid/unsupported/transport-limited outcomes, verified the full 2410-file run in both native and Docker modes, and updated the Docker builder image and supporting docs to match the broader coverage."
+---
+stop using subagents to read files ffs, use them with proper interesting tasks if you them.

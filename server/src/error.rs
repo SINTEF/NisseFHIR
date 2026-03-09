@@ -32,6 +32,8 @@ pub enum AppError {
     NotFound,
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("payload too large")]
+    PayloadTooLarge,
     #[error("validation failed")]
     Validation(Vec<OperationIssue>),
     #[error("database error")]
@@ -68,6 +70,13 @@ impl IntoResponse for AppError {
             AppError::BadRequest(message) => (
                 StatusCode::BAD_REQUEST,
                 vec![OperationIssue::error("invalid", message)],
+            ),
+            AppError::PayloadTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                vec![OperationIssue::error(
+                    "too-costly",
+                    "request payload exceeds the maximum allowed size",
+                )],
             ),
             AppError::Validation(issues) => (StatusCode::BAD_REQUEST, issues),
             AppError::Database(_) | AppError::Internal(_) => (
@@ -126,6 +135,12 @@ mod tests {
     fn bad_request_maps_to_400() {
         let (status, _) = error_response(AppError::BadRequest("test".to_owned()));
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn payload_too_large_maps_to_413() {
+        let (status, _) = error_response(AppError::PayloadTooLarge);
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[test]
