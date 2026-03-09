@@ -1,4 +1,4 @@
-FROM rust:1.90-slim AS build
+FROM rust:slim AS build
 
 WORKDIR /srv/app
 
@@ -12,7 +12,7 @@ COPY server/Cargo.toml server/Cargo.lock ./server/
 RUN cd server \
     && mkdir src \
     && echo "fn main() {}" > src/main.rs \
-    && cargo fetch \
+    && cargo build --release \
     && rm -rf src
 
 # Copy schema file needed by include_str!("../../fhir.schema.json") at compile time

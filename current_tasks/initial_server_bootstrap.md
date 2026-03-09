@@ -13,7 +13,7 @@
 - Comprehensive test suites: 42 unit tests + 78 integration tests (120 total, all passing)
 - Capability statement with security metadata (JWT, CORS, scopes)
 - Dockerfile for containerized deployment
-- Python E2E harness that boots native or Docker deployments, prefers local PostgreSQL for native runs, scans the full HL7 examples directory in parallel for supported resource types, and runs real CRUD/search checks over HTTP
+- Python E2E harness that boots native or Docker deployments, prefers local PostgreSQL for native runs, scans the full HL7 examples directory in parallel by inferred `resourceType`, classifies accepted/invalid/unsupported/transport-limited outcomes, and runs real CRUD/search checks over HTTP
 - All dependencies up to date (verified with cargo-outdated)
 - Clippy clean with no warnings
 - Performance verified: ~1ms reads, ~4ms creates, ~2ms searches

@@ -88,3 +88,22 @@ I included the examples folder, downloaded from http://build.fhir.org/examples-j
 I would like you to write a script, in python this time, that is a real E2E test: it starts the server, either natively or through docker, and then performs CRUD operations on the server using the examples folder.
 
 If the data isn't there it should download it automatically.
+
+Please test your script with both the native server and the docker container, consider writing a docker compose file to test the system.
+---
+I don't know why you run the native mode on the dockerized postgresql and not the local postgresql sir.
+---
+The dockerfile uses a very outdated rust version. Can you run the python stuff test 2e2 on ALL the examples, perhaps with some paralellism to got faster ?
+---
+I think this is a good first version. Why are we rejecting the 3 examples? I assume that some examples are actually invalid? But the json-edge-cases.json, is it something we should support? Could we instead test them but expect a failure with them?
+
+Also we only test 160 files out of 2410 files in the example folder. I think it's because you have a very restrictive way of selecting the files and the supported resource types. I think it should be better to parse the file and infer the types from the file contents and not their filenames. I think we should support most types, perhaps all. And for the one we don't support, we should assert that we don't support them in the code. Can you improve the tests to do it like this Thank you.
+
+---
+## VScode Claude Opus 4.6/autopilot
+
+I see a lack of utoipa and tower-helmet like in the rusty-valkey-forward-auth example project, do you think we should add them? yes or no?
+---
+## VScode Claude Opus 4.6/autopilot
+
+I found the repository fhir-test-cases (that I added as a submodule). It's a bit of a mess to be honest, so you can use it carefully, but I think some stuff may be useful ? can you run explore commands with specific tasks to find out what is useful and write documents about what could be done next?
