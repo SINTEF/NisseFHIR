@@ -1,11 +1,11 @@
 # Index Optimization Follow-ups
 
-## Current State (after migration 0005)
+## Current State (after migrations 0005 and 0007)
 
 60 search-specific indexes across 17 key resource types covering:
 
 | Pattern | Index Type | Example |
-|---------|-----------|---------|
+| ------- | ---------- | ------- |
 | Scalar tokens (`status`, `gender`, `active`, `use`) | btree on `(tenant_id, resource->>'field')` | `idx_fhir_res_encounter_status` |
 | Identifier arrays (`identifier`) | GIN `jsonb_path_ops` on `resource->'identifier'` | `idx_fhir_res_encounter_identifier_gin` |
 | Scalar references (`subject.reference`, `encounter.reference`) | btree on `(tenant_id, resource->'field'->>'reference')` | `idx_fhir_res_condition_subject_ref` |
@@ -15,27 +15,31 @@
 
 ### 1. CodeableConcept Token Searches (e.g., `code`, `category`, `type`)
 
-**Problem**: The current SQL for token fields like `code` uses `jsonb_array_elements()` + `WHERE coding->>'code' = $1`, which is a per-row set-returning function. No index can accelerate this pattern.
+**Status**: Partially completed.
 
-**Fix**: Rewrite the CodeableConcept branch of `push_token_single_field()` in `sql.rs` to use `@>` containment instead:
-```sql
--- Current (un-indexable):
-EXISTS (SELECT 1 FROM jsonb_array_elements(resource->'code'->'coding') AS c WHERE c->>'code' = $1)
+The SQL builder now uses JSONB containment (`@>`) in `push_token_single_field()` for:
 
--- Better (GIN-indexable):
-resource->'code'->'coding' @> jsonb_build_array(jsonb_build_object('code', $1))
-```
-Then add GIN indexes: `CREATE INDEX ... USING GIN ((resource->'code'->'coding') jsonb_path_ops)`.
+- `resource->'<field>'->'coding'` object-style CodeableConcepts, and
+- `resource->'<field>'` arrays of CodeableConcept objects.
 
-**Affected params**: `code`, `category`, `type`, `clinicalStatus`, `verificationStatus` on Observation, Condition, Procedure, DiagnosticReport, etc.
+This enables GIN index usage for common token queries where fields are mapped as single-level token paths.
 
-**Note**: The existing `idx_fhir_res_observation_coding_gin` from migration 0003 is currently unused because of this query pattern mismatch.
+Migration `0007_add_codeableconcept_search_indexes.sql` adds targeted indexes for high-traffic resources/fields including:
+
+- Observation `category`
+- Condition `code`, `category`, `clinicalStatus`, `verificationStatus`
+- Procedure `code`, `category`
+- DiagnosticReport `code`, `category`
+- ServiceRequest `code`, `category`
+
+**Remaining caveat**: Nested token paths that still rely on element-wise `jsonb_array_elements(...)` (e.g., some `JsonPath::Field` with multi-segment paths) are not fully index-accelerated yet.
 
 ### 2. String Searches (`name`, `address`, `family`)
 
 **Problem**: String searches use `lower(resource->>'field') LIKE '%term%'` with a leading wildcard. Btree indexes cannot help with leading-wildcard LIKE.
 
 **Fix**: Install `pg_trgm` extension and create GIN trigram indexes:
+
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX ... USING GIN (lower(resource->>'name') gin_trgm_ops);
@@ -54,6 +58,7 @@ The remaining ~110 resource types have no search-specific indexes (only the inhe
 ### 5. NULL-Heavy Columns
 
 Currently no partial indexes are used. If a specific column is NULL in >90% of rows (e.g., `encounter` on resources that don't always reference an encounter), a partial index with `WHERE resource->'encounter' IS NOT NULL` would save space. Monitor with:
+
 ```sql
 SELECT resource_type,
        count(*) AS total,
@@ -66,6 +71,6 @@ GROUP BY resource_type;
 
 ## Priority Order for Follow-ups
 
-1. **High**: CodeableConcept `@>` rewrite — this unlocks indexing for `code`, `category`, `type` searches, which are among the most common clinical queries
+1. **Medium**: Extend containment-based rewrites to selected nested token paths in `push_token_nested_field()` where feasible
 2. **Medium**: `pg_trgm` for string searches — needed for patient name lookup
 3. **Low**: WhereFilter indexes, partial indexes, additional resource type coverage

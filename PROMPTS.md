@@ -226,3 +226,6 @@ Can we update the CI for the chart release that when we tag, we replace the cha
 file:fhir-specs.md
 ---
 Excellent! did you make good tests related to the history feature ? can you use the code coverage tool (llvm-cov?) to make sure we are doing that well too ?
+---
+## VScode GPT-5.3-Codex/autopilot
+Please continue as stated in file:fhir-specs.md

@@ -242,30 +242,37 @@ fn push_token_single_field(
             query.push("' = ");
             query.push_bind(code.to_owned());
 
-            // Also check CodeableConcept.coding array
-            query.push(" OR EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(resource->'");
+            // Also check CodeableConcept.coding with JSON containment so a
+            // GIN index on (resource->'<field>'->'coding') can be used.
+            query.push(" OR resource->'");
             query.push(field);
-            query.push("'->'coding', '[]'::jsonb)) AS coding WHERE coding->>'code' = ");
+            query.push("'->'coding' @> jsonb_build_array(jsonb_build_object('code', to_jsonb(");
             query.push_bind(code.to_owned());
+            query.push("::text)");
 
             if let Some(sys) = system {
-                query.push(" AND coding->>'system' = ");
+                query.push(", 'system', to_jsonb(");
                 query.push_bind(sys.to_owned());
+                query.push("::text)");
             }
 
-            query.push(")");
+            query.push("))");
 
             // Also check if it's an array of CodeableConcept
             let arr = safe_array_elements(&format!("resource->'{field}'"));
-            query.push(&format!(" OR EXISTS (SELECT 1 FROM {arr} AS elem, jsonb_array_elements(COALESCE(elem->'coding', '[]'::jsonb)) AS coding WHERE coding->>'code' = "));
+            query.push(" OR resource->'");
+            query.push(field);
+            query.push("' @> jsonb_build_array(jsonb_build_object('coding', jsonb_build_array(jsonb_build_object('code', to_jsonb(");
             query.push_bind(code.to_owned());
+            query.push("::text)");
 
             if let Some(sys) = system {
-                query.push(" AND coding->>'system' = ");
+                query.push(", 'system', to_jsonb(");
                 query.push_bind(sys.to_owned());
+                query.push("::text)");
             }
 
-            query.push(")");
+            query.push("))))");
 
             // Check array of identifiers
             query.push(&format!(
@@ -945,5 +952,35 @@ mod tests {
         let sql = query.into_sql();
         // Should not add any condition for invalid input
         assert_eq!(sql, "SELECT 1 FROM t WHERE 1=1");
+    }
+
+    #[test]
+    fn token_single_field_uses_containment_for_codeableconcept() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_token_single_field(&mut query, "code", None, "1234-5");
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("resource->'code'->'coding' @> jsonb_build_array(jsonb_build_object('code', to_jsonb("),
+            "expected containment-based coding match, got: {sql}"
+        );
+        assert!(
+            !sql.contains("jsonb_array_elements(COALESCE(resource->'code'->'coding'"),
+            "expected old jsonb_array_elements coding match to be removed, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn token_single_field_array_codeableconcept_uses_containment() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_token_single_field(&mut query, "category", Some("http://loinc.org"), "laboratory");
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("resource->'category' @> jsonb_build_array(jsonb_build_object('coding', jsonb_build_array(jsonb_build_object('code', to_jsonb("),
+            "expected containment-based array CodeableConcept match, got: {sql}"
+        );
+        assert!(
+            sql.contains("'system', to_jsonb("),
+            "expected system constraint in containment query, got: {sql}"
+        );
     }
 }
