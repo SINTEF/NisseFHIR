@@ -16,6 +16,9 @@ use crate::{DEFAULT_MAX_SEARCH_PAGE_COUNT, DEFAULT_SEARCH_PAGE_COUNT, SearchConf
 pub struct AppConfig {
     pub bind_addr: String,
     pub database_url: String,
+    pub db_connect_timeout_secs: u64,
+    pub db_acquire_timeout_secs: u64,
+    pub db_statement_timeout_ms: u64,
     pub auth: AuthConfig,
     pub fhir_base_url: String,
     pub search: SearchConfig,
@@ -27,6 +30,21 @@ impl AppConfig {
     pub fn from_env() -> Result<Self> {
         let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
         let database_url = env::var("DATABASE_URL").context("missing DATABASE_URL")?;
+        let db_connect_timeout_secs = parse_u64_env_var("DB_CONNECT_TIMEOUT_SECS")?.unwrap_or(5);
+        let db_acquire_timeout_secs = parse_u64_env_var("DB_ACQUIRE_TIMEOUT_SECS")?.unwrap_or(5);
+        let db_statement_timeout_ms =
+            parse_u64_env_var("DB_STATEMENT_TIMEOUT_MS")?.unwrap_or(10_000);
+
+        if db_connect_timeout_secs == 0 {
+            bail!("DB_CONNECT_TIMEOUT_SECS must be greater than 0");
+        }
+        if db_acquire_timeout_secs == 0 {
+            bail!("DB_ACQUIRE_TIMEOUT_SECS must be greater than 0");
+        }
+        if db_statement_timeout_ms == 0 {
+            bail!("DB_STATEMENT_TIMEOUT_MS must be greater than 0");
+        }
+
         let fhir_base_url =
             env::var("FHIR_BASE_URL").unwrap_or_else(|_| "http://localhost:8080/fhir".to_owned());
         let search = load_search_config()?;
@@ -37,6 +55,9 @@ impl AppConfig {
         Ok(Self {
             bind_addr,
             database_url,
+            db_connect_timeout_secs,
+            db_acquire_timeout_secs,
+            db_statement_timeout_ms,
             auth,
             fhir_base_url,
             search,
@@ -224,6 +245,17 @@ fn parse_u32_env_var(name: &str) -> Result<Option<u32>> {
         .map(|value| {
             value
                 .parse::<u32>()
+                .with_context(|| format!("{name} must be an unsigned integer"))
+        })
+        .transpose()
+}
+
+fn parse_u64_env_var(name: &str) -> Result<Option<u64>> {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u64>()
                 .with_context(|| format!("{name} must be an unsigned integer"))
         })
         .transpose()
@@ -688,6 +720,9 @@ mod tests {
         with_env_vars(
             &[
                 ("DATABASE_URL", Some("postgres://localhost/test")),
+                ("DB_CONNECT_TIMEOUT_SECS", Some("6")),
+                ("DB_ACQUIRE_TIMEOUT_SECS", Some("7")),
+                ("DB_STATEMENT_TIMEOUT_MS", Some("8000")),
                 ("BIND_ADDR", Some("127.0.0.1:9090")),
                 ("FHIR_BASE_URL", Some("http://localhost:9090/fhir")),
                 ("SEARCH_DEFAULT_COUNT", Some("15")),
@@ -706,6 +741,9 @@ mod tests {
                 let config = AppConfig::from_env().unwrap();
                 assert_eq!(config.bind_addr, "127.0.0.1:9090");
                 assert_eq!(config.database_url, "postgres://localhost/test");
+                assert_eq!(config.db_connect_timeout_secs, 6);
+                assert_eq!(config.db_acquire_timeout_secs, 7);
+                assert_eq!(config.db_statement_timeout_ms, 8000);
                 assert_eq!(config.fhir_base_url, "http://localhost:9090/fhir");
                 assert_eq!(config.search.default_count, 15);
                 assert_eq!(config.search.max_count, 60);
@@ -735,6 +773,56 @@ mod tests {
                 assert!(error.to_string().contains(
                     "SEARCH_DEFAULT_COUNT must be less than or equal to SEARCH_MAX_COUNT"
                 ));
+            },
+        );
+    }
+
+    #[test]
+    fn from_env_uses_default_db_timeouts_when_unset() {
+        with_env_vars(
+            &[
+                ("DATABASE_URL", Some("postgres://localhost/test")),
+                ("DB_CONNECT_TIMEOUT_SECS", None),
+                ("DB_ACQUIRE_TIMEOUT_SECS", None),
+                ("DB_STATEMENT_TIMEOUT_MS", None),
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("a-very-long-secret-at-least-32-chars!!")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let config = AppConfig::from_env().unwrap();
+                assert_eq!(config.db_connect_timeout_secs, 5);
+                assert_eq!(config.db_acquire_timeout_secs, 5);
+                assert_eq!(config.db_statement_timeout_ms, 10_000);
+            },
+        );
+    }
+
+    #[test]
+    fn from_env_rejects_zero_db_statement_timeout() {
+        with_env_vars(
+            &[
+                ("DATABASE_URL", Some("postgres://localhost/test")),
+                ("DB_STATEMENT_TIMEOUT_MS", Some("0")),
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("a-very-long-secret-at-least-32-chars!!")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let error = AppConfig::from_env().unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("DB_STATEMENT_TIMEOUT_MS must be greater than 0")
+                );
             },
         );
     }

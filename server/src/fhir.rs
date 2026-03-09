@@ -467,9 +467,7 @@ fn parse_if_match_version(headers: &HeaderMap) -> Result<Option<i64>, AppError> 
     };
 
     let version = version_text.parse::<i64>().map_err(|_| {
-        AppError::BadRequest(
-            "If-Match must be an integer version ETag like W/\"3\"".to_owned(),
-        )
+        AppError::BadRequest("If-Match must be an integer version ETag like W/\"3\"".to_owned())
     })?;
 
     if version < 1 {

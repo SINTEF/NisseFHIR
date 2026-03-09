@@ -499,7 +499,9 @@ async fn patch_without_if_match_succeeds() {
         .uri("/fhir/Patient/patch-missing-if-match-1")
         .header("content-type", "application/json-patch+json")
         .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
-        .body(axum::body::Body::from(serde_json::to_string(&patch).unwrap()))
+        .body(axum::body::Body::from(
+            serde_json::to_string(&patch).unwrap(),
+        ))
         .unwrap();
 
     let (status, body) = send_request(app, request).await;

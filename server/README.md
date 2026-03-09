@@ -25,6 +25,9 @@ Initial lightweight FHIR 6.0 server implementation in Rust.
 ### Core
 
 - `DATABASE_URL` (required)
+- `DB_CONNECT_TIMEOUT_SECS` (default: `5`)
+- `DB_ACQUIRE_TIMEOUT_SECS` (default: `5`)
+- `DB_STATEMENT_TIMEOUT_MS` (default: `10000`)
 - `BIND_ADDR` (default: `0.0.0.0:8080`)
 - `FHIR_BASE_URL` (default: `http://localhost:8080/fhir`)
 - `SEARCH_DEFAULT_COUNT` (default: `20`)

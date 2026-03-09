@@ -972,7 +972,12 @@ mod tests {
     #[test]
     fn token_single_field_array_codeableconcept_uses_containment() {
         let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_token_single_field(&mut query, "category", Some("http://loinc.org"), "laboratory");
+        push_token_single_field(
+            &mut query,
+            "category",
+            Some("http://loinc.org"),
+            "laboratory",
+        );
         let sql = query.into_sql();
         assert!(
             sql.contains("resource->'category' @> jsonb_build_array(jsonb_build_object('coding', jsonb_build_array(jsonb_build_object('code', to_jsonb("),

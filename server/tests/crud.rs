@@ -339,11 +339,7 @@ async fn update_sets_id_from_url() {
     let app = build_test_app_auth_required(pool.clone());
     let mut create = test_data::minimal_patient();
     create["id"] = serde_json::json!("url-id-test");
-    let (status, _) = send_request(
-        app,
-        post_resource_with_token("Patient", &create, &token),
-    )
-    .await;
+    let (status, _) = send_request(app, post_resource_with_token("Patient", &create, &token)).await;
     assert_eq!(status, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool);
@@ -365,11 +361,7 @@ async fn update_rejects_mismatched_id() {
     let app = build_test_app_auth_required(pool.clone());
     let mut create = test_data::minimal_patient();
     create["id"] = serde_json::json!("url-id");
-    let (status, _) = send_request(
-        app,
-        post_resource_with_token("Patient", &create, &token),
-    )
-    .await;
+    let (status, _) = send_request(app, post_resource_with_token("Patient", &create, &token)).await;
     assert_eq!(status, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool);
@@ -390,11 +382,7 @@ async fn update_rejects_mismatched_resource_type() {
     let app = build_test_app_auth_required(pool.clone());
     let mut create = test_data::minimal_patient();
     create["id"] = serde_json::json!("minimal-obs");
-    let (status, _) = send_request(
-        app,
-        post_resource_with_token("Patient", &create, &token),
-    )
-    .await;
+    let (status, _) = send_request(app, post_resource_with_token("Patient", &create, &token)).await;
     assert_eq!(status, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool);
@@ -522,7 +510,9 @@ async fn update_without_if_match_succeeds() {
         .uri("/fhir/Patient/minimal-patient")
         .header("content-type", "application/json")
         .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
-        .body(axum::body::Body::from(serde_json::to_string(&patient).unwrap()))
+        .body(axum::body::Body::from(
+            serde_json::to_string(&patient).unwrap(),
+        ))
         .unwrap();
 
     let (status, body) = send_request(app, request).await;

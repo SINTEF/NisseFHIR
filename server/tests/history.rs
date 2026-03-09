@@ -45,7 +45,10 @@ async fn history_returns_bundle_with_versions_descending() {
         body["link"][0]["url"],
         "http://localhost:8080/fhir/Patient/minimal-patient/_history"
     );
-    assert_eq!(body["entry"][0]["request"]["url"], "Patient/minimal-patient");
+    assert_eq!(
+        body["entry"][0]["request"]["url"],
+        "Patient/minimal-patient"
+    );
     assert_eq!(body["entry"][0]["response"]["etag"], "W/\"2\"");
     assert_eq!(body["entry"][1]["response"]["etag"], "W/\"1\"");
     assert_eq!(body["entry"][0]["resource"]["active"], true);

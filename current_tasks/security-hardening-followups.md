@@ -17,12 +17,15 @@
 	- when provided and stale, server returns `412 Precondition Failed`
 	- when omitted, updates remain compatible and proceed normally
 - Split `PUT` from create semantics so update no longer upserts missing resources.
+- Added database hardening controls:
+	- configurable `DB_CONNECT_TIMEOUT_SECS` for PostgreSQL connect handshake timeout
+	- configurable `DB_ACQUIRE_TIMEOUT_SECS` for pooled connection checkout timeout
+	- configurable `DB_STATEMENT_TIMEOUT_MS` applied via `set_config('statement_timeout', ...)` on every new DB session
 
 ## Remaining work
 
-1. Add database connection and statement timeouts to reduce DoS blast radius.
-2. Decide whether `application/fhir+json` should replace `application/json` in responses.
-3. Document deployment expectations around reverse-proxy TLS termination and trusted CORS origins in the root project docs.
+1. Decide whether `application/fhir+json` should replace `application/json` in responses.
+2. Document deployment expectations around reverse-proxy TLS termination and trusted CORS origins in the root project docs.
 
 ## Notes
 

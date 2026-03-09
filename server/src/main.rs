@@ -5,16 +5,33 @@ use fhir_server::{
 };
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     let config = AppConfig::from_env()?;
+    let mut db_url = url::Url::parse(&config.database_url)
+        .with_context(|| "failed to parse DATABASE_URL")?;
+    db_url
+        .query_pairs_mut()
+        .append_pair("connect_timeout", &config.db_connect_timeout_secs.to_string());
+    let statement_timeout_ms = config.db_statement_timeout_ms;
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
-        .connect(&config.database_url)
+        .acquire_timeout(Duration::from_secs(config.db_acquire_timeout_secs))
+        .after_connect(move |conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+                    .bind(statement_timeout_ms.to_string())
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(db_url.as_str())
         .await
         .with_context(|| "failed to connect to PostgreSQL")?;
 

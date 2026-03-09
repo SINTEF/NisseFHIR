@@ -233,3 +233,6 @@ Please continue as stated in file:fhir-specs.md
 I understand, but isn't If-Match optional, or is it mandatory in the FHIR spec ? I don't want a breaking change that is not compliant to be honest.
 ---
 Alright, make sure the tests still passes, the end2end, in rust, in python, everything. Let's go!
+---
+## VScode GPT-5.3-Codex/autopilot
+Please continue as stated in file:fhir-specs.md Thanks.

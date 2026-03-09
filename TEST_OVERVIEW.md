@@ -6,6 +6,7 @@
 
 - `auth::tests` — JWT validation, scope parsing, resource allow-list case sensitivity, tenant claim precedence, missing-exp rejection, malformed bearer rejection, JWKS missing/unknown kid rejection, dev-mode self-verification.
 - `capability::tests` — Capability statement shape: resource type, FHIR version, status, server mode, supported interactions (create/read/update/delete/patch/search-type), generic search parameters, Patient/Observation resource-specific search parameters, patchFormat, implementation URL, JSON-only format.
+- `config::tests` — Environment parsing and validation for auth/search/http settings, including hardened database timeout controls (`DB_CONNECT_TIMEOUT_SECS`, `DB_ACQUIRE_TIMEOUT_SECS`, `DB_STATEMENT_TIMEOUT_MS`) and rejection of unsafe zero values.
 - `error::tests` — OperationOutcome mapping for all error variants (400/401/403/404/413/500), issue severity and codes.
 - `fhir::tests` — ID generation for create, resourceType mismatch rejection, search bundle cursor-link structure, resource-specific search parameter parsing, identifier filter parsing, schema validation OperationOutcome, malformed JSON OperationOutcome.
 - `search_params::sql::tests` — SQL-generation safety/behavior for token parsing and geospatial filters, plus regression coverage ensuring CodeableConcept token searches use containment-based (`@>`) predicates rather than `jsonb_array_elements` for single-field paths.
