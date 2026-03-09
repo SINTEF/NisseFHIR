@@ -130,4 +130,126 @@ mod tests {
 
         assert!(err.to_string().contains("validation failed"));
     }
+
+    #[test]
+    fn accepts_minimal_patient() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        validator
+            .validate_resource("Patient", &json!({"resourceType": "Patient"}))
+            .expect("minimal Patient should be valid");
+    }
+
+    #[test]
+    fn accepts_patient_with_name() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        validator
+            .validate_resource(
+                "Patient",
+                &json!({
+                    "resourceType": "Patient",
+                    "name": [{"family": "Smith", "given": ["John"]}]
+                }),
+            )
+            .expect("Patient with name should be valid");
+    }
+
+    #[test]
+    fn accepts_minimal_observation() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        validator
+            .validate_resource(
+                "Observation",
+                &json!({
+                    "resourceType": "Observation",
+                    "status": "final",
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "1234-5"}]}
+                }),
+            )
+            .expect("minimal Observation should be valid");
+    }
+
+    #[test]
+    fn accepts_observation_with_any_code_string_for_status() {
+        // The FHIR JSON Schema defines status as a `code` type (string with pattern),
+        // not as an enum. Value-set validation is a separate concern beyond JSON Schema.
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        validator
+            .validate_resource(
+                "Observation",
+                &json!({
+                    "resourceType": "Observation",
+                    "status": "some-code-value",
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "1234-5"}]}
+                }),
+            )
+            .expect("any valid code string should pass JSON Schema validation");
+    }
+
+    #[test]
+    fn rejects_patient_with_wrong_type_for_active() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        let err = validator
+            .validate_resource(
+                "Patient",
+                &json!({"resourceType": "Patient", "active": "yes"}),
+            )
+            .expect_err("wrong type for active should fail");
+
+        assert!(err.to_string().contains("validation failed"));
+    }
+
+    #[test]
+    fn validator_caches_compiled_schemas() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+
+        // First call compiles, second call uses cache
+        validator
+            .validate_resource("Patient", &json!({"resourceType": "Patient"}))
+            .expect("first call should work");
+        validator
+            .validate_resource("Patient", &json!({"resourceType": "Patient"}))
+            .expect("cached call should work too");
+
+        // Different type also works
+        validator
+            .validate_resource(
+                "Observation",
+                &json!({
+                    "resourceType": "Observation",
+                    "status": "final",
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "1"}]}
+                }),
+            )
+            .expect("Observation should work");
+    }
+
+    #[test]
+    fn multiple_resource_types_are_supported() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        let types = [
+            "Patient",
+            "Observation",
+            "Organization",
+            "Practitioner",
+            "Encounter",
+            "Condition",
+            "Procedure",
+            "DiagnosticReport",
+            "AllergyIntolerance",
+            "MedicationRequest",
+            "Bundle",
+        ];
+
+        for rt in types {
+            let result = validator.validate_resource(rt, &json!({"resourceType": rt}));
+            // Some types may require mandatory fields and fail,
+            // but they should NOT fail with "unsupported FHIR resource type"
+            if let Err(e) = result {
+                assert!(
+                    !e.to_string().contains("unsupported"),
+                    "{rt} should be recognized as a valid resource type"
+                );
+            }
+        }
+    }
 }

@@ -3,14 +3,14 @@
 Prompts as requested by the human.
 
 ---
-## VsCode auto/autopilot - 5.3 Codex
+## VsCode auto/autopilot - GPT-5.3-Codex
 
 Good morning. I would like you to start working as stated in #file:fhir-specs.md
 
 Thank you very much.
 
 ---
-## Vscode 5.4/autopilot - 5.4
+## Vscode GPT-5.4/autopilot
 
 Can you please continue the good work on this project folliwing #file:fhir-specs.md ?
 
@@ -48,3 +48,14 @@ Completed the initial FHIR server milestone: scaffolded a Rust Axum/SQLx service
 
 Initial implementation is fully completed and validated: Rust FHIR server scaffold, auth, storage, core endpoints, migration, docs/task notes, and passing tests are all in place.
 ```
+
+---
+## VScode Claude Opus 4.6/autopilot
+
+Can you please continue the good work on this project following #file:fhir-specs.md ? I think we are getting there but the tests are severely lacking, while I insisted to be the core focus of the task… we have all the data to create excellent tests. feel free to write conversion to generate the tests data, I don't know, right now it sounds like the previous developers discovered what are tests a few hours ago.
+
+---
+
+The database schema needs strong refinements. The current version is only one table, we should at least have some partitioning. I also don't understand the index on the jsonb?? But I think the specs requested one table per data type, right ? isn't that a good idea? Perhaps not? Please continue the good work. I think we should have some serious thoughts on this.
+
+Also, are we executing the tests in parallel when we can? it looks a bit slow to run all the tests and I guess some parallelization could be possible, especially if we have a good strategy for test data isolation. Or perhaps we already do it and it's just a slow VM?

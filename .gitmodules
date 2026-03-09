@@ -1,6 +1,6 @@
 [submodule "fhir-reference-repository"]
 	path = fhir-reference-repository
 	url = https://github.com/HL7/fhir.git
-[submodule "rust-simple-project-reference"]
-	path = rust-simple-project-reference
-	url = git@github.com:SINTEF/rusty-valkey-forward-auth.git
+[submodule "rusty-valkey-forward-auth"]
+	path = rusty-valkey-forward-auth
+	url = https://github.com/SINTEF/rusty-valkey-forward-auth.git

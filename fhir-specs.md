@@ -79,7 +79,7 @@ This documentation in XML is pretty verbose so you should likely use subagents 
 
 ## Stack
 
-As we stated, we are going to use Rust for the implementation. The HTTP server should use tower and tower-http. I included a small `rust-simple-project-reference` folder with another rust project that is going to use a similar HTTP stack. This project has some non relevant feature so don't consider it a reference for everything, but the tower, axum, utoipa, etc… that could be useful for you to get started I think.
+As we stated, we are going to use Rust for the implementation. The HTTP server should use tower and tower-http. I included a small `rusty-valkey-forward-auth` folder with another rust project that is going to use a similar HTTP stack. This project has some non relevant feature so don't consider it a reference for everything, but the tower, axum, utoipa, etc… that could be useful for you to get started I think. I would like to use the same stack, make sure we use the same stack.
 
 ### The Database: PostgreSQL
 
@@ -130,6 +130,25 @@ If some dependencies are too recent and not stable or incompatible with other de
 ## Quality, quality, quality
 
 Make sure to review existing code and look for ways to make it good enough quality. The current codebase can include some mistakes, or very poor decisions. Is the database schema making sense ? Do you have good integration tests ?
+
+Linters should be eventually happy, with no errors, no warnings. Temporary work comments should also be cleanup up once it's obviously not needed anymore.
+
+## Docker Container
+
+We should have a working docker container following the best practices. We have some Dockerfile already in rusty-valkey-forward-auth.
+
+## JSON test data
+
+The FHIR build server includes json data on some recognizable paths, example: https://build.fhir.org/patient-example.json
+or https://build.fhir.org/consent-example.json
+
+## Performances
+
+We should run some simple performance checks, to assert that the server is not performing terribly. If performances are poor, we should instrument and identify where the bottlenecks are. debug console statements can be fine for isolated testing when used wisely.
+
+## Test overview
+
+But are we testing everything ? Please maintain a TEST_OVERVIEW.md file in the root folder that gives an overview of the current tests we have, what is missing, and what should be done next. Eventually, everything MUST be tested.
 
 ## Final Words
 

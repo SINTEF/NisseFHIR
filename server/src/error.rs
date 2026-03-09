@@ -87,3 +87,66 @@ impl IntoResponse for AppError {
         (status, Json(body)).into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    use super::{AppError, OperationIssue};
+
+    /// Extract status and body from an AppError response.
+    fn error_response(err: AppError) -> (StatusCode, serde_json::Value) {
+        let response = err.into_response();
+        let status = response.status();
+        // We can't easily read the body synchronously, so just check status.
+        // For body checks we test via integration tests.
+        (status, serde_json::Value::Null)
+    }
+
+    #[test]
+    fn unauthorized_maps_to_401() {
+        let (status, _) = error_response(AppError::Unauthorized);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn forbidden_maps_to_403() {
+        let (status, _) = error_response(AppError::Forbidden);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn not_found_maps_to_404() {
+        let (status, _) = error_response(AppError::NotFound);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn bad_request_maps_to_400() {
+        let (status, _) = error_response(AppError::BadRequest("test".to_owned()));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn validation_maps_to_400() {
+        let issues = vec![OperationIssue::error("invalid", "bad field")];
+        let (status, _) = error_response(AppError::Validation(issues));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn internal_maps_to_500() {
+        let (status, _) = error_response(AppError::Internal("boom".to_owned()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn operation_issue_error_sets_severity() {
+        let issue = OperationIssue::error("invalid", "test diagnostics");
+        let json = serde_json::to_value(&issue).unwrap();
+        assert_eq!(json["severity"], "error");
+        assert_eq!(json["code"], "invalid");
+        assert_eq!(json["diagnostics"], "test diagnostics");
+    }
+}
