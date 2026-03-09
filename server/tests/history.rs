@@ -41,10 +41,40 @@ async fn history_returns_bundle_with_versions_descending() {
     assert_eq!(body["resourceType"], "Bundle");
     assert_eq!(body["type"], "history");
     assert_eq!(body["total"], 2);
+    assert_eq!(
+        body["link"][0]["url"],
+        "http://localhost:8080/fhir/Patient/minimal-patient/_history"
+    );
+    assert_eq!(body["entry"][0]["request"]["url"], "Patient/minimal-patient");
     assert_eq!(body["entry"][0]["response"]["etag"], "W/\"2\"");
     assert_eq!(body["entry"][1]["response"]["etag"], "W/\"1\"");
     assert_eq!(body["entry"][0]["resource"]["active"], true);
     assert_eq!(body["entry"][1]["resource"]["id"], "minimal-patient");
+}
+
+#[tokio::test]
+async fn history_unauthenticated_rejected_when_required() {
+    let pool = setup_test_db().await;
+    clean_tenant(&pool, "history-unauth").await;
+    let token = tenant_token("history-unauth");
+    let app = build_test_app_auth_required(pool.clone());
+
+    let (status, _) = send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &test_data::minimal_patient(), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let request = axum::http::Request::builder()
+        .method("GET")
+        .uri("/fhir/Patient/minimal-patient/_history")
+        .body(axum::body::Body::empty())
+        .expect("request should build");
+
+    let (status, body) = send_request(app, request).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["issue"][0]["code"], "login");
 }
 
 #[tokio::test]
