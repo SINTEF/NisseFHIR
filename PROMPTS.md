@@ -77,3 +77,14 @@ Can you continue the good work following #file:fhir-specs.md ?
 ## VScode Claude Opus 4.6/autopilot
 
 Can you review what is done and what is missing according to #file:fhir-specs.md ? And then make a plan, write relevant documents, and keep working on the project until it's finished in a correct satisfactory state? Thank you
+---
+interrupted
+sorry but yo! you don't use the explore agents correctly, give them tasks to do in parallel, something like this. asking them to return the file content like this obviously does NOT work. you got the same error twice: "sorry, the response hit the length limit", but using a sub agent to read files is not the solution. give them tasks, or don't use them, come on!
+---
+## VScode GPT-5.4/autopilot
+
+I included the examples folder, downloaded from http://build.fhir.org/examples-json.zip
+
+I would like you to write a script, in python this time, that is a real E2E test: it starts the server, either natively or through docker, and then performs CRUD operations on the server using the examples folder.
+
+If the data isn't there it should download it automatically.
