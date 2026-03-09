@@ -13,6 +13,7 @@
 - Comprehensive test suites: 42 unit tests + 78 integration tests (120 total, all passing)
 - Capability statement with security metadata (JWT, CORS, scopes)
 - Dockerfile for containerized deployment
+- Python E2E harness that boots native or Docker deployments, prefers local PostgreSQL for native runs, scans the full HL7 examples directory in parallel for supported resource types, and runs real CRUD/search checks over HTTP
 - All dependencies up to date (verified with cargo-outdated)
 - Clippy clean with no warnings
 - Performance verified: ~1ms reads, ~4ms creates, ~2ms searches
@@ -24,4 +25,4 @@
 3. Add conditional interactions (If-Match on update/delete, If-None-Exist on create).
 4. Add transaction/batch Bundle processing.
 5. Add ND-JSON bulk data export support.
-6. Add CI pipeline with disposable PostgreSQL.
+6. Add CI pipeline with disposable PostgreSQL and run the Python E2E harness in both native and Docker modes.

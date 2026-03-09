@@ -4,3 +4,6 @@
 [submodule "rusty-valkey-forward-auth"]
 	path = rusty-valkey-forward-auth
 	url = https://github.com/SINTEF/rusty-valkey-forward-auth.git
+[submodule "fhir-test-cases"]
+	path = fhir-test-cases
+	url = https://github.com/FHIR/fhir-test-cases
