@@ -30,10 +30,10 @@ pub fn capability_statement(base_url: &str) -> Value {
                                 "display": "SMART on FHIR"
                             }
                         ],
-                        "text": "JWT Bearer Token authentication. Tokens must include tenant, scope (read/write), and optionally resource_types claims."
+                        "text": "JWT Bearer Token authentication. Tokens must include tenant or sub, scope (read/write), and optionally resource_types claims."
                     }
                 ],
-                "description": "This server supports JWT Bearer Token authentication with HS256. Tokens encode tenant identity, read/write scopes, and optional resource type restrictions. An unauthenticated mode is available for development."
+                "description": "This server supports JWT Bearer Token authentication with static keys or a JWKS provider. Tokens encode tenant identity, read/write scopes, and optional resource type restrictions."
             },
             "resource": [
                 {

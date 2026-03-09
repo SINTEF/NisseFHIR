@@ -1,7 +1,6 @@
 pub mod auth;
 pub mod capability;
 pub mod config;
-pub mod dev;
 pub mod error;
 pub mod fhir;
 pub mod jwks;
@@ -22,8 +21,9 @@ use tower_http::{
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
-use utoipa::OpenApi;
-use utoipa_scalar::{Scalar, Servable as ScalarServable};
+use utoipa::{Modify, OpenApi};
+use utoipa::openapi::{Components, security::{Http, HttpAuthScheme, SecurityScheme}};
+use utoipa_swagger_ui::{Config as SwaggerUiConfig, SwaggerUi};
 use validation::FhirSchemaValidator;
 
 /// Maximum request body size: 10 MB.
@@ -46,6 +46,7 @@ pub struct AppState {
         description = "Lightweight Rust FHIR 6.0 server",
         version = "0.1.0",
     ),
+    modifiers(&SecurityAddon),
     paths(
         fhir::healthz,
         fhir::get_metadata,
@@ -59,6 +60,20 @@ pub struct AppState {
 )]
 struct ApiDoc;
 
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        openapi
+            .components
+            .get_or_insert_with(Components::new)
+            .add_security_scheme(
+                "bearer_auth",
+                SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+            );
+    }
+}
+
 pub fn build_router(state: AppState) -> Router {
     let cors = build_cors_layer(&state.cors_allowed_origins);
     let trace = TraceLayer::new_for_http()
@@ -67,10 +82,15 @@ pub fn build_router(state: AppState) -> Router {
 
     let mut router = fhir::routes();
     if state.serve_docs {
-        router = router.merge(Scalar::with_url("/docs", ApiDoc::openapi()));
-    }
-    if matches!(&state.auth, AuthConfig::Dev(_)) {
-        router = router.merge(dev::routes());
+        router = router.merge(
+            SwaggerUi::new("/docs")
+                .url("/docs/openapi.json", ApiDoc::openapi())
+                .config(
+                    SwaggerUiConfig::new(["/docs/openapi.json"])
+                        .try_it_out_enabled(true)
+                        .persist_authorization(true),
+                ),
+        );
     }
 
     router

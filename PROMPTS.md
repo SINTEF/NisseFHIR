@@ -155,3 +155,22 @@ Also you don't need to migrate any data for now. we are at prototype scale still
 ## VScode Claude Opus 4.6/autopilot
 
 Using llvm-cov, I would like to work on improving the test coverage. Can you please run the tests with coverage instrumentation, check the reports, see what is not tested, write more test, and repeat until we reach a satisfactory coverage level? Thank you.
+---
+## VScode GPT-5.4/autopilot
+
+I noticed that Scalar, the thing used for the documentation has telemetry enabled by default, and use CDN for the assets. This is a big no-no for this project. We cannot use it. We can try utoipa-swagger-ui-vendored instead.
+
+---
+Nice, I think we should improve the documentation section to mention that one needs a valid token in the readme, how to get one, and also have the option to configure tokens in the swagger UI. not sure how.
+---
+I'm not sure I appreciate this feature to be honest. the /dev/token one. I think this is not good practice. I know from experience that people will cut corners and just is that in production and never disable the JWT_MODE=dev.
+
+Let's simplify:
+
+- remove the dev mode for JWT, this is bad.
+- jwks is fine, it should work with a keycloak or similar.
+- static / default is fine too.
+
+Perhaps one could use a python script in the scripts folder to generate valid tokens in static mode, as long as they use the same JWT_SECRET ?
+
+what's the tenant by default btw ? do we use aud or iss ?

@@ -27,11 +27,11 @@ Initial lightweight FHIR 6.0 server implementation in Rust.
 - `BIND_ADDR` (default: `0.0.0.0:8080`)
 - `FHIR_BASE_URL` (default: `http://localhost:8080/fhir`)
 - `CORS_ALLOWED_ORIGINS` (optional comma-separated origin allowlist; unset means no cross-origin access)
-- `SERVE_DOCS` (default: `false`; set to `true` to expose `/docs`)
+- `SERVE_DOCS` (default: `false`; set to `true` to expose `/docs` with vendored Swagger UI assets)
 
 ### JWT Authentication
 
-The server supports three JWT modes selected via `JWT_MODE`:
+The server supports two JWT modes selected via `JWT_MODE`:
 
 #### `JWT_MODE=static` (default)
 
@@ -60,27 +60,76 @@ Fetch signing keys from an OpenID Connect / OAuth2 JWKS endpoint. Keys are loade
 
 The server decodes each token's `kid` header to find the matching key in the JWKS set. Tokens without a `kid` are rejected.
 
-#### `JWT_MODE=dev`
-
-Development-only mode. A cryptographically random HMAC secret is generated on each startup and a token-minting endpoint is enabled at `POST /dev/token`.
-
-```bash
-# Mint a development token:
-curl -s http://localhost:8080/dev/token \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"my-tenant","scope":"read write","expires_in":3600}'
-```
-
-No secrets need to be configured. The endpoint accepts optional fields `tenant`, `scope`, `resource_types`, and `expires_in` (seconds, max 86400).
-
-**Do not use dev mode in production** — the secret does not persist across restarts and `POST /dev/token` is unauthenticated.
-
 ## Run
 
 ```bash
 cd server
+JWT_MODE=static \
+JWT_ALGORITHM=HS256 \
+JWT_SECRET='change-me-local-secret-0123456789abcdef' \
+SERVE_DOCS=true \
+DATABASE_URL=postgres://postgres:postgres@localhost/postgres \
 cargo run
 ```
+
+## Authentication And Docs
+
+Most FHIR endpoints require an `Authorization: Bearer <token>` header. Only `GET /healthz` and `GET /metadata` are intentionally public.
+
+Tenant handling is explicit:
+
+- the server requires either a `tenant` claim or a `sub` claim
+- if both are present, `tenant` takes precedence over `sub`
+- there is no default tenant on the server side
+
+Issuer and audience validation are opt-in:
+
+- set `JWT_ISSUER` to require a matching `iss` claim
+- set `JWT_AUDIENCE` to require a matching `aud` claim
+- if these variables are unset, those claims are not validated
+
+### Getting a token for local development
+
+For local testing with static HMAC mode, start the server as shown above and then generate a compatible JWT:
+
+```bash
+python3 ../scripts/generate_static_jwt.py \
+  --secret 'change-me-local-secret-0123456789abcdef' \
+  --tenant my-tenant \
+  --scope 'read write'
+```
+
+The script prints a JWT. Use it in requests like this:
+
+```bash
+TOKEN="paste-token-here"
+
+curl -s http://localhost:8080/fhir/Patient \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Using Swagger UI with a token
+
+When `SERVE_DOCS=true`, the docs are available at `http://localhost:8080/docs/`.
+
+- The OpenAPI document now advertises HTTP bearer auth for the protected `/fhir/...` routes.
+- Swagger UI shows an `Authorize` button where you can paste the JWT token.
+- The UI is configured to persist the authorization between page reloads in the same browser profile.
+
+Paste only the raw JWT value into the Swagger UI auth dialog unless the dialog explicitly asks for the full header value.
+
+### Production and non-local tokens
+
+Swagger UI cannot mint a token for you. You must obtain a valid JWT from the configured auth source:
+
+- `JWT_MODE=static`: issue a token signed by your configured HMAC secret or matching private key.
+- `JWT_MODE=jwks`: obtain a token from the external OpenID Connect or OAuth2 provider behind the configured JWKS endpoint.
+
+Whichever mode you use, the token must satisfy this server's authorization checks:
+
+- include either `tenant` or `sub`
+- include `scope` with `read`, `write`, or both depending on the operation
+- optionally include `resource_types` to restrict access to specific FHIR resource types
 
 ## End-To-End Checks
 

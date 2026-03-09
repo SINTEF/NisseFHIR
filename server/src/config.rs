@@ -6,7 +6,7 @@ use jsonwebtoken::Algorithm;
 use jsonwebtoken::jwk::JwkSet;
 use tracing::warn;
 
-use crate::auth::{AuthConfig, DevKeyConfig, JwksConfig, StaticKeyConfig, build_validation};
+use crate::auth::{AuthConfig, JwksConfig, StaticKeyConfig, build_validation};
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -53,8 +53,7 @@ fn load_auth_config() -> Result<AuthConfig> {
     match mode.as_str() {
         "static" => load_static_auth(issuer.as_deref(), audience.as_deref()),
         "jwks" => load_jwks_auth(issuer, audience),
-        "dev" => Ok(load_dev_auth()),
-        other => bail!("unsupported JWT_MODE '{other}'; expected 'static', 'jwks', or 'dev'"),
+        other => bail!("unsupported JWT_MODE '{other}'; expected 'static' or 'jwks'"),
     }
 }
 
@@ -114,24 +113,6 @@ fn load_jwks_auth(issuer: Option<String>, audience: Option<String>) -> Result<Au
         issuer,
         audience,
     }))
-}
-
-// --- dev mode ---
-
-fn load_dev_auth() -> AuthConfig {
-    let secret = format!(
-        "{}{}",
-        uuid::Uuid::new_v4().as_simple(),
-        uuid::Uuid::new_v4().as_simple(),
-    );
-
-    warn!("──────────────────────────────────────────────────────────────");
-    warn!("JWT_MODE=dev: using a randomly generated secret per startup");
-    warn!("A token-minting endpoint is available at POST /dev/token");
-    warn!("DO NOT use dev mode in production!");
-    warn!("──────────────────────────────────────────────────────────────");
-
-    AuthConfig::Dev(DevKeyConfig::new(&secret))
 }
 
 // ---------------------------------------------------------------------------
@@ -430,14 +411,6 @@ mod tests {
     }
 
     #[test]
-    fn load_dev_mode_from_env() {
-        with_env_vars(&[("JWT_MODE", Some("dev"))], || {
-            let auth = load_auth_config().unwrap();
-            assert!(matches!(auth, AuthConfig::Dev(_)));
-        });
-    }
-
-    #[test]
     fn load_unsupported_mode() {
         with_env_vars(&[("JWT_MODE", Some("bogus"))], || {
             let result = load_auth_config();
@@ -708,15 +681,6 @@ mod tests {
                 assert!(debug_str.contains("Static"));
             },
         );
-    }
-
-    #[test]
-    fn auth_config_debug_dev() {
-        with_env_vars(&[("JWT_MODE", Some("dev"))], || {
-            let auth = load_auth_config().unwrap();
-            let debug_str = format!("{auth:?}");
-            assert!(debug_str.contains("Dev"));
-        });
     }
 
     #[test]

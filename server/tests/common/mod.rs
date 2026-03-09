@@ -64,25 +64,6 @@ pub fn build_test_app_with_options(
     build_router(state)
 }
 
-/// Build a test app in dev mode (with token-minting endpoint).
-pub fn build_dev_test_app(pool: PgPool) -> (Router, fhir_server::auth::DevKeyConfig) {
-    use fhir_server::auth::DevKeyConfig;
-    use fhir_server::store::PgStore;
-    use fhir_server::{AppState, build_router};
-
-    let dev_cfg = DevKeyConfig::new(TEST_JWT_SECRET);
-    let state = AppState {
-        store: PgStore::new(pool),
-        auth: AuthConfig::Dev(dev_cfg.clone()),
-        fhir_base_url: "http://localhost:8080/fhir".to_owned(),
-        validator: Arc::clone(&SHARED_VALIDATOR),
-        cors_allowed_origins: Vec::new(),
-        serve_docs: false,
-    };
-
-    (build_router(state), dev_cfg)
-}
-
 /// Create a JWT token for testing with given claims.
 pub fn create_test_token(claims: &TestClaims) -> String {
     encode(

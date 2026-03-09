@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderValue, Method, Request, StatusCode, header},
 };
 use axum::body::to_bytes;
-use common::{build_test_app, build_test_app_with_options, build_dev_test_app};
+use common::{build_test_app, build_test_app_with_options};
 use tower::ServiceExt;
 
 fn lazy_pool() -> sqlx::PgPool {
@@ -38,6 +38,7 @@ async fn docs_route_can_be_enabled_explicitly() {
     let app = build_test_app_with_options(lazy_pool(), true, Vec::new());
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
@@ -48,7 +49,64 @@ async fn docs_route_can_be_enabled_explicitly() {
         .await
         .expect("request should complete");
 
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .expect("docs redirect should set a location"),
+        "/docs/"
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/docs/")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should complete");
+
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn openapi_docs_advertise_bearer_auth_for_protected_routes() {
+    let app = build_test_app_with_options(lazy_pool(), true, Vec::new());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/docs/openapi.json")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should complete");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("openapi body should be readable");
+    let document: serde_json::Value =
+        serde_json::from_slice(&body).expect("openapi document should be valid json");
+
+    assert_eq!(
+        document["components"]["securitySchemes"]["bearer_auth"]["type"],
+        "http"
+    );
+    assert_eq!(
+        document["components"]["securitySchemes"]["bearer_auth"]["scheme"],
+        "bearer"
+    );
+    assert_eq!(
+        document["paths"]["/fhir/{resource_type}"]["get"]["security"][0]["bearer_auth"],
+        serde_json::json!([])
+    );
 }
 
 #[tokio::test]
@@ -115,55 +173,8 @@ async fn cors_does_not_reflect_unconfigured_origin() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Dev token endpoint
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
-async fn dev_token_endpoint_mints_valid_token() {
-    let (app, _) = build_dev_test_app(lazy_pool());
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/dev/token")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"tenant":"my-tenant","scope":"read write"}"#))
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should complete");
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["token"].is_string());
-    assert!(json["expires_in"].is_number());
-}
-
-#[tokio::test]
-async fn dev_token_defaults_if_body_is_empty_object() {
-    let (app, _) = build_dev_test_app(lazy_pool());
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/dev/token")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from("{}"))
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should complete");
-
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn dev_token_endpoint_hidden_in_static_mode() {
+async fn dev_token_endpoint_is_not_available() {
     let app = build_test_app(lazy_pool());
 
     let response = app
@@ -180,46 +191,4 @@ async fn dev_token_endpoint_hidden_in_static_mode() {
 
     // Route should not exist in static mode.
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn dev_token_can_authenticate_requests() {
-    let pool = common::setup_test_db().await;
-    let (app, _) = build_dev_test_app(pool.clone());
-
-    // Mint a token.
-    let mint_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/dev/token")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"tenant":"dev-int-test"}"#))
-                .expect("request should build"),
-        )
-        .await
-        .expect("mint request should complete");
-
-    assert_eq!(mint_response.status(), StatusCode::OK);
-    let body = to_bytes(mint_response.into_body(), usize::MAX).await.unwrap();
-    let mint: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let token = mint["token"].as_str().unwrap();
-
-    // Use the minted token to create a resource.
-    let patient = serde_json::json!({
-        "resourceType": "Patient",
-        "active": true
-    });
-
-    let (status, _) = common::send_request(
-        app,
-        common::post_resource_with_token("Patient", &patient, token),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::CREATED);
-
-    // Clean up.
-    common::clean_tenant(&pool, "dev-int-test").await;
 }

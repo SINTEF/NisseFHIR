@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use axum::http::{HeaderMap, header};
 use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Validation, decode, decode_header,
+    Algorithm, DecodingKey, Validation, decode, decode_header,
     jwk::{AlgorithmParameters, EllipticCurve, Jwk, JwkSet},
 };
 use serde::{Deserialize, Serialize};
@@ -21,8 +21,6 @@ pub enum AuthConfig {
     Static(StaticKeyConfig),
     /// Keys fetched from a JWKS endpoint with background refresh.
     Jwks(JwksConfig),
-    /// Development-only mode: random key with token-minting endpoint.
-    Dev(DevKeyConfig),
 }
 
 impl std::fmt::Debug for AuthConfig {
@@ -30,7 +28,6 @@ impl std::fmt::Debug for AuthConfig {
         match self {
             Self::Static(_) => f.write_str("AuthConfig::Static(…)"),
             Self::Jwks(_) => f.write_str("AuthConfig::Jwks(…)"),
-            Self::Dev(_) => f.write_str("AuthConfig::Dev(…)"),
         }
     }
 }
@@ -107,26 +104,6 @@ pub struct JwksConfig {
     pub audience: Option<String>,
 }
 
-// --- Dev config ---
-
-#[derive(Clone)]
-pub struct DevKeyConfig {
-    pub encoding_key: Arc<EncodingKey>,
-    pub decoding_key: Arc<DecodingKey>,
-    pub validation: Arc<Validation>,
-}
-
-impl DevKeyConfig {
-    pub fn new(secret: &str) -> Self {
-        let validation = build_validation(Algorithm::HS256, None, None);
-        Self {
-            encoding_key: Arc::new(EncodingKey::from_secret(secret.as_bytes())),
-            decoding_key: Arc::new(DecodingKey::from_secret(secret.as_bytes())),
-            validation: Arc::new(validation),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Claims & access context
 // ---------------------------------------------------------------------------
@@ -176,9 +153,6 @@ pub fn extract_access_context(
             .map_err(|_| AppError::Unauthorized)?
             .claims,
         AuthConfig::Jwks(jc) => verify_with_jwks(token, jc)?,
-        AuthConfig::Dev(dc) => decode::<Claims>(token, &dc.decoding_key, &dc.validation)
-            .map_err(|_| AppError::Unauthorized)?
-            .claims,
     };
 
     let tenant_id = claims.tenant.or(claims.sub).ok_or(AppError::Unauthorized)?;
@@ -564,31 +538,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn dev_mode_accepts_own_tokens() {
-        use super::DevKeyConfig;
-
-        let dev = DevKeyConfig::new(TEST_SECRET);
-        let cfg = AuthConfig::Dev(dev.clone());
-
-        let token = encode(
-            &Header::default(),
-            &Claims {
-                sub: Some("dev-tenant".to_owned()),
-                tenant: None,
-                scope: Some("read write".to_owned()),
-                resource_types: None,
-                exp: Some(4_102_444_800),
-            },
-            &dev.encoding_key,
-        )
-        .unwrap();
-
-        let access = extract_access_context(&bearer_headers(&token), &cfg)
-            .expect("dev token should verify");
-        assert_eq!(access.tenant_id, "dev-tenant");
-    }
-
     // -----------------------------------------------------------------------
     // Debug implementation
     // -----------------------------------------------------------------------
@@ -615,14 +564,6 @@ mod tests {
         });
         let debug = format!("{cfg:?}");
         assert!(debug.contains("Jwks"));
-    }
-
-    #[test]
-    fn debug_dev_config() {
-        use super::DevKeyConfig;
-        let cfg = AuthConfig::Dev(DevKeyConfig::new(TEST_SECRET));
-        let debug = format!("{cfg:?}");
-        assert!(debug.contains("Dev"));
     }
 
     // -----------------------------------------------------------------------

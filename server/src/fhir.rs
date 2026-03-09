@@ -56,7 +56,8 @@ pub async fn get_metadata(State(state): State<AppState>) -> impl IntoResponse {
 
 #[utoipa::path(get, path = "/fhir/{resource_type}",
     params(("resource_type" = String, Path, description = "FHIR resource type")),
-    responses((status = 200, description = "Search results Bundle"), (status = 403, description = "Forbidden")))]
+    responses((status = 200, description = "Search results Bundle"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden")),
+    security(("bearer_auth" = [])))]
 pub async fn search_resources(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -95,7 +96,8 @@ pub async fn search_resources(
 
 #[utoipa::path(post, path = "/fhir/{resource_type}",
     params(("resource_type" = String, Path, description = "FHIR resource type")),
-    responses((status = 201, description = "Resource created"), (status = 400, description = "Validation error"), (status = 413, description = "Payload too large")))]
+    responses((status = 201, description = "Resource created"), (status = 400, description = "Validation error"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 413, description = "Payload too large")),
+    security(("bearer_auth" = [])))]
 pub async fn create_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -143,7 +145,8 @@ pub async fn create_resource(
 
 #[utoipa::path(get, path = "/fhir/{resource_type}/{id}",
     params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
-    responses((status = 200, description = "Resource found"), (status = 404, description = "Not found")))]
+    responses((status = 200, description = "Resource found"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 404, description = "Not found")),
+    security(("bearer_auth" = [])))]
 pub async fn read_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -178,7 +181,8 @@ pub async fn read_resource(
 
 #[utoipa::path(put, path = "/fhir/{resource_type}/{id}",
     params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
-    responses((status = 200, description = "Resource updated"), (status = 400, description = "Validation error"), (status = 413, description = "Payload too large")))]
+    responses((status = 200, description = "Resource updated"), (status = 400, description = "Validation error"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 413, description = "Payload too large")),
+    security(("bearer_auth" = [])))]
 pub async fn update_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -216,7 +220,8 @@ pub async fn update_resource(
 
 #[utoipa::path(delete, path = "/fhir/{resource_type}/{id}",
     params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
-    responses((status = 204, description = "Resource deleted"), (status = 404, description = "Not found")))]
+    responses((status = 204, description = "Resource deleted"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 404, description = "Not found")),
+    security(("bearer_auth" = [])))]
 pub async fn delete_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -241,7 +246,8 @@ pub async fn delete_resource(
 
 #[utoipa::path(patch, path = "/fhir/{resource_type}/{id}",
     params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
-    responses((status = 200, description = "Resource patched"), (status = 400, description = "Invalid patch"), (status = 404, description = "Not found")))]
+    responses((status = 200, description = "Resource patched"), (status = 400, description = "Invalid patch"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 404, description = "Not found")),
+    security(("bearer_auth" = [])))]
 pub async fn patch_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
