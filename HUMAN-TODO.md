@@ -7,4 +7,6 @@ Also we shouldn't have a hardcoded secret in the docker-compose.yml file, even f
 The python script to generate valid tokens can also be updated to use the environment variable for the secret.
 
 ---
-I think the ci.yml in the workflows is not using the new ARM nodes from github, so it will super slow. Can you look at how it's done in the rusty-valkey-forwar-auth reference project I included ? can we also take this time to add pre-commit in github and also the pre commit configuration file ?  pre-commit with git leaks can be useful. you can add some .gitlint too and so on.
+The CI fails, can you run the linter checks and perhaps the formatter and make sure everything works as it should?
+
+You can also run `pre-commit run  --all-files` and configure the pre-commit to ignore false positives and fix what's needed too.

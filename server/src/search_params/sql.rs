@@ -279,12 +279,14 @@ fn push_token_identifier(
     system: Option<&str>,
     code: &str,
 ) {
-    // Identifier is always an array of {system, value} objects
-    query.push(
-        " AND COALESCE(resource->'",
-    );
+    // Identifier is always an array of {system, value} objects.
+    // NOTE: We use a bare `resource->'field'` (no COALESCE) so the GIN
+    // jsonb_path_ops index on (resource->'identifier') can be used.
+    // When the field is NULL, `NULL @> anything` evaluates to NULL (falsy
+    // in a WHERE clause) — same behaviour as the old COALESCE version.
+    query.push(" AND resource->'");
     query.push(field);
-    query.push("', '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('value', to_jsonb(");
+    query.push("' @> jsonb_build_array(jsonb_build_object('value', to_jsonb(");
     query.push_bind(code.to_owned());
     query.push("::text)");
 

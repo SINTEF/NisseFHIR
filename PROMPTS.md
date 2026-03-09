@@ -206,5 +206,12 @@ sorry the submodules wern't checked out, you can read them again if you wish.
 ---
 So it works, but do we have indexes for fast querying? Note that the indexes should handle when many documents have no/value for specific fields and so on. Not everything can have indexes too I assume.
 ---
+You are the expert, but why so few indexes compared to the number of search parameters? Why only 17 resource types for the index?
+
+Are we providing this information in the capability statement document?
+
+Also location looks cool: https://build.fhir.org/location.html like "near" search that is very special. perhaps we need some geospatial indexes ? we don't have geospatial features in the postgresql right now, but perhaps we can do some stuff.
+
+---
 ## VScode Claude Opus 4.6/autopilot
 I think the ci.yml in the workflows is not using the new ARM nodes from github, so it will super slow. Can you look at how it's done in the rusty-valkey-forwar-auth reference project I included ? can we also take this time to add pre-commit in github and also the pre commit configuration file ?  pre-commit with git leaks can be useful. you can add some .gitlint too and so on.
