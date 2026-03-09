@@ -127,8 +127,14 @@ Make sure to check that you use the latest versions of dependencies, using https
 
 If some dependencies are too recent and not stable or incompatible with other dependencies, you are of course allowed to use slightly older versions, but the idea is to not stay stuck on very old versions.
 
+## Quality, quality, quality
+
+Make sure to review existing code and look for ways to make it good enough quality. The current codebase can include some mistakes, or very poor decisions. Is the database schema making sense ? Do you have good integration tests ?
+
 ## Final Words
 
 You will work isolated and iterate by yourself. Be methodical, be profesional, and make sure to write good tests, to use them, to document your progress, your ideas, your tasks, and to maintain a good code base overall.
+
+Always finish your tasks by writing down what is left to do in the current tasks folder, and by writing down potential new ideas in the ideas folder if you havn't done already. The next developer may not know about the project or the context or the state, so be sure to explain things well.
 
 Thank you very much.

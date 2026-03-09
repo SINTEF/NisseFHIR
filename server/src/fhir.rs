@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -35,18 +35,21 @@ async fn create_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(resource_type): Path<String>,
-    Json(mut body): Json<Value>,
+    payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
 
+    let Json(mut body) = parse_json_payload(payload)?;
     validate_resource_payload(&resource_type, &mut body, None)?;
     let id = body
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::BadRequest("resource id is required".to_owned()))?;
+
+    state.validator.validate_resource(&resource_type, &body)?;
 
     let stored = state
         .store
@@ -109,14 +112,16 @@ async fn update_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((resource_type, id)): Path<(String, String)>,
-    Json(mut body): Json<Value>,
+    payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
 
+    let Json(mut body) = parse_json_payload(payload)?;
     validate_resource_payload(&resource_type, &mut body, Some(&id))?;
+    state.validator.validate_resource(&resource_type, &body)?;
 
     let stored = state
         .store
@@ -136,6 +141,12 @@ async fn update_resource(
     );
 
     Ok((StatusCode::OK, response_headers, Json(stored.resource)).into_response())
+}
+
+fn parse_json_payload(payload: Result<Json<Value>, JsonRejection>) -> Result<Json<Value>, AppError> {
+    payload.map_err(|rejection| {
+        AppError::BadRequest(format!("invalid JSON payload: {}", rejection.body_text()))
+    })
 }
 
 fn validate_resource_payload(
@@ -176,9 +187,23 @@ fn validate_resource_payload(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
     use serde_json::json;
+    use tower::ServiceExt;
 
     use super::validate_resource_payload;
+    use crate::{
+        AppState,
+        auth::AuthConfig,
+        build_router,
+        store::PgStore,
+        validation::FhirSchemaValidator,
+    };
 
     #[test]
     fn generates_id_for_create() {
@@ -192,5 +217,92 @@ mod tests {
         let mut body = json!({"resourceType": "Observation"});
         let err = validate_resource_payload("Patient", &mut body, None).expect_err("must fail");
         assert!(err.to_string().contains("does not match path"));
+    }
+
+    #[tokio::test]
+    async fn schema_validation_returns_operation_outcome() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://postgres:postgres@localhost/postgres")
+            .expect("lazy pool should build");
+
+        let app = build_router(AppState {
+            store: PgStore::new(pool),
+            auth: AuthConfig {
+                jwt_secret: "secret".to_owned(),
+                allow_unauthenticated: true,
+            },
+            fhir_base_url: "http://localhost:8080/fhir".to_owned(),
+            validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/fhir/Patient")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"resourceType":"Patient","bogus":true}"#,
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+
+        assert_eq!(value["resourceType"], "OperationOutcome");
+        assert_eq!(value["issue"][0]["code"], "invalid");
+    }
+
+    #[tokio::test]
+    async fn malformed_json_returns_operation_outcome() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://postgres:postgres@localhost/postgres")
+            .expect("lazy pool should build");
+
+        let app = build_router(AppState {
+            store: PgStore::new(pool),
+            auth: AuthConfig {
+                jwt_secret: "secret".to_owned(),
+                allow_unauthenticated: true,
+            },
+            fhir_base_url: "http://localhost:8080/fhir".to_owned(),
+            validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/fhir/Patient")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{"))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+
+        assert_eq!(value["resourceType"], "OperationOutcome");
+        assert!(value["issue"][0]["diagnostics"]
+            .as_str()
+            .expect("diagnostics should be present")
+            .contains("invalid JSON payload"));
     }
 }

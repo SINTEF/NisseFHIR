@@ -5,6 +5,23 @@ use axum::{
 };
 use serde::Serialize;
 
+#[derive(Debug, Serialize)]
+pub struct OperationIssue {
+    severity: &'static str,
+    code: &'static str,
+    diagnostics: String,
+}
+
+impl OperationIssue {
+    pub fn error(code: &'static str, diagnostics: impl Into<String>) -> Self {
+        Self {
+            severity: "error",
+            code,
+            diagnostics: diagnostics.into(),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("unauthorized")]
@@ -15,6 +32,8 @@ pub enum AppError {
     NotFound,
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("validation failed")]
+    Validation(Vec<OperationIssue>),
     #[error("database error")]
     Database(#[from] sqlx::Error),
     #[error("internal error: {0}")]
@@ -22,26 +41,47 @@ pub enum AppError {
 }
 
 #[derive(Serialize)]
-struct ErrorBody<'a> {
-    error: &'a str,
-    message: String,
+struct OperationOutcomeBody {
+    #[serde(rename = "resourceType")]
+    resource_type: &'static str,
+    issue: Vec<OperationIssue>,
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
-            AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
-            AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
-            AppError::Database(_) | AppError::Internal(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-            }
+        let (status, issues) = match self {
+            AppError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                vec![OperationIssue::error("login", "missing or invalid bearer token")],
+            ),
+            AppError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                vec![OperationIssue::error(
+                    "forbidden",
+                    "token does not grant access to this resource or interaction",
+                )],
+            ),
+            AppError::NotFound => (
+                StatusCode::NOT_FOUND,
+                vec![OperationIssue::error("not-found", "requested resource was not found")],
+            ),
+            AppError::BadRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                vec![OperationIssue::error("invalid", message)],
+            ),
+            AppError::Validation(issues) => (StatusCode::BAD_REQUEST, issues),
+            AppError::Database(_) | AppError::Internal(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                vec![OperationIssue::error(
+                    "exception",
+                    "internal server error",
+                )],
+            ),
         };
 
-        let body = ErrorBody {
-            error: code,
-            message: self.to_string(),
+        let body = OperationOutcomeBody {
+            resource_type: "OperationOutcome",
+            issue: issues,
         };
 
         (status, Json(body)).into_response()

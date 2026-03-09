@@ -1,6 +1,6 @@
 # Idea - FHIR JSON Validation Strategy
 
-- Use `jsonschema` crate with a startup-compiled validator.
-- Cache resource-type schema pointers for faster per-request validation.
-- Return FHIR `OperationOutcome` with path-specific diagnostics.
-- Consider secondary validation layer for common profile constraints.
+- Implemented baseline: `jsonschema` crate with cached per-resource validators built from the bundled draft-06 schema.
+- Implemented baseline: FHIR `OperationOutcome` responses for malformed JSON and schema validation failures.
+- Next idea: add a secondary validation layer for FHIR invariants and profile constraints that are not expressible in JSON Schema alone.
+- Next idea: translate common schema error paths into more human-readable FHIR element diagnostics.

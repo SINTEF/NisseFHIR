@@ -4,21 +4,25 @@ mod config;
 mod error;
 mod fhir;
 mod store;
+mod validation;
 
 use anyhow::Context;
 use auth::AuthConfig;
 use axum::Router;
 use config::AppConfig;
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
 use store::PgStore;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
+use validation::FhirSchemaValidator;
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: PgStore,
     pub auth: AuthConfig,
     pub fhir_base_url: String,
+    pub validator: Arc<FhirSchemaValidator>,
 }
 
 #[tokio::main]
@@ -44,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
             allow_unauthenticated: config.allow_unauthenticated,
         },
         fhir_base_url: config.fhir_base_url,
+        validator: Arc::new(FhirSchemaValidator::new()?),
     };
 
     let app = build_router(state);
@@ -78,7 +83,11 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    use crate::{AppState, auth::AuthConfig, build_router, store::PgStore};
+    use std::sync::Arc;
+
+    use crate::{
+        AppState, auth::AuthConfig, build_router, store::PgStore, validation::FhirSchemaValidator,
+    };
 
     #[tokio::test]
     async fn health_endpoint_is_up() {
@@ -94,6 +103,7 @@ mod tests {
                 allow_unauthenticated: true,
             },
             fhir_base_url: "http://localhost:8080/fhir".to_owned(),
+            validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
         });
 
         let response = app

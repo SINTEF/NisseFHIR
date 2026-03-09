@@ -8,6 +8,8 @@ Initial lightweight FHIR 6.0 server implementation in Rust.
 - PostgreSQL-backed storage (`JSONB`)
 - Multi-tenant context from JWT (`tenant`/`sub` claim)
 - Optional unauthenticated mode for local development
+- FHIR JSON Schema validation backed by the bundled `fhir.schema.json`
+- FHIR `OperationOutcome` error responses for auth and request validation failures
 - Endpoints:
   - `GET /healthz`
   - `GET /metadata`
@@ -33,4 +35,5 @@ cargo run
 ## Notes
 
 - Capability statement currently advertises only create/read/update interactions.
-- JSON schema validation is not wired yet; current validation checks basic FHIR envelope consistency (`resourceType`, `id`).
+- Create and update requests validate both the FHIR envelope (`resourceType`, `id`) and the resource-specific JSON Schema definition.
+- Invalid JSON, schema failures, auth failures, and missing resources return FHIR-shaped `OperationOutcome` bodies.
