@@ -1,0 +1,26 @@
+1. Application endpoints:
+{{- if .Values.ingress.enabled }}
+  {{- range .Values.ingress.hosts }}
+  {{- $host := .host }}
+    {{- range .paths }}
+  - http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host }}{{ .path }}
+    {{- end }}
+  {{- end }}
+{{- else if contains "LoadBalancer" .Values.service.type }}
+  - Run `kubectl get svc {{ include "fhir-autopilot.fullname" . }} --namespace {{ .Release.Namespace }}` and wait for an external IP.
+{{- else if contains "NodePort" .Values.service.type }}
+  - Expose locally: `NODE_PORT=$(kubectl get svc {{ include "fhir-autopilot.fullname" . }} --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}")`
+{{- else }}
+  - Port-forward: `kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "fhir-autopilot.fullname" . }} 8080:{{ .Values.service.port }}`
+  - Then open http://127.0.0.1:8080/fhir/metadata
+{{- end }}
+
+2. FHIR Capability Statement:
+  - GET /fhir/metadata
+
+{{- if .Values.cnpg.enabled }}
+
+3. PostgreSQL (CloudNativePG):
+  - Cluster: {{ include "fhir-autopilot.cnpgClusterName" . }}
+  - Check status: `kubectl get cluster {{ include "fhir-autopilot.cnpgClusterName" . }} --namespace {{ .Release.Namespace }}`
+{{- end }}

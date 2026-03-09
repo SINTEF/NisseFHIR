@@ -75,7 +75,7 @@ For example: https://build.fhir.org/datatypes.html
 
 The FHIR reference repository is included in `fhir-reference-repository` folder. It includes *a lot* of examples and information, and use it and explore it wisely. In the source folder, each resource has its own folder with files named like `{type}-introduction.xml`, `{type}-notes.xml`, `{structuredefinition-Appointment.xml}`.
 
-This documentation in XML is pretty verbose so you should likely use subagents to extract the relevant information, but you can also decide on your own what to do and how to handle it.
+This documentation in XML is pretty verbose so you should likely use subagents to extract the relevant information, but you can also decide on your own what to do and how to handle it. Do NOT use sub agents to read files, this is wasteful, you can read the files yourself directly. Use sub agents to perform meaningful exploration tasks such as finding patterns, summarization, identifying things. Not copying and pasting information that you can read yourself.
 
 ## Stack
 

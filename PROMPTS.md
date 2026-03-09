@@ -181,3 +181,8 @@ what's the tenant by default btw ? do we use aud or iss ?
 We are validating the JSON schema, but are we validating more using https://build.fhir.org/datatypes.html ? Is it part of the JSON schema ? Can you write some unit test to test the limits and see if we accept and refuse stuff, in a classic test driven development, and then implement what is needed based on the results, and iterate ?
 ---
 yes I think you can continue to the next steps. For some of the validation, I assume that you can find existing crates? If it's too difficult? But good job. Let's continue on this task with a TDD approach. write the tests first, they should fail, implement, see, iterate. thank you.
+---
+Do NOT use sub agents to read files, this is wasteful, you can read the files yourself directly. Use sub agents to perform meaningful exploration tasks such as finding patterns, summarization, identifying things. Not copying and pasting information that you can read yourself.
+---
+## VScode Claude Opus 4.6/autopilot
+Can you setup CI/CD with github actions? At the same time it would be neat if you add a helm chart to deploy it in kubernetes, with cloudnativepg support (assume it's already installed. You can look at rusty-valkey-forward-auth reference submodule in the root folder to find reference implementation. You can use the helm command (or install it if it's not there yet). We want to release the charts too, so one needs to create an empty gh-pages branch, somehow.

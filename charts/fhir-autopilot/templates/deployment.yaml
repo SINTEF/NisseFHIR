@@ -1,0 +1,132 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fhir-autopilot.fullname" . }}
+  labels:
+    {{- include "fhir-autopilot.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "fhir-autopilot.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "fhir-autopilot.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "fhir-autopilot.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.image.digest }}
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          {{- else }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: BIND_ADDR
+              value: "0.0.0.0:{{ .Values.service.targetPort }}"
+            {{- if .Values.cnpg.enabled }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fhir-autopilot.cnpgClusterName" . }}-app
+                  key: uri
+            {{- else if ((.Values.cnpg).externalDatabase).url }}
+            - name: DATABASE_URL
+              value: {{ .Values.cnpg.externalDatabase.url | quote }}
+            {{- else if ((.Values.cnpg).externalDatabase).existingSecret }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cnpg.externalDatabase.existingSecret.name }}
+                  key: {{ .Values.cnpg.externalDatabase.existingSecret.key | default "database-url" }}
+            {{- end }}
+            {{- with .Values.config.jwtMode }}
+            - name: JWT_MODE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.config.jwtSecret }}
+            - name: JWT_SECRET
+              value: {{ .Values.config.jwtSecret | quote }}
+            {{- else if .Values.config.jwtSecretRef }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.jwtSecretRef.name }}
+                  key: {{ .Values.config.jwtSecretRef.key }}
+            {{- end }}
+            {{- with .Values.config.jwksUrl }}
+            - name: JWKS_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.fhirBaseUrl }}
+            - name: FHIR_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.serveDocs }}
+            - name: SERVE_DOCS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.rustLog }}
+            - name: RUST_LOG
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml .Values.extraVolumeMounts | nindent 12 }}
+          {{- end }}
+      {{- if .Values.extraVolumes }}
+      volumes:
+        {{- toYaml .Values.extraVolumes | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

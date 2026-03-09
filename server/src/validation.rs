@@ -3,7 +3,8 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use chrono::NaiveDate;
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc};
+use fluent_uri::{Uri, UriRef};
 use jsonschema::Validator;
 use serde_json::Value;
 
@@ -25,7 +26,18 @@ enum PrimitiveConstraint {
     Integer,
     Integer64,
     PositiveInt,
+    Uri,
+    Url,
+    Canonical,
     UnsignedInt,
+}
+
+#[derive(Clone, Copy)]
+enum ObjectConstraint {
+    Attachment,
+    ContactPoint,
+    Quantity,
+    Period,
 }
 
 pub struct FhirSchemaValidator {
@@ -62,7 +74,7 @@ impl FhirSchemaValidator {
             .collect();
 
         if let Some(schema) = self.resolve_ref(&format!("#/definitions/{resource_type}")) {
-            self.collect_datatype_issues(schema, resource, "", &mut issues);
+            self.collect_datatype_issues(schema, resource, "", None, &mut issues);
         }
 
         if issues.is_empty() {
@@ -137,23 +149,31 @@ impl FhirSchemaValidator {
         schema: &Value,
         instance: &Value,
         path: &str,
+        property_name: Option<&str>,
         issues: &mut Vec<OperationIssue>,
     ) {
+        let schema_ref = schema.get("$ref").and_then(Value::as_str);
         let resolved = schema
             .get("$ref")
             .and_then(Value::as_str)
             .and_then(|ref_path| self.resolve_ref(ref_path))
             .unwrap_or(schema);
 
-        if let Some(issue) = primitive_constraint(resolved)
+        if let Some(issue) = primitive_constraint(schema_ref, resolved, property_name)
             .and_then(|constraint| validate_primitive_constraint(constraint, instance, path))
+        {
+            issues.push(issue);
+        }
+
+        if let Some(object_constraint) = object_constraint(schema_ref)
+            && let Some(issue) = validate_object_constraint(object_constraint, instance, path)
         {
             issues.push(issue);
         }
 
         if let Some(all_of) = resolved.get("allOf").and_then(Value::as_array) {
             for child_schema in all_of {
-                self.collect_datatype_issues(child_schema, instance, path, issues);
+                self.collect_datatype_issues(child_schema, instance, path, property_name, issues);
             }
         }
 
@@ -163,7 +183,13 @@ impl FhirSchemaValidator {
             for (key, child_value) in object {
                 if let Some(child_schema) = properties.get(key) {
                     let child_path = join_instance_path(path, key);
-                    self.collect_datatype_issues(child_schema, child_value, &child_path, issues);
+                    self.collect_datatype_issues(
+                        child_schema,
+                        child_value,
+                        &child_path,
+                        Some(key.as_str()),
+                        issues,
+                    );
                 }
             }
         }
@@ -173,14 +199,18 @@ impl FhirSchemaValidator {
         {
             for (index, item) in items.iter().enumerate() {
                 let child_path = join_instance_path(path, &index.to_string());
-                self.collect_datatype_issues(items_schema, item, &child_path, issues);
+                self.collect_datatype_issues(items_schema, item, &child_path, None, issues);
             }
         }
     }
 }
 
-fn primitive_constraint(schema: &Value) -> Option<PrimitiveConstraint> {
-    if let Some(ref_path) = schema.get("$ref").and_then(Value::as_str) {
+fn primitive_constraint(
+    schema_ref: Option<&str>,
+    schema: &Value,
+    property_name: Option<&str>,
+) -> Option<PrimitiveConstraint> {
+    if let Some(ref_path) = schema_ref {
         return match ref_path {
             "#/definitions/date" => Some(PrimitiveConstraint::Date),
             "#/definitions/dateTime" => Some(PrimitiveConstraint::DateTime),
@@ -188,6 +218,9 @@ fn primitive_constraint(schema: &Value) -> Option<PrimitiveConstraint> {
             "#/definitions/integer" => Some(PrimitiveConstraint::Integer),
             "#/definitions/integer64" => Some(PrimitiveConstraint::Integer64),
             "#/definitions/positiveInt" => Some(PrimitiveConstraint::PositiveInt),
+            "#/definitions/uri" => Some(PrimitiveConstraint::Uri),
+            "#/definitions/url" => Some(PrimitiveConstraint::Url),
+            "#/definitions/canonical" => Some(PrimitiveConstraint::Canonical),
             "#/definitions/unsignedInt" => Some(PrimitiveConstraint::UnsignedInt),
             _ => None,
         };
@@ -196,14 +229,26 @@ fn primitive_constraint(schema: &Value) -> Option<PrimitiveConstraint> {
     match (
         schema.get("type").and_then(Value::as_str),
         schema.get("pattern").and_then(Value::as_str),
+        property_name,
     ) {
-        (Some("string"), Some(DATE_PATTERN)) => Some(PrimitiveConstraint::Date),
-        (Some("string"), Some(DATETIME_PATTERN)) => Some(PrimitiveConstraint::DateTime),
-        (Some("string"), Some(INSTANT_PATTERN)) => Some(PrimitiveConstraint::Instant),
-        (Some("number"), Some(INTEGER_PATTERN)) => Some(PrimitiveConstraint::Integer),
-        (Some("string"), Some(INTEGER_PATTERN)) => Some(PrimitiveConstraint::Integer64),
-        (Some("number"), Some(POSITIVE_INT_PATTERN)) => Some(PrimitiveConstraint::PositiveInt),
-        (Some("number"), Some(UNSIGNED_INT_PATTERN)) => Some(PrimitiveConstraint::UnsignedInt),
+        (Some("string"), Some(DATE_PATTERN), _) => Some(PrimitiveConstraint::Date),
+        (Some("string"), Some(DATETIME_PATTERN), _) => Some(PrimitiveConstraint::DateTime),
+        (Some("string"), Some(INSTANT_PATTERN), _) => Some(PrimitiveConstraint::Instant),
+        (Some("number"), Some(INTEGER_PATTERN), _) => Some(PrimitiveConstraint::Integer),
+        (Some("string"), Some(INTEGER_PATTERN), _) => Some(PrimitiveConstraint::Integer64),
+        (Some("number"), Some(POSITIVE_INT_PATTERN), _) => Some(PrimitiveConstraint::PositiveInt),
+        (Some("number"), Some(UNSIGNED_INT_PATTERN), _) => Some(PrimitiveConstraint::UnsignedInt),
+        (Some("string"), Some("^\\S*$"), Some("valueCanonical")) => Some(PrimitiveConstraint::Canonical),
+        _ => None,
+    }
+}
+
+fn object_constraint(schema_ref: Option<&str>) -> Option<ObjectConstraint> {
+    match schema_ref {
+        Some("#/definitions/Attachment") => Some(ObjectConstraint::Attachment),
+        Some("#/definitions/ContactPoint") => Some(ObjectConstraint::ContactPoint),
+        Some("#/definitions/Quantity") => Some(ObjectConstraint::Quantity),
+        Some("#/definitions/Period") => Some(ObjectConstraint::Period),
         _ => None,
     }
 }
@@ -220,7 +265,23 @@ fn validate_primitive_constraint(
         PrimitiveConstraint::Integer => validate_integer_value(instance, path),
         PrimitiveConstraint::Integer64 => validate_integer64_value(instance, path),
         PrimitiveConstraint::PositiveInt => validate_positive_int_value(instance, path),
+        PrimitiveConstraint::Uri => validate_uri_value(instance, path),
+        PrimitiveConstraint::Url => validate_url_value(instance, path),
+        PrimitiveConstraint::Canonical => validate_canonical_value(instance, path),
         PrimitiveConstraint::UnsignedInt => validate_unsigned_int_value(instance, path),
+    }
+}
+
+fn validate_object_constraint(
+    constraint: ObjectConstraint,
+    instance: &Value,
+    path: &str,
+) -> Option<OperationIssue> {
+    match constraint {
+        ObjectConstraint::Attachment => validate_attachment_object(instance, path),
+        ObjectConstraint::ContactPoint => validate_contact_point_object(instance, path),
+        ObjectConstraint::Quantity => validate_quantity_object(instance, path),
+        ObjectConstraint::Period => validate_period_object(instance, path),
     }
 }
 
@@ -322,6 +383,58 @@ fn validate_positive_int_value(instance: &Value, path: &str) -> Option<Operation
     }
 }
 
+fn validate_uri_value(instance: &Value, path: &str) -> Option<OperationIssue> {
+    let value = instance.as_str()?;
+    if UriRef::parse(value).is_ok() {
+        None
+    } else {
+        Some(OperationIssue::error(
+            "invalid",
+            format!(
+                "FHIR uri at instance path '{}' must be a valid URI reference",
+                display_path(path)
+            ),
+        ))
+    }
+}
+
+fn validate_url_value(instance: &Value, path: &str) -> Option<OperationIssue> {
+    let value = instance.as_str()?;
+    if Uri::parse(value).is_ok() {
+        None
+    } else {
+        Some(OperationIssue::error(
+            "invalid",
+            format!(
+                "FHIR url at instance path '{}' must be an absolute URL",
+                display_path(path)
+            ),
+        ))
+    }
+}
+
+fn validate_canonical_value(instance: &Value, path: &str) -> Option<OperationIssue> {
+    let value = instance.as_str()?;
+    let (base, _) = value.split_once('|').unwrap_or((value, ""));
+    let valid = if base.starts_with('#') {
+        UriRef::parse(base).is_ok()
+    } else {
+        UriRef::parse(base).map(|uri| uri.has_scheme()).unwrap_or(false)
+    };
+
+    if valid {
+        None
+    } else {
+        Some(OperationIssue::error(
+            "invalid",
+            format!(
+                "FHIR canonical at instance path '{}' must be an absolute URI or fragment reference",
+                display_path(path)
+            ),
+        ))
+    }
+}
+
 fn validate_unsigned_int_value(instance: &Value, path: &str) -> Option<OperationIssue> {
     let number = instance.as_number()?;
     let valid = number
@@ -336,6 +449,72 @@ fn validate_unsigned_int_value(instance: &Value, path: &str) -> Option<Operation
             "invalid",
             format!(
                 "FHIR unsignedInt at instance path '{}' must be a whole number between 0 and 2147483647",
+                display_path(path)
+            ),
+        ))
+    }
+}
+
+fn validate_attachment_object(instance: &Value, path: &str) -> Option<OperationIssue> {
+    let object = instance.as_object()?;
+    if object.contains_key("data") && !object.contains_key("contentType") {
+        Some(OperationIssue::error(
+            "invalid",
+            format!(
+                "Attachment at instance path '{}' must include contentType when data is present",
+                display_path(path)
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
+fn validate_contact_point_object(instance: &Value, path: &str) -> Option<OperationIssue> {
+    let object = instance.as_object()?;
+    if object.contains_key("value") && !object.contains_key("system") {
+        Some(OperationIssue::error(
+            "invalid",
+            format!(
+                "ContactPoint at instance path '{}' must include system when value is present",
+                display_path(path)
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
+fn validate_quantity_object(instance: &Value, path: &str) -> Option<OperationIssue> {
+    let object = instance.as_object()?;
+    if object.contains_key("code") && !object.contains_key("system") {
+        Some(OperationIssue::error(
+            "invalid",
+            format!(
+                "Quantity at instance path '{}' must include system when code is present",
+                display_path(path)
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
+fn validate_period_object(instance: &Value, path: &str) -> Option<OperationIssue> {
+    let object = instance.as_object()?;
+    let start = object.get("start").and_then(Value::as_str)?;
+    let end = object.get("end").and_then(Value::as_str)?;
+
+    let start_low = period_low_boundary(start)?;
+    let end_high = period_high_boundary(end)?;
+
+    if start_low <= end_high {
+        None
+    } else {
+        Some(OperationIssue::error(
+            "invalid",
+            format!(
+                "Period at instance path '{}' must have start less than or equal to end",
                 display_path(path)
             ),
         ))
@@ -386,6 +565,69 @@ fn parse_month(value: &str) -> Option<u32> {
 
 fn parse_day(value: &str) -> Option<u32> {
     value.parse::<u32>().ok().filter(|day| (1..=31).contains(day))
+}
+
+fn period_low_boundary(value: &str) -> Option<DateTime<Utc>> {
+    parse_period_boundary(value, true)
+}
+
+fn period_high_boundary(value: &str) -> Option<DateTime<Utc>> {
+    parse_period_boundary(value, false)
+}
+
+fn parse_period_boundary(value: &str, low: bool) -> Option<DateTime<Utc>> {
+    if value.contains('T') {
+        let parsed = DateTime::parse_from_rfc3339(value).ok()?;
+        return Some(parsed.with_timezone(&Utc));
+    }
+
+    let parts: Vec<_> = value.split('-').collect();
+    let date = match parts.as_slice() {
+        [year] => {
+            let year = parse_year(year)?;
+            if low {
+                NaiveDate::from_ymd_opt(year, 1, 1)?
+            } else {
+                NaiveDate::from_ymd_opt(year, 12, 31)?
+            }
+        }
+        [year, month] => {
+            let year = parse_year(year)?;
+            let month = parse_month(month)?;
+            if low {
+                NaiveDate::from_ymd_opt(year, month, 1)?
+            } else {
+                let day = last_day_of_month(year, month)?;
+                NaiveDate::from_ymd_opt(year, month, day)?
+            }
+        }
+        [year, month, day] => {
+            let year = parse_year(year)?;
+            let month = parse_month(month)?;
+            let day = parse_day(day)?;
+            NaiveDate::from_ymd_opt(year, month, day)?
+        }
+        _ => return None,
+    };
+
+    let time = if low {
+        NaiveTime::from_hms_opt(0, 0, 0)?
+    } else {
+        NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_999)?
+    };
+
+    Some(FixedOffset::east_opt(0)?.from_utc_datetime(&date.and_time(time)).with_timezone(&Utc))
+}
+
+fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+
+    let first_of_next = NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
+    Some(first_of_next.pred_opt()?.day())
 }
 
 fn join_instance_path(base: &str, segment: &str) -> String {
@@ -650,6 +892,168 @@ mod tests {
                 }),
             )
             .expect("FHIR boundary integer values should be valid");
+    }
+
+    #[test]
+    fn rejects_invalid_uri_fields() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        let err = validator
+            .validate_resource(
+                "Patient",
+                &json!({
+                    "resourceType": "Patient",
+                    "identifier": [{
+                        "system": "http://[::1",
+                        "value": "12345"
+                    }]
+                }),
+            )
+            .expect_err("FHIR uri fields must contain valid URI references");
+
+        assert!(err.to_string().contains("validation failed"));
+    }
+
+    #[test]
+    fn rejects_non_url_attachment_urls() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        let err = validator
+            .validate_resource(
+                "Patient",
+                &json!({
+                    "resourceType": "Patient",
+                    "photo": [{
+                        "contentType": "image/png",
+                        "url": "Patient/example"
+                    }]
+                }),
+            )
+            .expect_err("FHIR url fields must be absolute URLs");
+
+        assert!(err.to_string().contains("validation failed"));
+    }
+
+    #[test]
+    fn rejects_relative_canonical_values() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        let err = validator
+            .validate_resource(
+                "Patient",
+                &json!({
+                    "resourceType": "Patient",
+                    "extension": [{
+                        "url": "http://example.org/fhir/StructureDefinition/test-canonical",
+                        "valueCanonical": "Patient/example"
+                    }]
+                }),
+            )
+            .expect_err("FHIR canonical values must be absolute URIs or fragment references");
+
+        assert!(err.to_string().contains("validation failed"));
+    }
+
+    #[test]
+    fn accepts_fragment_canonical_values() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        validator
+            .validate_resource(
+                "Patient",
+                &json!({
+                    "resourceType": "Patient",
+                    "extension": [{
+                        "url": "http://example.org/fhir/StructureDefinition/test-canonical",
+                        "valueCanonical": "#contained"
+                    }]
+                }),
+            )
+            .expect("fragment canonical values should be valid");
+    }
+
+    #[test]
+    fn rejects_contact_point_value_without_system() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        let err = validator
+            .validate_resource(
+                "Patient",
+                &json!({
+                    "resourceType": "Patient",
+                    "telecom": [{
+                        "value": "555-0100"
+                    }]
+                }),
+            )
+            .expect_err("ContactPoint.value requires ContactPoint.system");
+
+        assert!(err.to_string().contains("validation failed"));
+    }
+
+    #[test]
+    fn rejects_attachment_data_without_content_type() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        let err = validator
+            .validate_resource(
+                "Patient",
+                &json!({
+                    "resourceType": "Patient",
+                    "photo": [{
+                        "data": "SGVsbG8="
+                    }]
+                }),
+            )
+            .expect_err("Attachment.data requires Attachment.contentType");
+
+        assert!(err.to_string().contains("validation failed"));
+    }
+
+    #[test]
+    fn rejects_quantity_code_without_system() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        let err = validator
+            .validate_resource(
+                "Observation",
+                &json!({
+                    "resourceType": "Observation",
+                    "status": "final",
+                    "code": {
+                        "coding": [{
+                            "system": "http://loinc.org",
+                            "code": "15074-8"
+                        }]
+                    },
+                    "valueQuantity": {
+                        "value": 6.3,
+                        "code": "mmol/L"
+                    }
+                }),
+            )
+            .expect_err("Quantity.code requires Quantity.system");
+
+        assert!(err.to_string().contains("validation failed"));
+    }
+
+    #[test]
+    fn rejects_periods_with_start_after_end() {
+        let validator = FhirSchemaValidator::new().expect("validator should load");
+        let err = validator
+            .validate_resource(
+                "Observation",
+                &json!({
+                    "resourceType": "Observation",
+                    "status": "final",
+                    "code": {
+                        "coding": [{
+                            "system": "http://loinc.org",
+                            "code": "15074-8"
+                        }]
+                    },
+                    "effectivePeriod": {
+                        "start": "2024-03-02T10:00:00Z",
+                        "end": "2024-03-01T10:00:00Z"
+                    }
+                }),
+            )
+            .expect_err("Period.start must not be after Period.end");
+
+        assert!(err.to_string().contains("validation failed"));
     }
 
     #[test]

@@ -1,0 +1,51 @@
+{{- if .Values.cnpg.enabled }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ include "fhir-autopilot.cnpgClusterName" . }}
+  labels:
+    {{- include "fhir-autopilot.labels" . | nindent 4 }}
+spec:
+  instances: {{ .Values.cnpg.instances }}
+  {{- with .Values.cnpg.imageName }}
+  imageName: {{ . }}
+  {{- end }}
+
+  bootstrap:
+    initdb:
+      database: fhir
+      owner: fhir
+
+  storage:
+    size: {{ .Values.cnpg.storage.size }}
+    {{- with .Values.cnpg.storage.storageClass }}
+    storageClass: {{ . }}
+    {{- end }}
+
+  {{- with .Values.cnpg.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- if .Values.cnpg.postgresql.parameters }}
+  postgresql:
+    parameters:
+      {{- toYaml .Values.cnpg.postgresql.parameters | nindent 6 }}
+  {{- end }}
+
+  {{- if .Values.cnpg.monitoring.enabled }}
+  monitoring:
+    enablePodMonitor: true
+  {{- end }}
+
+  {{- if .Values.cnpg.backup.enabled }}
+  backup:
+    {{- with .Values.cnpg.backup.barmanObjectStore }}
+    barmanObjectStore:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.cnpg.backup.retentionPolicy }}
+    retentionPolicy: {{ . }}
+    {{- end }}
+  {{- end }}
+{{- end }}

@@ -24,7 +24,7 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/fhir
       BIND_ADDR: 0.0.0.0:8080
       JWT_MODE: "static"
-      JWT_SECRET: e2e-secret-0123456789abcdefghijkl
+      JWT_SECRET: change-me-local-secret-0123456789abcdef
       FHIR_BASE_URL: http://127.0.0.1:18080/fhir
       SERVE_DOCS: "true"
       RUST_LOG: fhir_server=info,tower_http=info

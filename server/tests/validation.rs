@@ -270,6 +270,83 @@ async fn rejects_patient_with_invalid_positive_int_extension() {
 }
 
 #[tokio::test]
+async fn rejects_patient_with_invalid_identifier_system_uri() {
+    let (app, token) = setup("validation-invalid-uri").await;
+    let patient = json!({
+        "resourceType": "Patient",
+        "identifier": [{
+            "system": "http://[::1",
+            "value": "12345"
+        }]
+    });
+
+    let (status, body) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_operation_outcome(&body, "invalid");
+}
+
+#[tokio::test]
+async fn rejects_patient_with_contact_point_value_without_system() {
+    let (app, token) = setup("validation-contact-point-system").await;
+    let patient = json!({
+        "resourceType": "Patient",
+        "telecom": [{
+            "value": "555-0100"
+        }]
+    });
+
+    let (status, body) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_operation_outcome(&body, "invalid");
+}
+
+#[tokio::test]
+async fn rejects_observation_with_quantity_code_without_system() {
+    let (app, token) = setup("validation-quantity-system").await;
+    let observation = json!({
+        "resourceType": "Observation",
+        "status": "final",
+        "code": {
+            "coding": [{
+                "system": "http://loinc.org",
+                "code": "15074-8"
+            }]
+        },
+        "valueQuantity": {
+            "value": 6.3,
+            "code": "mmol/L"
+        }
+    });
+
+    let (status, body) = send_request(app, post_resource_with_token("Observation", &observation, &token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_operation_outcome(&body, "invalid");
+}
+
+#[tokio::test]
+async fn rejects_observation_with_effective_period_start_after_end() {
+    let (app, token) = setup("validation-period-order").await;
+    let observation = json!({
+        "resourceType": "Observation",
+        "status": "final",
+        "code": {
+            "coding": [{
+                "system": "http://loinc.org",
+                "code": "15074-8"
+            }]
+        },
+        "effectivePeriod": {
+            "start": "2024-03-02T10:00:00Z",
+            "end": "2024-03-01T10:00:00Z"
+        }
+    });
+
+    let (status, body) = send_request(app, post_resource_with_token("Observation", &observation, &token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_operation_outcome(&body, "invalid");
+}
+
+#[tokio::test]
 async fn rejects_unsupported_resource_type() {
     let (app, token) = setup("validation-unsupported-type").await;
     let resource = json!({

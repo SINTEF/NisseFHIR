@@ -1,0 +1,145 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/sintef/fhir-autopilot
+  pullPolicy: IfNotPresent
+  tag: ""
+  # digest: ""
+
+# imagePullSecrets:
+#   - name: registry-creds
+
+# nameOverride: ""
+# fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  # name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+service:
+  type: ClusterIP
+  annotations: {}
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  # className: ""
+  annotations: {}
+  hosts:
+    - host: fhir-autopilot.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+config:
+  # FHIR base URL visible to clients (used for absolute references in bundles)
+  # fhirBaseUrl: "https://fhir.example.com/fhir"
+
+  # JWT authentication mode: "static" (symmetric HS256), "jwks" (RS256 via JWKS endpoint), or "none"
+  jwtMode: "none"
+  # jwtSecret: ""
+  # jwtSecretRef:
+  #   name: my-secret
+  #   key: jwt-secret
+  # jwksUrl: ""
+
+  # Serve Swagger/OpenAPI docs
+  serveDocs: "false"
+
+  # Rust log level
+  rustLog: "fhir_server=info,tower_http=info"
+
+# CloudNativePG Cluster configuration
+# Requires the CloudNativePG operator to be installed in the cluster.
+cnpg:
+  enabled: true
+  instances: 1
+  # PostgreSQL image
+  imageName: ghcr.io/cloudnative-pg/postgresql:18
+  storage:
+    size: 8Gi
+    # storageClass: ""
+  resources: {}
+  #   requests:
+  #     cpu: 100m
+  #     memory: 256Mi
+  #   limits:
+  #     cpu: "1"
+  #     memory: 1Gi
+  postgresql:
+    parameters: {}
+    #   max_connections: "200"
+    #   shared_buffers: "256MB"
+  monitoring:
+    enabled: false
+  backup:
+    enabled: false
+    # barmanObjectStore:
+    #   destinationPath: "s3://my-bucket/backups"
+    #   s3Credentials:
+    #     accessKeyId:
+    #       name: aws-creds
+    #       key: ACCESS_KEY_ID
+    #     secretAccessKey:
+    #       name: aws-creds
+    #       key: SECRET_ACCESS_KEY
+    # retentionPolicy: "30d"
+
+  # Use an external database instead of CNPG-managed cluster
+  # When cnpg.enabled is false, set these to connect to an external PostgreSQL.
+  # externalDatabase:
+  #   url: "postgres://user:password@host:5432/fhir"
+  #   existingSecret:
+  #     name: my-db-secret
+  #     key: database-url
+
+extraEnv: []
+# - name: RUST_LOG
+#   value: debug
+
+resources: {}
+
+livenessProbe:
+  httpGet:
+    path: /fhir/metadata
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /fhir/metadata
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+extraVolumes: []
+extraVolumeMounts: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
