@@ -4,45 +4,11 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{
-    build_test_app, build_test_app_auth_required, clean_tenant, expired_token, get_resource,
+    build_test_app_auth_required, clean_tenant, expired_token, get_resource,
     get_resource_with_token, post_resource, post_resource_with_token, put_resource_with_token,
     read_only_token, restricted_token, send_request, setup_test_db, tenant_token, test_data,
     write_only_token,
 };
-
-// ─── UNAUTHENTICATED MODE ──────────────────────────────────────────────────
-
-#[tokio::test]
-async fn unauthenticated_mode_allows_all_operations() {
-    let pool = setup_test_db().await;
-    let app = build_test_app(pool.clone()); // allow_unauthenticated = true
-    let patient = test_data::minimal_patient();
-
-    let (status, _) = send_request(app, post_resource("Patient", &patient)).await;
-    assert_eq!(status, StatusCode::CREATED);
-
-    let app = build_test_app(pool.clone());
-    let (status, _) = send_request(app, get_resource("Patient", "minimal-patient")).await;
-    assert_eq!(status, StatusCode::OK);
-}
-
-#[tokio::test]
-async fn unauthenticated_mode_uses_public_tenant() {
-    let pool = setup_test_db().await;
-    clean_tenant(&pool, "public").await;
-    let app = build_test_app(pool.clone());
-    let patient = test_data::minimal_patient();
-
-    let _ = send_request(app, post_resource("Patient", &patient)).await;
-
-    // Verify it's stored under the "public" tenant
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM fhir_resources WHERE tenant_id = 'public'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(count, 1);
-}
 
 // ─── AUTH REQUIRED MODE ────────────────────────────────────────────────────
 
@@ -120,12 +86,35 @@ async fn token_with_wrong_secret_is_rejected() {
             resource_types: None,
             exp: 4_102_444_800,
         },
-        &jsonwebtoken::EncodingKey::from_secret("wrong-secret".as_bytes()),
+        &jsonwebtoken::EncodingKey::from_secret("wrong-secret-wrong-secret-wrong!!".as_bytes()),
     )
     .unwrap();
 
     let app = build_test_app_auth_required(pool.clone());
     let patient = test_data::minimal_patient();
+    let (status, _) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn token_missing_exp_is_rejected() {
+    let pool = setup_test_db().await;
+    let token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &fhir_server::auth::Claims {
+            sub: Some("auth-no-exp".to_owned()),
+            tenant: None,
+            scope: Some("read write".to_owned()),
+            resource_types: None,
+            exp: None,
+        },
+        &jsonwebtoken::EncodingKey::from_secret(common::TEST_JWT_SECRET.as_bytes()),
+    )
+    .unwrap();
+
+    let patient = test_data::minimal_patient();
+    let app = build_test_app_auth_required(pool.clone());
     let (status, _) =
         send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);

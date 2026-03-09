@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod test_data;
 
 use std::sync::{Arc, LazyLock};
@@ -12,12 +14,15 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tower::ServiceExt;
 
+use fhir_server::auth::AuthConfig;
 use fhir_server::validation::FhirSchemaValidator;
 
 /// Shared validator instance — parsing the 3.8 MB FHIR schema once instead of
 /// per-test saves significant CPU time.
 static SHARED_VALIDATOR: LazyLock<Arc<FhirSchemaValidator>> =
     LazyLock::new(|| Arc::new(FhirSchemaValidator::new().expect("validator should load")));
+
+pub const TEST_JWT_SECRET: &str = "test-secret-0123456789abcdef012345";
 
 /// Claims for JWT test tokens.
 #[derive(serde::Serialize)]
@@ -30,45 +35,52 @@ pub struct TestClaims {
 }
 
 /// Build a fully-wired application router connected to a real PostgreSQL pool.
-///
-/// Uses a specific tenant for isolation. The app allows unauthenticated
-/// requests that default to the "public" tenant—for per-test isolation,
-/// prefer `build_test_app_for_tenant`.
 pub fn build_test_app(pool: PgPool) -> Router {
-    use fhir_server::auth::AuthConfig;
+    build_test_app_with_options(pool, false, Vec::new())
+}
+
+/// Build a test app with authentication enforced (unauthenticated requests are rejected).
+pub fn build_test_app_auth_required(pool: PgPool) -> Router {
+    build_test_app_with_options(pool, false, Vec::new())
+}
+
+pub fn build_test_app_with_options(
+    pool: PgPool,
+    serve_docs: bool,
+    cors_allowed_origins: Vec<axum::http::HeaderValue>,
+) -> Router {
     use fhir_server::store::PgStore;
     use fhir_server::{AppState, build_router};
 
     let state = AppState {
         store: PgStore::new(pool),
-        auth: AuthConfig {
-            jwt_secret: "test-secret".to_owned(),
-            allow_unauthenticated: true,
-        },
+        auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_JWT_SECRET),
         fhir_base_url: "http://localhost:8080/fhir".to_owned(),
         validator: Arc::clone(&SHARED_VALIDATOR),
+        cors_allowed_origins,
+        serve_docs,
     };
 
     build_router(state)
 }
 
-/// Build a test app with authentication enforced (unauthenticated requests are rejected).
-pub fn build_test_app_auth_required(pool: PgPool) -> Router {
-    use fhir_server::auth::AuthConfig;
+/// Build a test app in dev mode (with token-minting endpoint).
+pub fn build_dev_test_app(pool: PgPool) -> (Router, fhir_server::auth::DevKeyConfig) {
+    use fhir_server::auth::DevKeyConfig;
     use fhir_server::store::PgStore;
     use fhir_server::{AppState, build_router};
 
+    let dev_cfg = DevKeyConfig::new(TEST_JWT_SECRET);
     let state = AppState {
         store: PgStore::new(pool),
-        auth: AuthConfig {
-            jwt_secret: "test-secret".to_owned(),
-            allow_unauthenticated: false,
-        },
+        auth: AuthConfig::Dev(dev_cfg.clone()),
         fhir_base_url: "http://localhost:8080/fhir".to_owned(),
         validator: Arc::clone(&SHARED_VALIDATOR),
+        cors_allowed_origins: Vec::new(),
+        serve_docs: false,
     };
 
-    build_router(state)
+    (build_router(state), dev_cfg)
 }
 
 /// Create a JWT token for testing with given claims.
@@ -76,7 +88,7 @@ pub fn create_test_token(claims: &TestClaims) -> String {
     encode(
         &Header::default(),
         claims,
-        &EncodingKey::from_secret("test-secret".as_bytes()),
+        &EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
     )
     .expect("token encoding should succeed")
 }

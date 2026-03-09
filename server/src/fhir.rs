@@ -544,6 +544,8 @@ mod tests {
     };
     use chrono::Utc;
 
+    const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
     #[test]
     fn generates_id_for_create() {
         let mut body = json!({"resourceType": "Patient"});
@@ -638,13 +640,25 @@ mod tests {
 
         let app = build_router(AppState {
             store: PgStore::new(pool),
-            auth: AuthConfig {
-                jwt_secret: "secret".to_owned(),
-                allow_unauthenticated: true,
-            },
+            auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_SECRET),
             fhir_base_url: "http://localhost:8080/fhir".to_owned(),
             validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
+            cors_allowed_origins: Vec::new(),
+            serve_docs: false,
         });
+
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &crate::auth::Claims {
+                sub: Some("test-tenant".to_owned()),
+                tenant: None,
+                scope: Some("read write".to_owned()),
+                resource_types: None,
+                exp: Some(4_102_444_800),
+            },
+            &jsonwebtoken::EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .expect("token should encode");
 
         let response = app
             .oneshot(
@@ -652,6 +666,7 @@ mod tests {
                     .method("POST")
                     .uri("/fhir/Patient")
                     .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
                     .body(Body::from(r#"{"resourceType":"Patient","bogus":true}"#))
                     .expect("request should build"),
             )
@@ -679,13 +694,25 @@ mod tests {
 
         let app = build_router(AppState {
             store: PgStore::new(pool),
-            auth: AuthConfig {
-                jwt_secret: "secret".to_owned(),
-                allow_unauthenticated: true,
-            },
+            auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_SECRET),
             fhir_base_url: "http://localhost:8080/fhir".to_owned(),
             validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
+            cors_allowed_origins: Vec::new(),
+            serve_docs: false,
         });
+
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &crate::auth::Claims {
+                sub: Some("test-tenant".to_owned()),
+                tenant: None,
+                scope: Some("read write".to_owned()),
+                resource_types: None,
+                exp: Some(4_102_444_800),
+            },
+            &jsonwebtoken::EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .expect("token should encode");
 
         let response = app
             .oneshot(
@@ -693,6 +720,7 @@ mod tests {
                     .method("POST")
                     .uri("/fhir/Patient")
                     .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
                     .body(Body::from("{"))
                     .expect("request should build"),
             )

@@ -117,3 +117,30 @@ stop using subagents to read files ffs, use them with proper interesting tasks i
 ## VScode GPT-5.4/autopilot
 
 #file:fhir-specs.md
+---
+## VScode GPT-5.4/autopilot
+
+#file:fhir-specs.md Can we implement the recommendations from #file:SECURITY_AUDIT.md that make sense ?
+The default "dev-secret-change-me" is a terrible idea. Actually, what is this implementation ? shouldn't we only verify the signature of JWT ? why do we have a secret at all? Shouldn't we step up our game?
+
+CorsLayer::permissive is a massive brain fart, LOL. come on !
+
+no rate limiting: I find this to be better handled on other layers, as rate limiting isn't easy to implement well.
+
+audit logging: HTTP access logs like in the #file:rusty-valkey-forward-auth should be good enough for now.
+
+no tls: I usually  let the ingress / proxy handle TLS.
+
+ALLOW_UNAUTHENTICATED: remove this feature, completely erase it !
+
+XSS in fhier field: skill issue from th eclient side, we can ignore.
+
+Let's work on that and then iterate until the app is in a good state.
+---
+Yes please do the next steps. I want to support good JWT logic, so either fetch JWT well or have a development default system but it has to be secure and not hardcoded MongoDB like security.
+---
+remember to run/update the end 2 end tests in python too ;)
+---
+## VScode GPT-5.4/autopilot
+
+Could you review the SQL schema. Are we doing this correctly? Is it correct format? Are we following best practices?

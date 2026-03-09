@@ -35,7 +35,7 @@ FHIR_TEST_CASES_DIR = ROOT_DIR / "fhir-test-cases"
 R5_EXAMPLES_DIR = FHIR_TEST_CASES_DIR / "r5" / "examples"
 
 EXAMPLES_URL = "https://build.fhir.org/examples-json.zip"
-JWT_SECRET = "e2e-secret"
+JWT_SECRET = "e2e-secret-0123456789abcdefghijkl"
 JWT_ALGORITHM = "HS256"
 HOST = "127.0.0.1"
 SERVER_PORT = 18080
@@ -937,9 +937,10 @@ def native_environment(database_url: str) -> dict[str, str]:
         {
             "DATABASE_URL": database_url,
             "BIND_ADDR": f"{HOST}:{SERVER_PORT}",
+            "JWT_MODE": "static",
             "JWT_SECRET": JWT_SECRET,
-            "ALLOW_UNAUTHENTICATED": "false",
             "FHIR_BASE_URL": f"http://{HOST}:{SERVER_PORT}/fhir",
+            "SERVE_DOCS": "false",
             "RUST_LOG": env.get("RUST_LOG", "fhir_server=info,tower_http=info"),
         }
     )

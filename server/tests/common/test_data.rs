@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use serde_json::{Value, json};
 
 /// A minimal valid FHIR Patient resource.

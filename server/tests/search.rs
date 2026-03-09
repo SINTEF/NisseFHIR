@@ -2,9 +2,8 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{
-    build_test_app, build_test_app_auth_required, clean_tenant, post_resource,
-    post_resource_with_token, restricted_token, search_resource, search_resource_with_token,
-    send_request, setup_test_db, tenant_token, test_data,
+    build_test_app_auth_required, clean_tenant, post_resource_with_token, restricted_token,
+    search_resource_with_token, send_request, setup_test_db, tenant_token, test_data,
 };
 
 #[tokio::test]
@@ -108,22 +107,6 @@ async fn search_rejects_forbidden_resource_type() {
         send_request(app, search_resource_with_token("Patient", None, &token)).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["issue"][0]["code"], "forbidden");
-}
-
-#[tokio::test]
-async fn search_in_unauthenticated_mode_uses_public_tenant() {
-    let pool = setup_test_db().await;
-    clean_tenant(&pool, "public").await;
-
-    let app = build_test_app(pool.clone());
-    let (status, _) =
-        send_request(app, post_resource("Patient", &test_data::minimal_patient())).await;
-    assert_eq!(status, StatusCode::CREATED);
-
-    let app = build_test_app(pool);
-    let (status, body) = send_request(app, search_resource("Patient")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["total"], 1);
 }
 
 #[tokio::test]

@@ -1,14 +1,135 @@
+use std::sync::{Arc, RwLock};
+
+use anyhow::{Context, Result};
 use axum::http::{HeaderMap, header};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use jsonwebtoken::{
+    Algorithm, DecodingKey, EncodingKey, Validation, decode, decode_header,
+    jwk::{AlgorithmParameters, EllipticCurve, Jwk, JwkSet},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 
-#[derive(Clone, Debug)]
-pub struct AuthConfig {
-    pub jwt_secret: String,
-    pub allow_unauthenticated: bool,
+// ---------------------------------------------------------------------------
+// Auth configuration variants
+// ---------------------------------------------------------------------------
+
+/// JWT verification configuration.
+#[derive(Clone)]
+pub enum AuthConfig {
+    /// Single static key (HMAC secret or asymmetric PEM).
+    Static(StaticKeyConfig),
+    /// Keys fetched from a JWKS endpoint with background refresh.
+    Jwks(JwksConfig),
+    /// Development-only mode: random key with token-minting endpoint.
+    Dev(DevKeyConfig),
 }
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static(_) => f.write_str("AuthConfig::Static(…)"),
+            Self::Jwks(_) => f.write_str("AuthConfig::Jwks(…)"),
+            Self::Dev(_) => f.write_str("AuthConfig::Dev(…)"),
+        }
+    }
+}
+
+/// Convenience constructors that produce a `Static` variant (backward-compat).
+impl AuthConfig {
+    pub fn from_hmac_secret(algorithm: Algorithm, secret: &str) -> Self {
+        let validation = build_validation(algorithm, None, None);
+        Self::Static(StaticKeyConfig {
+            decoding_key: Arc::new(DecodingKey::from_secret(secret.as_bytes())),
+            validation: Arc::new(validation),
+        })
+    }
+
+    pub fn from_rsa_pem(algorithm: Algorithm, pem: &str) -> Result<Self> {
+        let validation = build_validation(algorithm, None, None);
+        let key = DecodingKey::from_rsa_pem(pem.as_bytes())
+            .context("failed to parse RSA public key PEM")?;
+        Ok(Self::Static(StaticKeyConfig {
+            decoding_key: Arc::new(key),
+            validation: Arc::new(validation),
+        }))
+    }
+
+    pub fn from_ec_pem(algorithm: Algorithm, pem: &str) -> Result<Self> {
+        let validation = build_validation(algorithm, None, None);
+        let key = DecodingKey::from_ec_pem(pem.as_bytes())
+            .context("failed to parse EC public key PEM")?;
+        Ok(Self::Static(StaticKeyConfig {
+            decoding_key: Arc::new(key),
+            validation: Arc::new(validation),
+        }))
+    }
+}
+
+// --- Static key config ---
+
+#[derive(Clone)]
+pub struct StaticKeyConfig {
+    pub decoding_key: Arc<DecodingKey>,
+    pub validation: Arc<Validation>,
+}
+
+impl StaticKeyConfig {
+    pub fn new(algorithm: Algorithm, secret: &str, issuer: Option<&str>, audience: Option<&str>) -> Self {
+        let validation = build_validation(algorithm, issuer, audience);
+        Self {
+            decoding_key: Arc::new(DecodingKey::from_secret(secret.as_bytes())),
+            validation: Arc::new(validation),
+        }
+    }
+
+    pub fn from_rsa_pem(pem: &str, validation: Validation) -> Result<Self> {
+        let key = DecodingKey::from_rsa_pem(pem.as_bytes())
+            .context("failed to parse RSA public key PEM")?;
+        Ok(Self { decoding_key: Arc::new(key), validation: Arc::new(validation) })
+    }
+
+    pub fn from_ec_pem(pem: &str, validation: Validation) -> Result<Self> {
+        let key = DecodingKey::from_ec_pem(pem.as_bytes())
+            .context("failed to parse EC public key PEM")?;
+        Ok(Self { decoding_key: Arc::new(key), validation: Arc::new(validation) })
+    }
+}
+
+// --- JWKS config ---
+
+#[derive(Clone)]
+pub struct JwksConfig {
+    pub key_store: Arc<RwLock<JwkSet>>,
+    pub jwks_uri: String,
+    pub refresh_secs: u64,
+    pub issuer: Option<String>,
+    pub audience: Option<String>,
+}
+
+// --- Dev config ---
+
+#[derive(Clone)]
+pub struct DevKeyConfig {
+    pub encoding_key: Arc<EncodingKey>,
+    pub decoding_key: Arc<DecodingKey>,
+    pub validation: Arc<Validation>,
+}
+
+impl DevKeyConfig {
+    pub fn new(secret: &str) -> Self {
+        let validation = build_validation(Algorithm::HS256, None, None);
+        Self {
+            encoding_key: Arc::new(EncodingKey::from_secret(secret.as_bytes())),
+            decoding_key: Arc::new(DecodingKey::from_secret(secret.as_bytes())),
+            validation: Arc::new(validation),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Claims & access context
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Claims {
@@ -36,75 +157,144 @@ impl AccessContext {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Token verification
+// ---------------------------------------------------------------------------
+
 pub fn extract_access_context(
     headers: &HeaderMap,
     cfg: &AuthConfig,
 ) -> Result<AccessContext, AppError> {
-    let bearer = headers
+    let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(AppError::Unauthorized)?;
 
-    if let Some(token) = bearer {
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.validate_exp = true;
-        let decoded = decode::<Claims>(
-            token,
-            &DecodingKey::from_secret(cfg.jwt_secret.as_bytes()),
-            &validation,
-        )
-        .map_err(|_| AppError::Unauthorized)?;
+    let claims = match cfg {
+        AuthConfig::Static(sc) => decode::<Claims>(token, &sc.decoding_key, &sc.validation)
+            .map_err(|_| AppError::Unauthorized)?
+            .claims,
+        AuthConfig::Jwks(jc) => verify_with_jwks(token, jc)?,
+        AuthConfig::Dev(dc) => decode::<Claims>(token, &dc.decoding_key, &dc.validation)
+            .map_err(|_| AppError::Unauthorized)?
+            .claims,
+    };
 
-        let claims = decoded.claims;
-        let tenant_id = claims.tenant.or(claims.sub).ok_or(AppError::Unauthorized)?;
+    let tenant_id = claims.tenant.or(claims.sub).ok_or(AppError::Unauthorized)?;
+    let scope = claims.scope.unwrap_or_else(|| "read write".to_owned());
+    let can_read = scope.split_whitespace().any(|s| s.eq_ignore_ascii_case("read"));
+    let can_write = scope.split_whitespace().any(|s| s.eq_ignore_ascii_case("write"));
 
-        let scope = claims.scope.unwrap_or_else(|| "read write".to_owned());
-        let can_read = scope
-            .split_whitespace()
-            .any(|s| s.eq_ignore_ascii_case("read"));
-        let can_write = scope
-            .split_whitespace()
-            .any(|s| s.eq_ignore_ascii_case("write"));
+    Ok(AccessContext {
+        tenant_id,
+        can_read,
+        can_write,
+        resource_allow_list: claims.resource_types,
+    })
+}
 
-        return Ok(AccessContext {
-            tenant_id,
-            can_read,
-            can_write,
-            resource_allow_list: claims.resource_types,
-        });
+// ---------------------------------------------------------------------------
+// JWKS-specific verification
+// ---------------------------------------------------------------------------
+
+fn verify_with_jwks(token: &str, cfg: &JwksConfig) -> Result<Claims, AppError> {
+    let header = decode_header(token).map_err(|_| AppError::Unauthorized)?;
+    let kid = header.kid.as_deref().ok_or(AppError::Unauthorized)?;
+
+    let key_store = cfg
+        .key_store
+        .read()
+        .map_err(|_| AppError::Internal("JWKS key store lock poisoned".into()))?;
+    let jwk = key_store.find(kid).ok_or(AppError::Unauthorized)?;
+
+    let algorithm = algorithm_for_jwk(jwk).ok_or(AppError::Unauthorized)?;
+    let decoding_key = DecodingKey::from_jwk(jwk).map_err(|_| AppError::Unauthorized)?;
+
+    let mut validation = Validation::new(algorithm);
+    validation.validate_exp = true;
+    if let Some(ref iss) = cfg.issuer {
+        validation.set_issuer(&[iss]);
+    }
+    if let Some(ref aud) = cfg.audience {
+        validation.set_audience(&[aud]);
     }
 
-    if cfg.allow_unauthenticated {
-        return Ok(AccessContext {
-            tenant_id: "public".to_owned(),
-            can_read: true,
-            can_write: true,
-            resource_allow_list: None,
-        });
-    }
+    decode::<Claims>(token, &decoding_key, &validation)
+        .map_err(|_| AppError::Unauthorized)
+        .map(|td| td.claims)
+}
 
-    Err(AppError::Unauthorized)
+/// Derive the JWT algorithm from a JWK's metadata or key type.
+fn algorithm_for_jwk(jwk: &Jwk) -> Option<Algorithm> {
+    if let Some(ref key_alg) = jwk.common.key_algorithm {
+        return key_algorithm_to_algorithm(key_alg);
+    }
+    match &jwk.algorithm {
+        AlgorithmParameters::RSA(_) => Some(Algorithm::RS256),
+        AlgorithmParameters::EllipticCurve(ec) => match ec.curve {
+            EllipticCurve::P256 => Some(Algorithm::ES256),
+            EllipticCurve::P384 => Some(Algorithm::ES384),
+            _ => None,
+        },
+        AlgorithmParameters::OctetKey(_) => Some(Algorithm::HS256),
+        AlgorithmParameters::OctetKeyPair(_) => Some(Algorithm::EdDSA),
+    }
+}
+
+fn key_algorithm_to_algorithm(ka: &jsonwebtoken::jwk::KeyAlgorithm) -> Option<Algorithm> {
+    use jsonwebtoken::jwk::KeyAlgorithm;
+    match ka {
+        KeyAlgorithm::HS256 => Some(Algorithm::HS256),
+        KeyAlgorithm::HS384 => Some(Algorithm::HS384),
+        KeyAlgorithm::HS512 => Some(Algorithm::HS512),
+        KeyAlgorithm::RS256 => Some(Algorithm::RS256),
+        KeyAlgorithm::RS384 => Some(Algorithm::RS384),
+        KeyAlgorithm::RS512 => Some(Algorithm::RS512),
+        KeyAlgorithm::ES256 => Some(Algorithm::ES256),
+        KeyAlgorithm::ES384 => Some(Algorithm::ES384),
+        KeyAlgorithm::PS256 => Some(Algorithm::PS256),
+        KeyAlgorithm::PS384 => Some(Algorithm::PS384),
+        KeyAlgorithm::PS512 => Some(Algorithm::PS512),
+        KeyAlgorithm::EdDSA => Some(Algorithm::EdDSA),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+pub fn build_validation(algorithm: Algorithm, issuer: Option<&str>, audience: Option<&str>) -> Validation {
+    let mut v = Validation::new(algorithm);
+    v.validate_exp = true;
+    if let Some(iss) = issuer {
+        v.set_issuer(&[iss]);
+    }
+    if let Some(aud) = audience {
+        v.set_audience(&[aud]);
+    }
+    v
 }
 
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue, header};
-    use jsonwebtoken::{EncodingKey, Header, encode};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 
     use super::{AuthConfig, Claims, extract_access_context};
 
-    fn make_config(allow_unauth: bool) -> AuthConfig {
-        AuthConfig {
-            jwt_secret: "secret".to_owned(),
-            allow_unauthenticated: allow_unauth,
-        }
+    const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    fn make_config() -> AuthConfig {
+        AuthConfig::from_hmac_secret(Algorithm::HS256, TEST_SECRET)
     }
 
     fn encode_claims(claims: &Claims) -> String {
         encode(
             &Header::default(),
             claims,
-            &EncodingKey::from_secret("secret".as_bytes()),
+            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
         )
         .expect("token should encode")
     }
@@ -128,7 +318,7 @@ mod tests {
             exp: Some(4_102_444_800),
         });
 
-        let access = extract_access_context(&bearer_headers(&token), &make_config(false))
+        let access = extract_access_context(&bearer_headers(&token), &make_config())
             .expect("token should decode");
 
         assert_eq!(access.tenant_id, "tenant-a");
@@ -145,10 +335,10 @@ mod tests {
             tenant: None,
             scope: Some("read".to_owned()),
             resource_types: None,
-            exp: Some(0), // epoch = long expired
+            exp: Some(0),
         });
 
-        let result = extract_access_context(&bearer_headers(&token), &make_config(false));
+        let result = extract_access_context(&bearer_headers(&token), &make_config());
         assert!(result.is_err());
     }
 
@@ -163,30 +353,18 @@ mod tests {
                 resource_types: None,
                 exp: Some(4_102_444_800),
             },
-            &EncodingKey::from_secret("wrong-secret".as_bytes()),
+            &EncodingKey::from_secret("wrong-secret-wrong-secret-wrong!!".as_bytes()),
         )
         .unwrap();
 
-        let result = extract_access_context(&bearer_headers(&token), &make_config(false));
+        let result = extract_access_context(&bearer_headers(&token), &make_config());
         assert!(result.is_err());
     }
 
     #[test]
-    fn unauthenticated_allowed_returns_public_tenant() {
-        let headers = HeaderMap::new(); // no auth header
-        let access = extract_access_context(&headers, &make_config(true))
-            .expect("unauthenticated should be allowed");
-
-        assert_eq!(access.tenant_id, "public");
-        assert!(access.can_read);
-        assert!(access.can_write);
-        assert!(access.resource_allow_list.is_none());
-    }
-
-    #[test]
-    fn unauthenticated_disallowed_returns_error() {
+    fn unauthenticated_returns_error() {
         let headers = HeaderMap::new();
-        let result = extract_access_context(&headers, &make_config(false));
+        let result = extract_access_context(&headers, &make_config());
         assert!(result.is_err());
     }
 
@@ -200,7 +378,7 @@ mod tests {
             exp: Some(4_102_444_800),
         });
 
-        let access = extract_access_context(&bearer_headers(&token), &make_config(false))
+        let access = extract_access_context(&bearer_headers(&token), &make_config())
             .expect("should decode");
 
         assert_eq!(access.tenant_id, "tenant-val");
@@ -216,7 +394,7 @@ mod tests {
             exp: Some(4_102_444_800),
         });
 
-        let result = extract_access_context(&bearer_headers(&token), &make_config(false));
+        let result = extract_access_context(&bearer_headers(&token), &make_config());
         assert!(result.is_err());
     }
 
@@ -230,7 +408,7 @@ mod tests {
             exp: Some(4_102_444_800),
         });
 
-        let access = extract_access_context(&bearer_headers(&token), &make_config(false)).unwrap();
+        let access = extract_access_context(&bearer_headers(&token), &make_config()).unwrap();
         assert!(access.can_read);
         assert!(!access.can_write);
     }
@@ -245,7 +423,7 @@ mod tests {
             exp: Some(4_102_444_800),
         });
 
-        let access = extract_access_context(&bearer_headers(&token), &make_config(false)).unwrap();
+        let access = extract_access_context(&bearer_headers(&token), &make_config()).unwrap();
         assert!(!access.can_read);
         assert!(access.can_write);
     }
@@ -260,9 +438,23 @@ mod tests {
             exp: Some(4_102_444_800),
         });
 
-        let access = extract_access_context(&bearer_headers(&token), &make_config(false)).unwrap();
+        let access = extract_access_context(&bearer_headers(&token), &make_config()).unwrap();
         assert!(access.can_read);
         assert!(access.can_write);
+    }
+
+    #[test]
+    fn rejects_missing_exp_claim() {
+        let token = encode_claims(&Claims {
+            sub: Some("tenant-a".to_owned()),
+            tenant: None,
+            scope: Some("read write".to_owned()),
+            resource_types: None,
+            exp: None,
+        });
+
+        let result = extract_access_context(&bearer_headers(&token), &make_config());
+        assert!(result.is_err());
     }
 
     #[test]
@@ -275,10 +467,10 @@ mod tests {
             exp: Some(4_102_444_800),
         });
 
-        let access = extract_access_context(&bearer_headers(&token), &make_config(false)).unwrap();
-        assert!(access.can_access_resource_type("patient")); // lowercase
-        assert!(access.can_access_resource_type("PATIENT")); // uppercase
-        assert!(access.can_access_resource_type("Patient")); // exact
+        let access = extract_access_context(&bearer_headers(&token), &make_config()).unwrap();
+        assert!(access.can_access_resource_type("patient"));
+        assert!(access.can_access_resource_type("PATIENT"));
+        assert!(access.can_access_resource_type("Patient"));
         assert!(!access.can_access_resource_type("Observation"));
     }
 
@@ -292,7 +484,7 @@ mod tests {
             exp: Some(4_102_444_800),
         });
 
-        let access = extract_access_context(&bearer_headers(&token), &make_config(false)).unwrap();
+        let access = extract_access_context(&bearer_headers(&token), &make_config()).unwrap();
         assert!(access.can_access_resource_type("Patient"));
         assert!(access.can_access_resource_type("Observation"));
         assert!(access.can_access_resource_type("AnythingElse"));
@@ -306,7 +498,94 @@ mod tests {
             HeaderValue::from_static("Token some-value"),
         );
 
-        let result = extract_access_context(&headers, &make_config(false));
+        let result = extract_access_context(&headers, &make_config());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn jwks_rejects_token_without_kid() {
+        use std::sync::{Arc, RwLock};
+        use super::JwksConfig;
+        use jsonwebtoken::jwk::JwkSet;
+
+        let cfg = AuthConfig::Jwks(JwksConfig {
+            key_store: Arc::new(RwLock::new(JwkSet { keys: vec![] })),
+            jwks_uri: "https://example.com/.well-known/jwks.json".to_owned(),
+            refresh_secs: 300,
+            issuer: None,
+            audience: None,
+        });
+
+        // Default Header has no `kid`, so JWKS lookup should fail.
+        let token = encode_claims(&Claims {
+            sub: Some("t".to_owned()),
+            tenant: None,
+            scope: None,
+            resource_types: None,
+            exp: Some(4_102_444_800),
+        });
+
+        let result = extract_access_context(&bearer_headers(&token), &cfg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn jwks_rejects_unknown_kid() {
+        use std::sync::{Arc, RwLock};
+        use super::JwksConfig;
+        use jsonwebtoken::jwk::JwkSet;
+
+        let cfg = AuthConfig::Jwks(JwksConfig {
+            key_store: Arc::new(RwLock::new(JwkSet { keys: vec![] })),
+            jwks_uri: "https://example.com/.well-known/jwks.json".to_owned(),
+            refresh_secs: 300,
+            issuer: None,
+            audience: None,
+        });
+
+        // Use HS256 so we can sign with HMAC but include a kid in the header.
+        let mut hdr = Header::new(Algorithm::HS256);
+        hdr.kid = Some("nonexistent-kid".to_owned());
+
+        let token = encode(
+            &hdr,
+            &Claims {
+                sub: Some("t".to_owned()),
+                tenant: None,
+                scope: None,
+                resource_types: None,
+                exp: Some(4_102_444_800),
+            },
+            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .unwrap();
+
+        let result = extract_access_context(&bearer_headers(&token), &cfg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dev_mode_accepts_own_tokens() {
+        use super::DevKeyConfig;
+
+        let dev = DevKeyConfig::new(TEST_SECRET);
+        let cfg = AuthConfig::Dev(dev.clone());
+
+        let token = encode(
+            &Header::default(),
+            &Claims {
+                sub: Some("dev-tenant".to_owned()),
+                tenant: None,
+                scope: Some("read write".to_owned()),
+                resource_types: None,
+                exp: Some(4_102_444_800),
+            },
+            &dev.encoding_key,
+        )
+        .unwrap();
+
+        let access = extract_access_context(&bearer_headers(&token), &cfg)
+            .expect("dev token should verify");
+        assert_eq!(access.tenant_id, "dev-tenant");
     }
 }

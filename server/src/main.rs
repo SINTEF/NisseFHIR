@@ -23,14 +23,19 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| "failed to run migrations")?;
 
+    // JWKS: fetch keys before accepting any requests, then start background refresh.
+    if let AuthConfig::Jwks(ref jwks_cfg) = config.auth {
+        fhir_server::jwks::initial_fetch(jwks_cfg).await?;
+        fhir_server::jwks::spawn_refresh(jwks_cfg.clone());
+    }
+
     let state = AppState {
         store: PgStore::new(pool),
-        auth: AuthConfig {
-            jwt_secret: config.jwt_secret,
-            allow_unauthenticated: config.allow_unauthenticated,
-        },
+        auth: config.auth.clone(),
         fhir_base_url: config.fhir_base_url,
         validator: Arc::new(FhirSchemaValidator::new()?),
+        cors_allowed_origins: config.cors_allowed_origins.clone(),
+        serve_docs: config.serve_docs,
     };
 
     let app = build_router(state);

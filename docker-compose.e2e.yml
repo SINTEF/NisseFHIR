@@ -25,9 +25,10 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/fhir_e2e
       BIND_ADDR: 0.0.0.0:8080
-      JWT_SECRET: e2e-secret
-      ALLOW_UNAUTHENTICATED: "false"
+      JWT_MODE: "static"
+      JWT_SECRET: e2e-secret-0123456789abcdefghijkl
       FHIR_BASE_URL: http://127.0.0.1:18080/fhir
+      SERVE_DOCS: "false"
       RUST_LOG: fhir_server=info,tower_http=info
     ports:
       - "18080:8080"
