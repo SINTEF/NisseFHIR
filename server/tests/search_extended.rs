@@ -6,9 +6,9 @@ use common::{
     send_request, setup_test_db, tenant_token,
     test_data::{condition_example, encounter_example},
 };
-use serde_json::json;
 
-const TENANT: &str = "search-extended-tenant";
+// Each test uses its own tenant to avoid race conditions when tests
+// run concurrently.
 
 // ---------------------------------------------------------------------------
 // Condition search tests
@@ -17,8 +17,9 @@ const TENANT: &str = "search-extended-tenant";
 #[tokio::test]
 async fn search_condition_by_clinical_status() {
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    let tenant = "sx-cond-clin-status";
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     let app = build_test_app(pool.clone());
     let (s, _) = send_request(
@@ -40,14 +41,15 @@ async fn search_condition_by_clinical_status() {
     let total = body["total"].as_i64().unwrap_or(0);
     assert!(total >= 1, "expected at least 1 match, got {total}");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 #[tokio::test]
 async fn search_condition_by_code() {
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    let tenant = "sx-cond-code";
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     let app = build_test_app(pool.clone());
     let (s, _) = send_request(
@@ -63,7 +65,7 @@ async fn search_condition_by_code() {
         app,
         search_resource_with_token(
             "Condition",
-            Some("code=http://snomed.info/sct|39065001"),
+            Some("code=http://snomed.info/sct|386661006"),
             &token,
         ),
     )
@@ -73,14 +75,15 @@ async fn search_condition_by_code() {
     let total = body["total"].as_i64().unwrap_or(0);
     assert!(total >= 1, "expected at least 1 match for code search, got {total}");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 #[tokio::test]
 async fn search_condition_by_subject() {
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    let tenant = "sx-cond-subject";
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     let app = build_test_app(pool.clone());
     let (s, _) = send_request(
@@ -102,14 +105,15 @@ async fn search_condition_by_subject() {
     let total = body["total"].as_i64().unwrap_or(0);
     assert!(total >= 1, "expected at least 1 match for subject search, got {total}");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 #[tokio::test]
 async fn search_condition_by_category() {
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    let tenant = "sx-cond-category";
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     let app = build_test_app(pool.clone());
     let (s, _) = send_request(
@@ -130,14 +134,15 @@ async fn search_condition_by_category() {
     let total = body["total"].as_i64().unwrap_or(0);
     assert!(total >= 1, "expected at least 1 match for category search, got {total}");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 #[tokio::test]
 async fn search_condition_by_onset_date() {
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    let tenant = "sx-cond-onset";
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     let app = build_test_app(pool.clone());
     let (s, _) = send_request(
@@ -158,14 +163,15 @@ async fn search_condition_by_onset_date() {
     let total = body["total"].as_i64().unwrap_or(0);
     assert!(total >= 1, "expected at least 1 match for onset-date search, got {total}");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 #[tokio::test]
 async fn search_condition_no_match_returns_empty_bundle() {
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    let tenant = "sx-cond-nomatch";
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     let app = build_test_app(pool.clone());
     let (s, _) = send_request(
@@ -187,7 +193,7 @@ async fn search_condition_no_match_returns_empty_bundle() {
     let total = body["total"].as_i64().unwrap_or(-1);
     assert_eq!(total, 0, "expected 0 matches for nonexistent code");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,8 +203,9 @@ async fn search_condition_no_match_returns_empty_bundle() {
 #[tokio::test]
 async fn search_encounter_by_status() {
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    let tenant = "sx-enc-status";
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     let app = build_test_app(pool.clone());
     let (s, _) = send_request(
@@ -219,14 +226,15 @@ async fn search_encounter_by_status() {
     let total = body["total"].as_i64().unwrap_or(0);
     assert!(total >= 1, "expected at least 1 match for status search, got {total}");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 #[tokio::test]
 async fn search_encounter_by_subject() {
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    let tenant = "sx-enc-subject";
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     let app = build_test_app(pool.clone());
     let (s, _) = send_request(
@@ -247,14 +255,15 @@ async fn search_encounter_by_subject() {
     let total = body["total"].as_i64().unwrap_or(0);
     assert!(total >= 1, "expected at least 1 match for subject search, got {total}");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 #[tokio::test]
 async fn search_encounter_by_type() {
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    let tenant = "sx-enc-type";
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     let app = build_test_app(pool.clone());
     let (s, _) = send_request(
@@ -279,14 +288,15 @@ async fn search_encounter_by_type() {
     let total = body["total"].as_i64().unwrap_or(0);
     assert!(total >= 1, "expected at least 1 match for type search, got {total}");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 #[tokio::test]
 async fn search_encounter_no_match_status() {
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    let tenant = "sx-enc-nomatch";
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     let app = build_test_app(pool.clone());
     let (s, _) = send_request(
@@ -308,5 +318,5 @@ async fn search_encounter_no_match_status() {
     let total = body["total"].as_i64().unwrap_or(-1);
     assert_eq!(total, 0, "expected 0 matches for wrong status");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }

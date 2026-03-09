@@ -247,3 +247,5 @@ Please continue as stated in file:fhir-specs.md Thanks.
 ---
 ## VScode GPT-5.4/autopilot
 I think it's also time to tidy up the current_tasks and ideas folders, as most of them have been implemented by now. can you check what can safely be removed? It's in the git history worst case.
+---
+I would severely remove a lot of content of the files, or remove the ones that have been implemented and add the ideas or next steps in new ideas in the ideas folder.

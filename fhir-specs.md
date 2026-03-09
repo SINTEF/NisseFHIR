@@ -16,7 +16,7 @@ You have a `current_tasks` folder where you can write .txt or .md documents abou
 
 You also have a `ideas` folder, where you can also write down your ideas in `.txt` or `.md` files.
 
-When a task or an idea is finished to a satisfactory level, you can move it to the `done` folder. You can check those folders if you are out of ideas of what to do, or if you want to check the progress of the project.
+When a task or an idea is finished to a satisfactory level, you can move it to the `done` folder. You can check those folders if you are out of ideas of what to do, or if you want to check the progress of the project. Please keep those folders tidy and move them over to done.
 
 You can write design document, helping documentation, or any other kind of documentation in the doc folder.
 

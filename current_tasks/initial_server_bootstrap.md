@@ -14,8 +14,8 @@
 - Added baseline collection search (`GET /fhir/:resource_type`) returning paged FHIR `searchset` Bundles
 - Added first-pass resource-specific search parameters: Patient (`name`, `birthdate`, `identifier`) and Observation (`code`, `status`, `subject`)
 - Transaction/batch Bundle processing via `POST /fhir` with full atomicity for transactions (rollback on failure) and independent processing for batches (inline OperationOutcome on failure)
-- Comprehensive test suites: 146 unit tests + 143 integration tests (289 total)
-- Capability statement with security metadata (JWT, CORS, scopes), patch interaction, patchFormat
+- Comprehensive test suites: 182 unit tests + 164 integration tests (346 total), 93.04% line coverage
+- Capability statement with security metadata (JWT, CORS, scopes), patch interaction, patchFormat, conditionalCreate, `application/fhir+json` format
 - Dockerfile for containerized deployment
 - Python E2E harness that boots native or Docker deployments, prefers local PostgreSQL for native runs, scans both the HL7 `examples/` directory and `fhir-test-cases/r5/examples/` in parallel by inferred `resourceType`, classifies accepted/invalid/unsupported/payload-too-large outcomes, and runs real CRUD/search checks over HTTP
 - All dependencies up to date (verified with cargo-outdated)
@@ -26,10 +26,13 @@
 - Request body size limit (50 MB) with HTTP 413 + OperationOutcome for oversized payloads
 - JSON Patch support (RFC 6902) via `PATCH /fhir/:type/:id` with 11 integration tests
 - Instance history endpoint via `GET /fhir/:type/:id/_history`, returning FHIR history Bundles backed by `fhir_resource_history`, including delete tombstones and version ETags
+- Conditional create support via `If-None-Exist` header on `POST /fhir/:type` (0 matches → 201, 1 match → 200, >1 match → 412)
+- `application/fhir+json` content type for all FHIR endpoints via response middleware
+- Expanded search parameter integration tests for Condition (`clinical-status`, `code`, `patient`, `category`, `onset-date`) and Encounter (`status`, `subject`, `type`)
 
 ## Remaining (near-term)
 
-1. Add conditional interactions (If-Match on update/delete, If-None-Exist on create).
+1. Add conditional delete (If-Match on delete) and conditional update/delete by search criteria.
 2. Expand search support to additional resource types and closer FHIR semantics where needed.
 3. Add ND-JSON bulk data export support.
 4. Add CI pipeline with disposable PostgreSQL and run the Python E2E harness in both native and Docker modes.

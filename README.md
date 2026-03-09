@@ -30,7 +30,7 @@ The author did develop a FHIR 5 server in Golang for a healthcare company years 
 
 You can read the [PROMPTS.md](./PROMPTS.md) file for the list of prompts used during the development. This is somewhat more involved than a "create a FHIR 6 server" prompt.
 
-The time gain with this method of development is huge, but it still requires a lot of human guidance and expertise. I think that compared to the C compiler experiment, what should be next is perhaps less obvious for an AI agent.
+The time gain with this method of development is huge, but it still requires a lot of human guidance and expertise. I think that compared to the C compiler experiment, what should be done next is perhaps less obvious for an AI agent. However, as NisseFHIR reached a good state, with good testing and a good base of features, the AI agents were able to find improvements on their own with minimal guidance.
 
 ## Software Stack and Architecture
 

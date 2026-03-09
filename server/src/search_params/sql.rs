@@ -985,4 +985,625 @@ mod tests {
             "expected system constraint in containment query, got: {sql}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // String filter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn string_filter_single_field_produces_like() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_string_filter(
+            &mut query,
+            &JsonPath::Field(&["name"]),
+            "peter",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("lower(resource->>'name') LIKE"),
+            "expected LIKE on scalar, got: {sql}"
+        );
+        assert!(
+            sql.contains("jsonb_array_elements"),
+            "expected array fallback, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn string_filter_nested_field_drills_into_parent() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_string_filter(
+            &mut query,
+            &JsonPath::Field(&["address", "city"]),
+            "boston",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("elem->>'city'"),
+            "expected nested city extraction, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn string_filter_deep_nested_field() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_string_filter(
+            &mut query,
+            &JsonPath::Field(&["contact", "name", "family"]),
+            "smith",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("elem->'name'->>'family'"),
+            "expected deep nested path, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn string_filter_where_filter_produces_discriminated_search() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_string_filter(
+            &mut query,
+            &JsonPath::WhereFilter {
+                base: &["telecom"],
+                filter_field: "system",
+                filter_value: "email",
+                suffix: &["value"],
+            },
+            "john",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("elem->>'system' = 'email'"),
+            "expected system filter, got: {sql}"
+        );
+        assert!(
+            sql.contains("elem->>'value'"),
+            "expected value extraction, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn string_filter_exists_and_position_are_noop() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_string_filter(&mut query, &JsonPath::Exists(&["deceased"]), "test");
+        let sql = query.into_sql();
+        assert_eq!(sql, "SELECT 1 FROM t WHERE 1=1", "Exists should be no-op for string");
+
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_string_filter(&mut query, &JsonPath::Position(&["position"]), "test");
+        let sql = query.into_sql();
+        assert_eq!(sql, "SELECT 1 FROM t WHERE 1=1", "Position should be no-op for string");
+    }
+
+    // -----------------------------------------------------------------------
+    // Reference filter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reference_filter_single_field_checks_reference() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_reference_filter(
+            &mut query,
+            &JsonPath::Field(&["subject"]),
+            "Patient/123",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("resource->'subject'->>'reference'"),
+            "expected subject.reference extraction, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn reference_filter_nested_field_with_reference_suffix() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_reference_filter(
+            &mut query,
+            &JsonPath::Field(&["subject", "reference"]),
+            "Patient/123",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("resource->'subject'->>'reference'"),
+            "expected direct text extraction for reference suffix, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn reference_filter_nested_field_without_reference_suffix() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_reference_filter(
+            &mut query,
+            &JsonPath::Field(&["encounter", "serviceProvider"]),
+            "Organization/1",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("->>'reference'"),
+            "expected reference extraction, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn reference_filter_where_filter() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_reference_filter(
+            &mut query,
+            &JsonPath::WhereFilter {
+                base: &["participant"],
+                filter_field: "type",
+                filter_value: "ATND",
+                suffix: &[],
+            },
+            "Practitioner/1",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("elem->>'type' = 'ATND'"),
+            "expected type filter, got: {sql}"
+        );
+        assert!(
+            sql.contains("elem->>'reference'"),
+            "expected reference extraction, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn reference_filter_exists_and_position_are_noop() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_reference_filter(&mut query, &JsonPath::Exists(&["field"]), "Patient/1");
+        let sql = query.into_sql();
+        assert_eq!(sql, "SELECT 1 FROM t WHERE 1=1");
+    }
+
+    // -----------------------------------------------------------------------
+    // Date filter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn date_filter_single_field_uses_prefix_like() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_date_filter(
+            &mut query,
+            &JsonPath::Field(&["birthDate"]),
+            "1974",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("resource->>'birthDate'"),
+            "expected date field extraction, got: {sql}"
+        );
+        assert!(
+            sql.contains("LIKE"),
+            "expected LIKE for prefix match, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn date_filter_nested_field_uses_array_expansion() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_date_filter(
+            &mut query,
+            &JsonPath::Field(&["actualPeriod", "start"]),
+            "2024-01",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("jsonb_array_elements"),
+            "expected array expansion for nested date field, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn date_filter_where_filter() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_date_filter(
+            &mut query,
+            &JsonPath::WhereFilter {
+                base: &["event"],
+                filter_field: "type",
+                filter_value: "start",
+                suffix: &["dateTime"],
+            },
+            "2024",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("elem->>'type' = 'start'"),
+            "expected type filter, got: {sql}"
+        );
+        assert!(
+            sql.contains("LIKE"),
+            "expected LIKE for prefix match, got: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // URI filter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn uri_filter_single_field_exact_match() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_uri_filter(
+            &mut query,
+            &JsonPath::Field(&["url"]),
+            "http://example.org/fhir/ValueSet/123",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("resource->>'url'"),
+            "expected url extraction, got: {sql}"
+        );
+        assert!(
+            !sql.contains("LIKE"),
+            "URI should use exact match, not LIKE, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn uri_filter_where_filter_is_noop() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_uri_filter(
+            &mut query,
+            &JsonPath::WhereFilter {
+                base: &["telecom"],
+                filter_field: "system",
+                filter_value: "url",
+                suffix: &["value"],
+            },
+            "http://example.org",
+        );
+        let sql = query.into_sql();
+        assert_eq!(sql, "SELECT 1 FROM t WHERE 1=1", "WhereFilter not supported for URI");
+    }
+
+    // -----------------------------------------------------------------------
+    // Number filter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn number_filter_casts_to_numeric() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_number_filter(
+            &mut query,
+            &JsonPath::Field(&["priority"]),
+            "5",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("::text::numeric"),
+            "expected numeric cast, got: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Quantity filter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn quantity_filter_value_only() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_quantity_filter(
+            &mut query,
+            &JsonPath::Field(&["valueQuantity"]),
+            "5.4",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("->>'value')::numeric"),
+            "expected value extraction, got: {sql}"
+        );
+        assert!(
+            !sql.contains("->>'system'"),
+            "should not check system when not provided, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn quantity_filter_full_value_system_code() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_quantity_filter(
+            &mut query,
+            &JsonPath::Field(&["valueQuantity"]),
+            "5.4|http://unitsofmeasure.org|mg",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("->>'system'"),
+            "expected system check, got: {sql}"
+        );
+        assert!(
+            sql.contains("->>'code'"),
+            "expected code check, got: {sql}"
+        );
+        assert!(
+            sql.contains("->>'unit'"),
+            "expected unit fallback check, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn quantity_filter_code_only_no_number() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_quantity_filter(
+            &mut query,
+            &JsonPath::Field(&["valueQuantity"]),
+            "||mg",
+        );
+        let sql = query.into_sql();
+        // Number part is empty, so TRUE is used
+        assert!(
+            sql.contains("TRUE"),
+            "expected TRUE placeholder for missing number, got: {sql}"
+        );
+        assert!(
+            sql.contains("->>'code'"),
+            "expected code check, got: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Exists filter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exists_filter_true_checks_not_null_and_not_false() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_exists_filter(&mut query, &["deceased"], "true");
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("IS NOT NULL"),
+            "expected NOT NULL check, got: {sql}"
+        );
+        assert!(
+            sql.contains("!= 'false'::jsonb"),
+            "expected false exclusion, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn exists_filter_false_checks_null_or_false() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_exists_filter(&mut query, &["deceased"], "false");
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("IS NULL"),
+            "expected NULL check, got: {sql}"
+        );
+        assert!(
+            sql.contains("= 'false'::jsonb"),
+            "expected false inclusion, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn exists_filter_other_value_checks_not_null() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_exists_filter(&mut query, &["field"], "something");
+        let sql = query.into_sql();
+        assert!(sql.contains("IS NOT NULL"), "expected NOT NULL for other values, got: {sql}");
+        assert!(!sql.contains("'false'"), "should not check false for non-boolean, got: {sql}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Token filter: identifier path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn token_identifier_uses_containment_operator() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_token_identifier(&mut query, "identifier", Some("http://example.org"), "12345");
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("resource->'identifier' @> jsonb_build_array(jsonb_build_object('value', to_jsonb("),
+            "expected containment on identifier, got: {sql}"
+        );
+        assert!(
+            sql.contains("'system', to_jsonb("),
+            "expected system in containment, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn token_identifier_without_system() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_token_identifier(&mut query, "identifier", None, "12345");
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("'value', to_jsonb("),
+            "expected value in containment, got: {sql}"
+        );
+        assert!(
+            !sql.contains("'system'"),
+            "should not have system without system filter, got: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Token filter: nested field
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn token_nested_field_two_segments() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_token_nested_field(&mut query, &["code", "coding"], Some("http://loinc.org"), "15074-8");
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("coding->>'code'"),
+            "expected coding code extraction, got: {sql}"
+        );
+        assert!(
+            sql.contains("coding->>'system'"),
+            "expected coding system extraction, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn token_nested_field_deep_nesting() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_token_nested_field(&mut query, &["a", "b", "c"], None, "val");
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("resource->'a'->'b'->>'c'"),
+            "expected deep nested path, got: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Token filter: where filter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn token_where_filter_with_suffix() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_token_where_filter(
+            &mut query,
+            &["telecom"],
+            "system",
+            "phone",
+            &["value"],
+            None,
+            "555-1234",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("elem->>'system' = 'phone'"),
+            "expected system filter, got: {sql}"
+        );
+        assert!(
+            sql.contains("elem->>'value'"),
+            "expected value extraction via suffix, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn token_where_filter_without_suffix() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_token_where_filter(
+            &mut query,
+            &["telecom"],
+            "system",
+            "email",
+            &[],
+            Some("mailto"),
+            "test@example.com",
+        );
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("elem->>'system' = 'email'"),
+            "expected system filter, got: {sql}"
+        );
+        assert!(
+            sql.contains("elem->>'value'"),
+            "expected value extraction, got: {sql}"
+        );
+        assert!(
+            sql.contains("elem->>'system'"),
+            "expected system check in suffix, got: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Special filter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn special_filter_position_calls_near_filter() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_special_filter(&mut query, &JsonPath::Position(&["position"]), "42.36|-71.06|10|km");
+        let sql = query.into_sql();
+        assert!(sql.contains("earth_distance"), "expected near filter, got: {sql}");
+    }
+
+    #[test]
+    fn special_filter_non_position_is_noop() {
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_special_filter(&mut query, &JsonPath::Field(&["status"]), "test");
+        let sql = query.into_sql();
+        assert_eq!(sql, "SELECT 1 FROM t WHERE 1=1", "non-Position path should be no-op");
+    }
+
+    // -----------------------------------------------------------------------
+    // push_search_filters integration test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn push_search_filters_applies_multiple_filters() {
+        use super::super::registry::SearchParam;
+
+        static PARAMS: [SearchParam; 2] = [
+            SearchParam {
+                code: "status",
+                param_type: SearchParamType::Token,
+                path: JsonPath::Field(&["status"]),
+            },
+            SearchParam {
+                code: "subject",
+                param_type: SearchParamType::Reference,
+                path: JsonPath::Field(&["subject"]),
+            },
+        ];
+
+        let filters = vec![
+            SearchFilter {
+                param: &PARAMS[0],
+                value: "active".to_owned(),
+            },
+            SearchFilter {
+                param: &PARAMS[1],
+                value: "Patient/123".to_owned(),
+            },
+        ];
+
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_search_filters(&mut query, &filters);
+        let sql = query.into_sql();
+        assert!(sql.contains("resource->>'status'"), "expected status filter, got: {sql}");
+        assert!(sql.contains("resource->'subject'->>'reference'"), "expected subject filter, got: {sql}");
+    }
+
+    #[test]
+    fn push_search_filters_composite_is_noop() {
+        use super::super::registry::SearchParam;
+
+        static PARAMS: [SearchParam; 1] = [
+            SearchParam {
+                code: "combo",
+                param_type: SearchParamType::Composite,
+                path: JsonPath::Field(&["field"]),
+            },
+        ];
+
+        let filters = vec![
+            SearchFilter {
+                param: &PARAMS[0],
+                value: "value".to_owned(),
+            },
+        ];
+
+        let mut query: QueryBuilder<'_, Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_search_filters(&mut query, &filters);
+        let sql = query.into_sql();
+        assert_eq!(sql, "SELECT 1 FROM t WHERE 1=1", "Composite should be no-op");
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper function tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_jsonb_text_path_empty_segments() {
+        assert_eq!(build_jsonb_text_path("resource", &[]), "resource::text");
+    }
+
+    #[test]
+    fn safe_array_elements_produces_case_when() {
+        let result = safe_array_elements("resource->'name'");
+        assert!(result.contains("jsonb_typeof(resource->'name')"), "expected type check");
+        assert!(result.contains("'array'"), "expected array check");
+        assert!(result.contains("jsonb_build_array"), "expected wrap fallback");
+        assert!(result.contains("'[]'::jsonb"), "expected empty array fallback");
+    }
 }
