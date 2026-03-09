@@ -98,7 +98,11 @@ pub fn capability_statement(base_url: &str) -> Value {
                 ],
                 "description": "This server supports JWT Bearer Token authentication with static keys or a JWKS provider. Tokens encode tenant identity, read/write scopes, and optional resource type restrictions."
             },
-            "resource": resource_entries
+            "resource": resource_entries,
+            "interaction": [
+                {"code": "transaction"},
+                {"code": "batch"}
+            ]
         }],
         "implementation": {
             "description": "Lightweight Rust FHIR server",

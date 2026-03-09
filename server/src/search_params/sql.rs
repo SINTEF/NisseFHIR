@@ -95,7 +95,7 @@ fn push_string_array_or_scalar(query: &mut QueryBuilder<'_, Postgres>, field: &s
     query.push("') LIKE ");
     query.push_bind(pattern.to_owned());
     let arr_expr = safe_array_elements(&format!("resource->'{field}'"));
-    query.push(&format!(
+    query.push(format!(
         " OR EXISTS (SELECT 1 FROM {arr_expr} AS elem WHERE lower(elem::text) LIKE "
     ));
     query.push_bind(pattern.to_owned());
@@ -115,7 +115,7 @@ fn push_string_nested_field(
         let child = segments[1];
         // Parent might be an array of objects
         let arr = safe_array_elements(&format!("resource->'{parent}'"));
-        query.push(&format!(
+        query.push(format!(
             " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE lower(elem->>'"
         ));
         query.push(child);
@@ -134,7 +134,7 @@ fn push_string_nested_field(
         let mid = segments[1];
         let child = segments[2];
         let arr = safe_array_elements(&format!("resource->'{parent}'"));
-        query.push(&format!(
+        query.push(format!(
             " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE lower(elem->'"
         ));
         query.push(mid);
@@ -156,7 +156,7 @@ fn push_string_where_filter(
 ) {
     let base_path = build_jsonb_path("resource", base);
     let arr = safe_array_elements(&base_path);
-    query.push(&format!(
+    query.push(format!(
         " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"
     ));
     query.push(filter_field);
@@ -275,7 +275,7 @@ fn push_token_single_field(
             query.push("))))");
 
             // Check array of identifiers
-            query.push(&format!(
+            query.push(format!(
                 " OR EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'value' = "
             ));
             query.push_bind(code.to_owned());
@@ -334,7 +334,7 @@ fn push_token_nested_field(
         query.push(" AND (");
 
         // Direct value in nested object
-        query.push(&format!(
+        query.push(format!(
             "EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"
         ));
         query.push(child);
@@ -344,7 +344,7 @@ fn push_token_nested_field(
         query.push(")");
 
         // Also check CodeableConcept (child has .coding array)
-        query.push(&format!(
+        query.push(format!(
             " OR EXISTS (SELECT 1 FROM {arr} AS elem, jsonb_array_elements(COALESCE(elem->'"
         ));
         query.push(child);
@@ -379,7 +379,7 @@ fn push_token_where_filter(
 ) {
     let base_path = build_jsonb_path("resource", base);
     let arr = safe_array_elements(&base_path);
-    query.push(&format!(
+    query.push(format!(
         " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"
     ));
     query.push(filter_field);
@@ -454,7 +454,7 @@ fn push_reference_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath
 
                 // Or it's an array of references
                 let arr = safe_array_elements(&format!("resource->'{field}'"));
-                query.push(&format!(
+                query.push(format!(
                     " OR EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'reference' = "
                 ));
                 query.push_bind(value.to_owned());
@@ -479,7 +479,7 @@ fn push_reference_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath
 
                     // Also check array case
                     let arr = safe_array_elements(&jsonb_path);
-                    query.push(&format!(
+                    query.push(format!(
                         " OR EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'reference' = "
                     ));
                     query.push_bind(value.to_owned());
@@ -495,7 +495,7 @@ fn push_reference_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath
         } => {
             let base_path = build_jsonb_path("resource", base);
             let arr = safe_array_elements(&base_path);
-            query.push(&format!(
+            query.push(format!(
                 " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"
             ));
             query.push(filter_field);
@@ -531,7 +531,7 @@ fn push_date_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath, val
                 let parent = segments[0];
                 let child_segments = &segments[1..];
                 let arr = safe_array_elements(&format!("resource->'{parent}'"));
-                query.push(&format!(" AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE "));
+                query.push(format!(" AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE "));
                 let elem_text = build_jsonb_text_path("elem", child_segments);
                 query.push(&elem_text);
                 // Date matching: the FHIR date could be partial (year, year-month, full date)
@@ -554,7 +554,7 @@ fn push_date_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath, val
         } => {
             let base_path = build_jsonb_path("resource", base);
             let arr = safe_array_elements(&base_path);
-            query.push(&format!(
+            query.push(format!(
                 " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"
             ));
             query.push(filter_field);
@@ -638,17 +638,16 @@ fn push_quantity_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath,
                 query.push("TRUE");
             }
 
-            if let Some(sys) = system {
-                if !sys.is_empty() {
+            if let Some(sys) = system
+                && !sys.is_empty() {
                     query.push(" AND ");
                     query.push(&jsonb_path);
                     query.push("->>'system' = ");
                     query.push_bind(sys.to_owned());
                 }
-            }
 
-            if let Some(c) = code {
-                if !c.is_empty() {
+            if let Some(c) = code
+                && !c.is_empty() {
                     query.push(" AND (");
                     query.push(&jsonb_path);
                     query.push("->>'code' = ");
@@ -659,7 +658,6 @@ fn push_quantity_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath,
                     query.push_bind(c.to_owned());
                     query.push(")");
                 }
-            }
 
             query.push(")");
         }
@@ -672,9 +670,8 @@ fn push_quantity_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath,
 // ---------------------------------------------------------------------------
 
 fn push_special_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath, value: &str) {
-    match path {
-        JsonPath::Position(segments) => push_near_filter(query, segments, value),
-        _ => {} // Other Special params not yet implemented
+    if let JsonPath::Position(segments) = path {
+        push_near_filter(query, segments, value);
     }
 }
 

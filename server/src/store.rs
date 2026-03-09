@@ -5,6 +5,10 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use crate::error::AppError;
 use crate::search_params::sql::SearchFilter;
 
+/// A database executor that can be either a pool or an active transaction.
+/// Used by the Bundle transaction/batch handler to share store logic.
+pub type TxExecutor<'a> = sqlx::Transaction<'a, Postgres>;
+
 #[derive(Clone)]
 pub struct PgStore {
     pool: PgPool,
@@ -396,6 +400,202 @@ impl PgStore {
             resources,
             next_after_id,
         })
+    }
+
+    /// Begin a database transaction for Bundle transaction processing.
+    pub async fn begin_tx(&self) -> Result<TxExecutor<'_>, AppError> {
+        Ok(self.pool.begin().await?)
+    }
+
+    /// Upsert a resource inside an existing transaction.
+    pub async fn upsert_in_tx(
+        tx: &mut TxExecutor<'_>,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+    ) -> Result<StoredResource, AppError> {
+        let row = sqlx::query(
+            r#"
+            WITH next_version AS (
+                SELECT COALESCE(
+                    (
+                        SELECT version_id + 1
+                        FROM fhir_resources
+                        WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+                    ),
+                    (
+                        SELECT MAX(version_id) + 1
+                        FROM fhir_resource_history
+                        WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+                    ),
+                    1
+                ) AS version_id
+            ),
+            upserted AS (
+                INSERT INTO fhir_resources (tenant_id, resource_type, id, version_id, resource)
+                SELECT $1, $2, $3, next_version.version_id, $4
+                FROM next_version
+                ON CONFLICT (resource_type, tenant_id, id)
+                DO UPDATE SET
+                    resource = EXCLUDED.resource,
+                    version_id = fhir_resources.version_id + 1,
+                    last_updated = now()
+                RETURNING version_id, last_updated, resource
+            )
+            INSERT INTO fhir_resource_history (
+                tenant_id, resource_type, id, version_id, last_updated, deleted, resource
+            )
+            SELECT $1, $2, $3, version_id, last_updated, FALSE, resource
+            FROM upserted
+            RETURNING version_id, last_updated, resource
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(resource)
+        .fetch_one(&mut **tx)
+        .await?;
+
+        Ok(StoredResource {
+            id: id.to_owned(),
+            version_id: row.get::<i64, _>("version_id"),
+            last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
+            resource: row.get::<Value, _>("resource"),
+        })
+    }
+
+    /// Read a resource inside an existing transaction.
+    pub async fn read_in_tx(
+        tx: &mut TxExecutor<'_>,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<Option<StoredResource>, AppError> {
+        let row = sqlx::query(
+            r#"
+            SELECT version_id, last_updated, resource
+            FROM fhir_resources
+            WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?;
+
+        Ok(row.map(|r| StoredResource {
+            id: id.to_owned(),
+            version_id: r.get::<i64, _>("version_id"),
+            last_updated: r.get::<DateTime<Utc>, _>("last_updated"),
+            resource: r.get::<Value, _>("resource"),
+        }))
+    }
+
+    /// Update an existing resource inside a transaction.
+    pub async fn update_in_tx(
+        tx: &mut TxExecutor<'_>,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+    ) -> Result<Option<StoredResource>, AppError> {
+        let updated = sqlx::query(
+            r#"
+            UPDATE fhir_resources
+            SET resource = $4,
+                version_id = version_id + 1,
+                last_updated = now()
+            WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+            RETURNING version_id, last_updated, resource
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(&resource)
+        .fetch_optional(&mut **tx)
+        .await?;
+
+        let Some(updated_row) = updated else {
+            return Ok(None);
+        };
+
+        let new_version_id = updated_row.get::<i64, _>("version_id");
+        let last_updated = updated_row.get::<DateTime<Utc>, _>("last_updated");
+        let updated_resource = updated_row.get::<Value, _>("resource");
+
+        sqlx::query(
+            r#"
+            INSERT INTO fhir_resource_history (
+                tenant_id, resource_type, id, version_id, last_updated, deleted, resource
+            )
+            VALUES ($1, $2, $3, $4, $5, FALSE, $6)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(new_version_id)
+        .bind(last_updated)
+        .bind(&updated_resource)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(Some(StoredResource {
+            id: id.to_owned(),
+            version_id: new_version_id,
+            last_updated,
+            resource: updated_resource,
+        }))
+    }
+
+    /// Delete a resource inside a transaction.
+    pub async fn delete_in_tx(
+        tx: &mut TxExecutor<'_>,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<bool, AppError> {
+        let deleted = sqlx::query(
+            r#"
+            DELETE FROM fhir_resources
+            WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+            RETURNING version_id, resource
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?;
+
+        let Some(row) = deleted else {
+            return Ok(false);
+        };
+
+        let version_id = row.get::<i64, _>("version_id") + 1;
+        let resource = row.get::<Value, _>("resource");
+
+        sqlx::query(
+            r#"
+            INSERT INTO fhir_resource_history (
+                tenant_id, resource_type, id, version_id, last_updated, deleted, resource
+            )
+            VALUES ($1, $2, $3, $4, now(), TRUE, $5)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(version_id)
+        .bind(resource)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(true)
     }
 
     pub async fn read_history(

@@ -64,6 +64,7 @@ pub struct AppState {
     paths(
         fhir::healthz,
         fhir::get_metadata,
+        fhir::process_bundle,
         fhir::search_resources,
         fhir::create_resource,
         fhir::read_resource,

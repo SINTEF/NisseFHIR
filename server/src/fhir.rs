@@ -20,6 +20,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/metadata", get(get_metadata))
+        .route("/fhir", axum::routing::post(process_bundle))
         .route(
             "/fhir/{resource_type}",
             get(search_resources).post(create_resource),
@@ -429,6 +430,427 @@ pub async fn patch_resource(
     Ok((StatusCode::OK, response_headers, Json(stored.resource)).into_response())
 }
 
+/// Process a FHIR Bundle of type `transaction` or `batch`.
+///
+/// - `transaction`: all entries are processed atomically in a single SQL transaction.
+///   If any entry fails, the entire transaction is rolled back and an OperationOutcome is returned.
+/// - `batch`: each entry is processed independently. Failures for individual entries are reported
+///   inline in the response Bundle while other entries succeed normally.
+#[utoipa::path(post, path = "/fhir",
+    responses(
+        (status = 200, description = "Bundle response"),
+        (status = 400, description = "Invalid Bundle"),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_auth" = [])))]
+pub async fn process_bundle(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let access = extract_access_context(&headers, &state.auth)?;
+    if !access.can_write {
+        return Err(AppError::Forbidden);
+    }
+
+    let Json(body) = parse_json_payload(payload)?;
+
+    let resource_type = body
+        .get("resourceType")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if resource_type != "Bundle" {
+        return Err(AppError::BadRequest(
+            "expected resourceType 'Bundle'".to_owned(),
+        ));
+    }
+
+    let bundle_type = body
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let is_transaction = match bundle_type {
+        "transaction" => true,
+        "batch" => false,
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "unsupported Bundle type '{other}'; expected 'transaction' or 'batch'"
+            )));
+        }
+    };
+
+    let entries = body
+        .get("entry")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    if is_transaction {
+        process_transaction(&state, &access.tenant_id, entries).await
+    } else {
+        process_batch(&state, &access.tenant_id, entries).await
+    }
+}
+
+/// Parse a Bundle entry's `request` into method + url parts.
+struct EntryRequest {
+    method: String,
+    resource_type: String,
+    id: Option<String>,
+}
+
+fn parse_entry_request(entry: &Value) -> Result<EntryRequest, String> {
+    let request = entry
+        .get("request")
+        .ok_or("entry is missing 'request'")?;
+
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .ok_or("entry.request.method is required")?
+        .to_uppercase();
+
+    let url = request
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or("entry.request.url is required")?;
+
+    // URL is relative, e.g. "Patient", "Patient/123", "Observation/abc"
+    let url = url.trim_start_matches('/');
+    let mut parts = url.splitn(2, '/');
+    let resource_type = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or("entry.request.url must contain a resource type")?
+        .to_owned();
+    let id = parts.next().map(|s| s.to_owned());
+
+    Ok(EntryRequest {
+        method,
+        resource_type,
+        id,
+    })
+}
+
+/// Build a single response entry for a successful operation.
+fn success_entry(status: &str, resource: Option<&Value>, location: Option<String>, etag: Option<String>, last_modified: Option<String>) -> Value {
+    let mut response = json!({ "status": status });
+    if let Some(loc) = location {
+        response["location"] = Value::String(loc);
+    }
+    if let Some(etag) = etag {
+        response["etag"] = Value::String(etag);
+    }
+    if let Some(lm) = last_modified {
+        response["lastModified"] = Value::String(lm);
+    }
+    let mut entry = json!({ "response": response });
+    if let Some(res) = resource {
+        entry["resource"] = res.clone();
+    }
+    entry
+}
+
+/// Build a single response entry for a failed operation.
+fn error_entry(status: &str, diagnostics: &str) -> Value {
+    json!({
+        "response": {
+            "status": status,
+        },
+        "resource": {
+            "resourceType": "OperationOutcome",
+            "issue": [{
+                "severity": "error",
+                "code": "exception",
+                "diagnostics": diagnostics,
+            }]
+        }
+    })
+}
+
+/// Process a single Bundle entry against the store.
+/// Returns the response entry Value on success.
+async fn process_single_entry<E>(
+    executor: &mut E,
+    tenant_id: &str,
+    entry: &Value,
+    validator: &crate::validation::FhirSchemaValidator,
+) -> Result<Value, String>
+where
+    E: BundleExecutor,
+{
+    let req = parse_entry_request(entry)?;
+
+    match req.method.as_str() {
+        "POST" => {
+            // Create
+            let mut resource = entry
+                .get("resource")
+                .cloned()
+                .ok_or("POST entry must include a resource")?;
+
+            validate_resource_payload(&req.resource_type, &mut resource, None)
+                .map_err(|e| e.to_string())?;
+            let id = resource
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("resource id is required after validation")?
+                .to_owned();
+
+            validator
+                .validate_resource(&req.resource_type, &resource)
+                .map_err(|e| e.to_string())?;
+
+            let stored = executor
+                .exec_upsert(tenant_id, &req.resource_type, &id, resource)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            Ok(success_entry(
+                "201 Created",
+                Some(&stored.resource),
+                Some(format!("{}/{}", req.resource_type, id)),
+                Some(format!("W/\"{}\"", stored.version_id)),
+                Some(stored.last_updated.to_rfc3339()),
+            ))
+        }
+        "PUT" => {
+            // Update
+            let id = req.id.as_deref().ok_or("PUT requires a resource id in the URL")?;
+            let mut resource = entry
+                .get("resource")
+                .cloned()
+                .ok_or("PUT entry must include a resource")?;
+
+            validate_resource_payload(&req.resource_type, &mut resource, Some(id))
+                .map_err(|e| e.to_string())?;
+
+            validator
+                .validate_resource(&req.resource_type, &resource)
+                .map_err(|e| e.to_string())?;
+
+            let stored = executor
+                .exec_upsert(tenant_id, &req.resource_type, id, resource)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            Ok(success_entry(
+                "200 OK",
+                Some(&stored.resource),
+                Some(format!("{}/{}", req.resource_type, id)),
+                Some(format!("W/\"{}\"", stored.version_id)),
+                Some(stored.last_updated.to_rfc3339()),
+            ))
+        }
+        "GET" => {
+            // Read
+            let id = req.id.as_deref().ok_or("GET requires a resource id in the URL")?;
+
+            let found = executor
+                .exec_read(tenant_id, &req.resource_type, id)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            match found {
+                Some(stored) => Ok(success_entry(
+                    "200 OK",
+                    Some(&stored.resource),
+                    None,
+                    Some(format!("W/\"{}\"", stored.version_id)),
+                    Some(stored.last_updated.to_rfc3339()),
+                )),
+                None => Err("resource not found".to_owned()),
+            }
+        }
+        "DELETE" => {
+            let id = req.id.as_deref().ok_or("DELETE requires a resource id in the URL")?;
+
+            let deleted = executor
+                .exec_delete(tenant_id, &req.resource_type, id)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            if deleted {
+                Ok(success_entry("204 No Content", None, None, None, None))
+            } else {
+                Err("resource not found".to_owned())
+            }
+        }
+        other => Err(format!("unsupported HTTP method '{other}'")),
+    }
+}
+
+/// Trait abstracting database execution for Bundle entries so both
+/// transaction (single TX) and batch (per-entry) modes share the same logic.
+#[allow(async_fn_in_trait)]
+trait BundleExecutor {
+    async fn exec_upsert(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+    ) -> Result<crate::store::StoredResource, AppError>;
+
+    async fn exec_read(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<Option<crate::store::StoredResource>, AppError>;
+
+    async fn exec_delete(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<bool, AppError>;
+}
+
+/// Executor that operates inside an existing database transaction.
+struct TxBundleExecutor<'a> {
+    tx: crate::store::TxExecutor<'a>,
+}
+
+impl BundleExecutor for TxBundleExecutor<'_> {
+    async fn exec_upsert(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+    ) -> Result<crate::store::StoredResource, AppError> {
+        crate::store::PgStore::upsert_in_tx(&mut self.tx, tenant_id, resource_type, id, resource)
+            .await
+    }
+
+    async fn exec_read(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<Option<crate::store::StoredResource>, AppError> {
+        crate::store::PgStore::read_in_tx(&mut self.tx, tenant_id, resource_type, id).await
+    }
+
+    async fn exec_delete(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<bool, AppError> {
+        crate::store::PgStore::delete_in_tx(&mut self.tx, tenant_id, resource_type, id).await
+    }
+}
+
+/// Executor that uses independent pool connections (for batch mode).
+struct PoolBundleExecutor<'a> {
+    store: &'a crate::store::PgStore,
+}
+
+impl BundleExecutor for PoolBundleExecutor<'_> {
+    async fn exec_upsert(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+    ) -> Result<crate::store::StoredResource, AppError> {
+        self.store.upsert(tenant_id, resource_type, id, resource).await
+    }
+
+    async fn exec_read(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<Option<crate::store::StoredResource>, AppError> {
+        self.store.read(tenant_id, resource_type, id).await
+    }
+
+    async fn exec_delete(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<bool, AppError> {
+        self.store.delete(tenant_id, resource_type, id).await
+    }
+}
+
+/// Process a `transaction` Bundle: all entries succeed or all fail.
+async fn process_transaction(
+    state: &AppState,
+    tenant_id: &str,
+    entries: Vec<Value>,
+) -> Result<Response, AppError> {
+    let mut executor = TxBundleExecutor {
+        tx: state.store.begin_tx().await?,
+    };
+
+    let mut response_entries = Vec::with_capacity(entries.len());
+
+    for entry in &entries {
+        match process_single_entry(&mut executor, tenant_id, entry, &state.validator).await {
+            Ok(resp) => response_entries.push(resp),
+            Err(msg) => {
+                // Transaction mode: any failure aborts the whole thing.
+                // The transaction is dropped (rolled back) automatically.
+                return Err(AppError::BadRequest(format!(
+                    "transaction failed: {msg}"
+                )));
+            }
+        }
+    }
+
+    // All entries succeeded — commit.
+    executor
+        .tx
+        .commit()
+        .await
+        .map_err(|e| AppError::Internal(format!("transaction commit failed: {e}")))?;
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction-response",
+        "entry": response_entries,
+    });
+
+    Ok((StatusCode::OK, Json(bundle)).into_response())
+}
+
+/// Process a `batch` Bundle: each entry is independent.
+async fn process_batch(
+    state: &AppState,
+    tenant_id: &str,
+    entries: Vec<Value>,
+) -> Result<Response, AppError> {
+    let mut executor = PoolBundleExecutor {
+        store: &state.store,
+    };
+
+    let mut response_entries = Vec::with_capacity(entries.len());
+
+    for entry in &entries {
+        match process_single_entry(&mut executor, tenant_id, entry, &state.validator).await {
+            Ok(resp) => response_entries.push(resp),
+            Err(msg) => {
+                // Batch mode: report the error inline but continue processing.
+                response_entries.push(error_entry("400 Bad Request", &msg));
+            }
+        }
+    }
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch-response",
+        "entry": response_entries,
+    });
+
+    Ok((StatusCode::OK, Json(bundle)).into_response())
+}
+
 fn parse_json_payload(
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Json<Value>, AppError> {
@@ -677,13 +1099,12 @@ fn validate_identifier_value(value: &str) -> Result<(), AppError> {
             "identifier must be 'value' or 'system|value'".to_owned(),
         ));
     }
-    if let Some((system, id_value)) = value.split_once('|') {
-        if system.is_empty() || id_value.is_empty() {
+    if let Some((system, id_value)) = value.split_once('|')
+        && (system.is_empty() || id_value.is_empty()) {
             return Err(AppError::BadRequest(
                 "identifier must be 'value' or 'system|value'".to_owned(),
             ));
         }
-    }
     Ok(())
 }
 
