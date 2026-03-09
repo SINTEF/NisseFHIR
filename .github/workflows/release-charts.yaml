@@ -32,6 +32,36 @@ jobs:
             helm dependency list "$dir" 2> /dev/null | tail +2 | head -n -1 | awk '{ print "helm repo add " $1 " " $3 }' | while read cmd; do $cmd; done
           done
 
+      - name: Set chart versions from tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          version="${RELEASE_TAG#v}"
+          semver_pattern='^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+
+          if [[ ! "$version" =~ $semver_pattern ]]; then
+            echo "Release tag '$RELEASE_TAG' does not produce a valid Helm chart version" >&2
+            echo "Use tags like v1.2.3, 1.2.3, v1.2.3-rc.1, or 1.2.3+build.4" >&2
+            exit 1
+          fi
+
+          shopt -s nullglob
+          charts=(charts/*/Chart.yaml)
+
+          if [[ ${#charts[@]} -eq 0 ]]; then
+            echo "No charts found under charts/*/Chart.yaml" >&2
+            exit 1
+          fi
+
+          for chart in "${charts[@]}"; do
+            sed -Ei "s/^version: .*/version: ${version}/" "$chart"
+            sed -Ei "s/^appVersion: .*/appVersion: \"${version}\"/" "$chart"
+          done
+
+          git diff -- charts/*/Chart.yaml
+
       - name: Run chart-releaser
         uses: helm/chart-releaser-action@v1.7.0
         with:

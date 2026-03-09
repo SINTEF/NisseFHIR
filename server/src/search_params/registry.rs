@@ -33,6 +33,10 @@ pub enum JsonPath {
     },
     /// Existence check (e.g. deceased.exists())
     Exists(&'static [&'static str]),
+    /// Geospatial position for `near` searches.
+    /// Segments point to the parent object containing `latitude` and
+    /// `longitude` decimal fields (e.g. ["position"]).
+    Position(&'static [&'static str]),
 }
 
 /// A single search parameter definition.
@@ -1316,7 +1320,7 @@ static PARAMS_LIST: [SearchParam; 12] = [
     SearchParam { code: "title", param_type: SearchParamType::String, path: JsonPath::Field(&["title"]) },
 ];
 
-static PARAMS_LOCATION: [SearchParam; 17] = [
+static PARAMS_LOCATION: [SearchParam; 18] = [
     SearchParam { code: "address", param_type: SearchParamType::String, path: JsonPath::Field(&["address"]) },
     SearchParam { code: "address-city", param_type: SearchParamType::String, path: JsonPath::Field(&["address", "city"]) },
     SearchParam { code: "address-country", param_type: SearchParamType::String, path: JsonPath::Field(&["address", "country"]) },
@@ -1332,6 +1336,7 @@ static PARAMS_LOCATION: [SearchParam; 17] = [
     SearchParam { code: "operational-status", param_type: SearchParamType::Token, path: JsonPath::Field(&["operationalStatus"]) },
     SearchParam { code: "organization", param_type: SearchParamType::Reference, path: JsonPath::Field(&["managingOrganization"]) },
     SearchParam { code: "partof", param_type: SearchParamType::Reference, path: JsonPath::Field(&["partOf"]) },
+    SearchParam { code: "near", param_type: SearchParamType::Special, path: JsonPath::Position(&["position"]) },
     SearchParam { code: "status", param_type: SearchParamType::Token, path: JsonPath::Field(&["status"]) },
     SearchParam { code: "type", param_type: SearchParamType::Token, path: JsonPath::Field(&["type"]) },
 ];

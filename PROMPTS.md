@@ -211,7 +211,12 @@ You are the expert, but why so few indexes compared to the number of search para
 Are we providing this information in the capability statement document?
 
 Also location looks cool: https://build.fhir.org/location.html like "near" search that is very special. perhaps we need some geospatial indexes ? we don't have geospatial features in the postgresql right now, but perhaps we can do some stuff.
-
+---
+yes
 ---
 ## VScode Claude Opus 4.6/autopilot
 I think the ci.yml in the workflows is not using the new ARM nodes from github, so it will super slow. Can you look at how it's done in the rusty-valkey-forwar-auth reference project I included ? can we also take this time to add pre-commit in github and also the pre commit configuration file ?  pre-commit with git leaks can be useful. you can add some .gitlint too and so on.
+---
+## VScode GPT-5.4/autopilot
+
+Can we update the CI for the chart release that when we tag, we replace the chart version and the app version in the Chart.yaml automatically? I always forget, it's annoying.

@@ -35,8 +35,11 @@ pub fn push_search_filters(query: &mut QueryBuilder<'_, Postgres>, filters: &[Se
             SearchParamType::Quantity => {
                 push_quantity_filter(query, &filter.param.path, &filter.value);
             }
-            // Composite and Special are not yet supported as search filters.
-            SearchParamType::Composite | SearchParamType::Special => {}
+            SearchParamType::Special => {
+                push_special_filter(query, &filter.param.path, &filter.value);
+            }
+            // Composite is not yet supported as a search filter.
+            SearchParamType::Composite => {}
         }
     }
 }
@@ -76,8 +79,8 @@ fn push_string_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath, v
         } => {
             push_string_where_filter(query, base, filter_field, filter_value, suffix, &pattern);
         }
-        JsonPath::Exists(_) => {
-            // Exists doesn't make sense for string search, skip.
+        JsonPath::Exists(_) | JsonPath::Position(_) => {
+            // Exists/Position don't apply to string search, skip.
         }
     }
 }
@@ -209,6 +212,7 @@ fn push_token_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath, va
             // exists and is not false/null
             push_exists_filter(query, segments, &code);
         }
+        JsonPath::Position(_) => {}
     }
 }
 
@@ -485,7 +489,7 @@ fn push_reference_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath
             query.push_bind(value.to_owned());
             query.push(")");
         }
-        JsonPath::Exists(_) => {}
+        JsonPath::Exists(_) | JsonPath::Position(_) => {}
     }
 }
 
@@ -541,7 +545,7 @@ fn push_date_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath, val
             query.push_bind(format!("{value}%"));
             query.push(")");
         }
-        JsonPath::Exists(_) => {}
+        JsonPath::Exists(_) | JsonPath::Position(_) => {}
     }
 }
 
@@ -558,7 +562,7 @@ fn push_uri_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath, valu
             query.push(" = ");
             query.push_bind(value.to_owned());
         }
-        JsonPath::WhereFilter { .. } | JsonPath::Exists(_) => {}
+        JsonPath::WhereFilter { .. } | JsonPath::Exists(_) | JsonPath::Position(_) => {}
     }
 }
 
@@ -577,7 +581,7 @@ fn push_number_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath, v
             query.push_bind(value.to_owned());
             query.push("::numeric");
         }
-        JsonPath::WhereFilter { .. } | JsonPath::Exists(_) => {}
+        JsonPath::WhereFilter { .. } | JsonPath::Exists(_) | JsonPath::Position(_) => {}
     }
 }
 
@@ -632,8 +636,89 @@ fn push_quantity_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath,
 
             query.push(")");
         }
-        JsonPath::WhereFilter { .. } | JsonPath::Exists(_) => {}
+        JsonPath::WhereFilter { .. } | JsonPath::Exists(_) | JsonPath::Position(_) => {}
     }
+}
+
+// ---------------------------------------------------------------------------
+// Special search: handles type-specific special parameters (e.g. near)
+// ---------------------------------------------------------------------------
+
+fn push_special_filter(query: &mut QueryBuilder<'_, Postgres>, path: &JsonPath, value: &str) {
+    match path {
+        JsonPath::Position(segments) => push_near_filter(query, segments, value),
+        _ => {} // Other Special params not yet implemented
+    }
+}
+
+/// Parse a FHIR `near` search value: `latitude|longitude|distance|units`.
+///
+/// Returns `(latitude, longitude, distance_meters)` or `None` if the value
+/// is malformed. Distance defaults to 5 km when omitted. The unit is
+/// converted to meters (supports `km` and `mi`; defaults to `km`).
+fn parse_near_value(value: &str) -> Option<(f64, f64, f64)> {
+    let parts: Vec<&str> = value.splitn(4, '|').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let lat: f64 = parts[0].parse().ok()?;
+    let lon: f64 = parts[1].parse().ok()?;
+
+    // Validate ranges
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
+
+    let distance_raw: f64 = parts.get(2).and_then(|d| d.parse().ok()).unwrap_or(5.0);
+    let unit = parts.get(3).copied().unwrap_or("km");
+
+    let distance_meters = match unit {
+        "mi" => distance_raw * 1609.344,
+        _ => distance_raw * 1000.0, // default km
+    };
+
+    if distance_meters <= 0.0 {
+        return None;
+    }
+
+    Some((lat, lon, distance_meters))
+}
+
+/// Append a geospatial proximity filter using the `earthdistance` extension.
+///
+/// Produces SQL like:
+/// ```sql
+/// AND resource->'position' IS NOT NULL
+/// AND earth_distance(
+///       ll_to_earth(
+///         (resource->'position'->>'latitude')::float8,
+///         (resource->'position'->>'longitude')::float8),
+///       ll_to_earth($lat, $lon)
+///     ) <= $distance_meters
+/// ```
+fn push_near_filter(query: &mut QueryBuilder<'_, Postgres>, segments: &[&str], value: &str) {
+    let Some((lat, lon, distance_meters)) = parse_near_value(value) else {
+        return;
+    };
+
+    let pos_path = build_jsonb_path("resource", segments);
+
+    // Guard: skip rows without a position
+    query.push(" AND ");
+    query.push(&pos_path);
+    query.push(" IS NOT NULL");
+
+    // Distance filter using earthdistance extension
+    query.push(" AND earth_distance(ll_to_earth((");
+    query.push(&pos_path);
+    query.push("->>'latitude')::float8, (");
+    query.push(&pos_path);
+    query.push("->>'longitude')::float8), ll_to_earth(");
+    query.push_bind(lat);
+    query.push(", ");
+    query.push_bind(lon);
+    query.push(")) <= ");
+    query.push_bind(distance_meters);
 }
 
 // ---------------------------------------------------------------------------
@@ -752,5 +837,92 @@ mod tests {
             build_jsonb_text_path("resource", &["subject", "reference"]),
             "resource->'subject'->>'reference'"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Near / geospatial parsing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_near_full_value() {
+        let (lat, lon, dist) = parse_near_value("42.36|-71.06|10|km").unwrap();
+        assert!((lat - 42.36).abs() < 1e-6);
+        assert!((lon - (-71.06)).abs() < 1e-6);
+        assert!((dist - 10_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_near_miles() {
+        let (_, _, dist) = parse_near_value("42.36|-71.06|5|mi").unwrap();
+        assert!((dist - 5.0 * 1609.344).abs() < 1e-3);
+    }
+
+    #[test]
+    fn parse_near_default_distance() {
+        // Omitting distance and unit defaults to 5 km
+        let (lat, lon, dist) = parse_near_value("42.36|-71.06").unwrap();
+        assert!((lat - 42.36).abs() < 1e-6);
+        assert!((lon - (-71.06)).abs() < 1e-6);
+        assert!((dist - 5_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_near_rejects_single_value() {
+        assert!(parse_near_value("42.36").is_none());
+    }
+
+    #[test]
+    fn parse_near_rejects_out_of_range_latitude() {
+        assert!(parse_near_value("91.0|-71.06|10|km").is_none());
+    }
+
+    #[test]
+    fn parse_near_rejects_out_of_range_longitude() {
+        assert!(parse_near_value("42.36|181.0|10|km").is_none());
+    }
+
+    #[test]
+    fn parse_near_rejects_zero_distance() {
+        assert!(parse_near_value("42.36|-71.06|0|km").is_none());
+    }
+
+    #[test]
+    fn parse_near_rejects_negative_distance() {
+        assert!(parse_near_value("42.36|-71.06|-5|km").is_none());
+    }
+
+    #[test]
+    fn parse_near_rejects_non_numeric() {
+        assert!(parse_near_value("abc|-71.06|10|km").is_none());
+    }
+
+    #[test]
+    fn near_filter_produces_earth_distance_sql() {
+        let mut query: QueryBuilder<'_, Postgres> =
+            QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_near_filter(&mut query, &["position"], "42.36|-71.06|10|km");
+        let sql = query.into_sql();
+        assert!(
+            sql.contains("earth_distance"),
+            "expected earth_distance in SQL, got: {sql}"
+        );
+        assert!(
+            sql.contains("ll_to_earth"),
+            "expected ll_to_earth in SQL, got: {sql}"
+        );
+        assert!(
+            sql.contains("resource->'position'"),
+            "expected position path in SQL, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn near_filter_skips_invalid_value() {
+        let mut query: QueryBuilder<'_, Postgres> =
+            QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_near_filter(&mut query, &["position"], "invalid");
+        let sql = query.into_sql();
+        // Should not add any condition for invalid input
+        assert_eq!(sql, "SELECT 1 FROM t WHERE 1=1");
     }
 }
