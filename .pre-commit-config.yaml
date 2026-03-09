@@ -1,0 +1,24 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+      - id: check-json
+        exclude: ^(examples/|fhir\.schema\.json$)
+      - id: check-yaml
+        exclude: ^charts/fhir-autopilot/templates/
+      - id: check-xml
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      #- id: no-commit-to-branch # no commits to main
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/jorisroovers/gitlint
+    rev: v0.19.1
+    hooks:
+      - id: gitlint
