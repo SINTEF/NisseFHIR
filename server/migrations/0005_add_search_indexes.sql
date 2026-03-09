@@ -15,7 +15,7 @@
 --   - String LIKE searches with leading wildcard (need pg_trgm / full-text)
 --   - WhereFilter / Exists path types (complex subqueries)
 --
--- See also: current_tasks/index-optimization-followups.md for future work.
+-- See also: ideas/search-and-indexing.md for future work.
 
 -- ============================================================================
 -- PATIENT  (existing: birthdate btree, identifier GIN)
