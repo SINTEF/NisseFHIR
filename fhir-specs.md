@@ -63,6 +63,8 @@ Thankfully, FHIR provides an extensive JSON Schema for validation, which one can
 
 https://docs.rs/jsonschema/latest/jsonschema/ seem like a good contender for this task.
 
+As annoying as it sounds, we should always validate the schema, not an option.
+
 ## DataTypes
 
 FHIR does a good job at defining data types and rules and validations. We should follow them. They als ohave some "expression", that one could probably interpret and reimplement in rust.
@@ -86,6 +88,8 @@ FHIR is apparently created around the concept of document stores, document datab
 I think we could save a lot of time by just using PostgreSQL. It's the best.
 
 I don't think we should go with an ORM. As good as Diesel is, sqlx is a better choice for us, allowing more flexibility and control. We should use sqlx.
+
+Do not be tempted to use sqlite or any other database during development, we only use PostgreSQL.
 
 We should use migrations when using sqlx.
 
@@ -116,6 +120,12 @@ You can read more about security once in a while: https://build.fhir.org/securi
 The server should implement the Capability Statement resource well, as it's not going to support all features we should make sure that what is supported and working is well documented. Those capability statements are also actively used by many FHIR clients.
 
 Source: https://build.fhir.org/capabilitystatement.html
+
+## Dependencies Versions
+
+Make sure to check that you use the latest versions of dependencies, using https://github.com/kbknapp/cargo-outdated
+
+If some dependencies are too recent and not stable or incompatible with other dependencies, you are of course allowed to use slightly older versions, but the idea is to not stay stuck on very old versions.
 
 ## Final Words
 
