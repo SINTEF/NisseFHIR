@@ -8,8 +8,8 @@ mod common;
 use axum::http::StatusCode;
 use common::{
     build_test_app_auth_required, clean_tenant, count_history_entries, count_resources,
-    get_resource_with_token, post_resource_with_token, put_resource_with_token, send_request,
-    setup_test_db, tenant_token, test_data,
+    get_resource_with_token, post_resource_with_token, put_resource_with_token,
+    put_resource_with_token_if_match, send_request, setup_test_db, tenant_token, test_data,
 };
 use sqlx::Row;
 use tower::ServiceExt;
@@ -240,11 +240,12 @@ async fn update_increments_version() {
     // Update (v2)
     let app = build_test_app_auth_required(pool.clone());
     let resp = app
-        .oneshot(put_resource_with_token(
+        .oneshot(put_resource_with_token_if_match(
             "Patient",
             "minimal-patient",
             &patient,
             &token,
+            "W/\"1\"",
         ))
         .await
         .unwrap();
@@ -256,11 +257,12 @@ async fn update_increments_version() {
     // Update again (v3)
     let app = build_test_app_auth_required(pool);
     let resp = app
-        .oneshot(put_resource_with_token(
+        .oneshot(put_resource_with_token_if_match(
             "Patient",
             "minimal-patient",
             &patient,
             &token,
+            "W/\"2\"",
         ))
         .await
         .unwrap();
@@ -334,6 +336,16 @@ async fn update_sets_id_from_url() {
     let mut patient = test_data::minimal_patient();
     patient.as_object_mut().unwrap().remove("id");
 
+    let app = build_test_app_auth_required(pool.clone());
+    let mut create = test_data::minimal_patient();
+    create["id"] = serde_json::json!("url-id-test");
+    let (status, _) = send_request(
+        app,
+        post_resource_with_token("Patient", &create, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
     let app = build_test_app_auth_required(pool);
     let (status, body) = send_request(
         app,
@@ -350,6 +362,16 @@ async fn update_rejects_mismatched_id() {
     let mut patient = test_data::minimal_patient();
     patient["id"] = serde_json::json!("different-id");
 
+    let app = build_test_app_auth_required(pool.clone());
+    let mut create = test_data::minimal_patient();
+    create["id"] = serde_json::json!("url-id");
+    let (status, _) = send_request(
+        app,
+        post_resource_with_token("Patient", &create, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
     let app = build_test_app_auth_required(pool);
     let (status, body) = send_request(
         app,
@@ -364,6 +386,16 @@ async fn update_rejects_mismatched_id() {
 async fn update_rejects_mismatched_resource_type() {
     let (pool, token) = setup("crud-update-mismatch-type").await;
     let obs = test_data::minimal_observation();
+
+    let app = build_test_app_auth_required(pool.clone());
+    let mut create = test_data::minimal_patient();
+    create["id"] = serde_json::json!("minimal-obs");
+    let (status, _) = send_request(
+        app,
+        post_resource_with_token("Patient", &create, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool);
     let (status, body) = send_request(
@@ -470,6 +502,89 @@ async fn update_preserves_all_fields() {
     assert_eq!(body["name"][0]["family"], "Chalmers");
     assert_eq!(body["gender"], "male");
     assert_eq!(body["birthDate"], "1974-12-25");
+}
+
+#[tokio::test]
+async fn update_without_if_match_succeeds() {
+    let (pool, token) = setup("crud-update-no-if-match").await;
+    let app = build_test_app_auth_required(pool.clone());
+    let patient = test_data::minimal_patient();
+
+    let (status, _) = send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &patient, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let request = axum::http::Request::builder()
+        .method("PUT")
+        .uri("/fhir/Patient/minimal-patient")
+        .header("content-type", "application/json")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(axum::body::Body::from(serde_json::to_string(&patient).unwrap()))
+        .unwrap();
+
+    let (status, body) = send_request(app, request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["resourceType"], "Patient");
+}
+
+#[tokio::test]
+async fn update_stale_if_match_returns_412() {
+    let (pool, token) = setup("crud-update-stale-if-match").await;
+    let app = build_test_app_auth_required(pool.clone());
+    let patient = test_data::minimal_patient();
+
+    let (status, _) = send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &patient, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let mut first_update = patient.clone();
+    first_update["active"] = serde_json::json!(true);
+
+    let (status, _) = send_request(
+        app.clone(),
+        put_resource_with_token_if_match(
+            "Patient",
+            "minimal-patient",
+            &first_update,
+            &token,
+            "W/\"1\"",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut stale_update = patient.clone();
+    stale_update["active"] = serde_json::json!(false);
+
+    let (status, body) = send_request(
+        app.clone(),
+        put_resource_with_token_if_match(
+            "Patient",
+            "minimal-patient",
+            &stale_update,
+            &token,
+            "W/\"1\"",
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body["resourceType"], "OperationOutcome");
+    assert_eq!(body["issue"][0]["code"], "conflict");
+
+    let (status, body) = send_request(
+        app,
+        get_resource_with_token("Patient", "minimal-patient", &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["active"], true);
 }
 
 // ─── HEALTHZ & METADATA ────────────────────────────────────────────────────

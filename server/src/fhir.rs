@@ -226,7 +226,7 @@ pub async fn read_resource_history(
 
 #[utoipa::path(put, path = "/fhir/{resource_type}/{id}",
     params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
-    responses((status = 200, description = "Resource updated"), (status = 400, description = "Validation error"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 413, description = "Payload too large")),
+    responses((status = 200, description = "Resource updated"), (status = 400, description = "Validation error"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 404, description = "Not found"), (status = 412, description = "If-Match missing or stale"), (status = 413, description = "Payload too large")),
     security(("bearer_auth" = [])))]
 pub async fn update_resource(
     State(state): State<AppState>,
@@ -238,15 +238,45 @@ pub async fn update_resource(
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
+    let expected_version = parse_if_match_version(&headers)?;
 
     let Json(mut body) = parse_json_payload(payload)?;
     validate_resource_payload(&resource_type, &mut body, Some(&id))?;
     state.validator.validate_resource(&resource_type, &body)?;
 
-    let stored = state
-        .store
-        .upsert(&access.tenant_id, &resource_type, &id, body)
-        .await?;
+    let updated = match expected_version {
+        Some(version) => {
+            state
+                .store
+                .update_if_version_matches(&access.tenant_id, &resource_type, &id, version, body)
+                .await?
+        }
+        None => {
+            state
+                .store
+                .update_existing(&access.tenant_id, &resource_type, &id, body)
+                .await?
+        }
+    };
+
+    let stored = match updated {
+        Some(stored) => stored,
+        None => {
+            let current = state
+                .store
+                .read(&access.tenant_id, &resource_type, &id)
+                .await?;
+            match current {
+                None => return Err(AppError::NotFound),
+                Some(current) => {
+                    return Err(AppError::PreconditionFailed(format!(
+                        "If-Match version mismatch: current version is {}",
+                        current.version_id
+                    )));
+                }
+            }
+        }
+    };
 
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -291,7 +321,7 @@ pub async fn delete_resource(
 
 #[utoipa::path(patch, path = "/fhir/{resource_type}/{id}",
     params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
-    responses((status = 200, description = "Resource patched"), (status = 400, description = "Invalid patch"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 404, description = "Not found")),
+    responses((status = 200, description = "Resource patched"), (status = 400, description = "Invalid patch"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 404, description = "Not found"), (status = 412, description = "If-Match missing or stale")),
     security(("bearer_auth" = [])))]
 pub async fn patch_resource(
     State(state): State<AppState>,
@@ -303,6 +333,7 @@ pub async fn patch_resource(
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
+    let expected_version = parse_if_match_version(&headers)?;
 
     let Json(patch_body) = parse_json_payload(payload)?;
     let patch_ops: json_patch::Patch = serde_json::from_value(patch_body)
@@ -314,6 +345,14 @@ pub async fn patch_resource(
         .await?;
 
     let existing = found.ok_or(AppError::NotFound)?;
+    if let Some(expected_version) = expected_version
+        && existing.version_id != expected_version
+    {
+        return Err(AppError::PreconditionFailed(format!(
+            "If-Match version mismatch: current version is {}",
+            existing.version_id
+        )));
+    }
     let mut resource = existing.resource;
 
     apply_json_patch(&mut resource, &patch_ops)
@@ -335,10 +374,45 @@ pub async fn patch_resource(
         .validator
         .validate_resource(&resource_type, &resource)?;
 
-    let stored = state
-        .store
-        .upsert(&access.tenant_id, &resource_type, &id, resource)
-        .await?;
+    let updated = match expected_version {
+        Some(version) => {
+            state
+                .store
+                .update_if_version_matches(
+                    &access.tenant_id,
+                    &resource_type,
+                    &id,
+                    version,
+                    resource,
+                )
+                .await?
+        }
+        None => {
+            state
+                .store
+                .update_existing(&access.tenant_id, &resource_type, &id, resource)
+                .await?
+        }
+    };
+
+    let stored = match updated {
+        Some(stored) => stored,
+        None => {
+            let current = state
+                .store
+                .read(&access.tenant_id, &resource_type, &id)
+                .await?;
+            match current {
+                None => return Err(AppError::NotFound),
+                Some(current) => {
+                    return Err(AppError::PreconditionFailed(format!(
+                        "If-Match version mismatch: current version is {}",
+                        current.version_id
+                    )));
+                }
+            }
+        }
+    };
 
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -366,6 +440,45 @@ fn parse_json_payload(
             AppError::BadRequest(format!("invalid JSON payload: {message}"))
         }
     })
+}
+
+fn parse_if_match_version(headers: &HeaderMap) -> Result<Option<i64>, AppError> {
+    let Some(header_value) = headers.get("If-Match") else {
+        return Ok(None);
+    };
+
+    let raw = header_value
+        .to_str()
+        .map_err(|e| AppError::BadRequest(format!("invalid If-Match header: {e}")))?
+        .trim();
+
+    if raw == "*" {
+        return Err(AppError::BadRequest(
+            "If-Match wildcard '*' is not supported; use a concrete version ETag".to_owned(),
+        ));
+    }
+
+    let version_text = if raw.starts_with("W/\"") && raw.ends_with('"') {
+        &raw[3..raw.len() - 1]
+    } else if raw.starts_with('"') && raw.ends_with('"') {
+        &raw[1..raw.len() - 1]
+    } else {
+        raw
+    };
+
+    let version = version_text.parse::<i64>().map_err(|_| {
+        AppError::BadRequest(
+            "If-Match must be an integer version ETag like W/\"3\"".to_owned(),
+        )
+    })?;
+
+    if version < 1 {
+        return Err(AppError::BadRequest(
+            "If-Match version must be >= 1".to_owned(),
+        ));
+    }
+
+    Ok(Some(version))
 }
 
 fn validate_resource_payload(

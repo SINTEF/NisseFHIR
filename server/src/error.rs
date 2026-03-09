@@ -32,6 +32,8 @@ pub enum AppError {
     NotFound,
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("precondition failed: {0}")]
+    PreconditionFailed(String),
     #[error("payload too large")]
     PayloadTooLarge,
     #[error("validation failed")]
@@ -76,6 +78,10 @@ impl IntoResponse for AppError {
             AppError::BadRequest(message) => (
                 StatusCode::BAD_REQUEST,
                 vec![OperationIssue::error("invalid", message)],
+            ),
+            AppError::PreconditionFailed(message) => (
+                StatusCode::PRECONDITION_FAILED,
+                vec![OperationIssue::error("conflict", message)],
             ),
             AppError::PayloadTooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -144,6 +150,12 @@ mod tests {
     fn payload_too_large_maps_to_413() {
         let (status, _) = error_response(AppError::PayloadTooLarge);
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn precondition_failed_maps_to_412() {
+        let (status, _) = error_response(AppError::PreconditionFailed("stale".to_owned()));
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
     }
 
     #[test]

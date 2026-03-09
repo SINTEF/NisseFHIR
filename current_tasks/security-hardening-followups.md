@@ -13,14 +13,16 @@
 - Added optional `JWT_ISSUER` and `JWT_AUDIENCE` claim validation for all modes.
 - Dev mode (`JWT_MODE=dev`) generates a cryptographically random secret per startup and exposes `POST /dev/token` for minting test tokens — safe for local development, impossible to leak a shared secret.
 - JWKS mode fetches keys at startup (fail-fast) then periodically refreshes them in the background, supporting key rotation without restarts.
+- Added optimistic concurrency support for `PUT` and `PATCH` via optional `If-Match` handling:
+	- when provided and stale, server returns `412 Precondition Failed`
+	- when omitted, updates remain compatible and proceed normally
+- Split `PUT` from create semantics so update no longer upserts missing resources.
 
 ## Remaining work
 
-1. Enforce optimistic concurrency with `If-Match` on `PUT` and `PATCH`.
-2. Split `PUT` from create semantics so update does not upsert missing resources.
-3. Add database connection and statement timeouts to reduce DoS blast radius.
-4. Decide whether `application/fhir+json` should replace `application/json` in responses.
-5. Document deployment expectations around reverse-proxy TLS termination and trusted CORS origins in the root project docs.
+1. Add database connection and statement timeouts to reduce DoS blast radius.
+2. Decide whether `application/fhir+json` should replace `application/json` in responses.
+3. Document deployment expectations around reverse-proxy TLS termination and trusted CORS origins in the root project docs.
 
 ## Notes
 

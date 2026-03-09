@@ -131,6 +131,149 @@ impl PgStore {
         })
     }
 
+    pub async fn update_if_version_matches(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: i64,
+        resource: Value,
+    ) -> Result<Option<StoredResource>, AppError> {
+        let mut tx = self.pool.begin().await?;
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE fhir_resources
+            SET resource = $4,
+                version_id = version_id + 1,
+                last_updated = now()
+            WHERE tenant_id = $1
+              AND resource_type = $2
+              AND id = $3
+              AND version_id = $5
+            RETURNING version_id, last_updated, resource
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(resource)
+        .bind(expected_version)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(updated_row) = updated else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+
+        let new_version_id = updated_row.get::<i64, _>("version_id");
+        let last_updated = updated_row.get::<DateTime<Utc>, _>("last_updated");
+        let updated_resource = updated_row.get::<Value, _>("resource");
+
+        sqlx::query(
+            r#"
+            INSERT INTO fhir_resource_history (
+                tenant_id,
+                resource_type,
+                id,
+                version_id,
+                last_updated,
+                deleted,
+                resource
+            )
+            VALUES ($1, $2, $3, $4, $5, FALSE, $6)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(new_version_id)
+        .bind(last_updated)
+        .bind(updated_resource.clone())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(Some(StoredResource {
+            id: id.to_owned(),
+            version_id: new_version_id,
+            last_updated,
+            resource: updated_resource,
+        }))
+    }
+
+    pub async fn update_existing(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+    ) -> Result<Option<StoredResource>, AppError> {
+        let mut tx = self.pool.begin().await?;
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE fhir_resources
+            SET resource = $4,
+                version_id = version_id + 1,
+                last_updated = now()
+            WHERE tenant_id = $1
+              AND resource_type = $2
+              AND id = $3
+            RETURNING version_id, last_updated, resource
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(resource)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(updated_row) = updated else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+
+        let new_version_id = updated_row.get::<i64, _>("version_id");
+        let last_updated = updated_row.get::<DateTime<Utc>, _>("last_updated");
+        let updated_resource = updated_row.get::<Value, _>("resource");
+
+        sqlx::query(
+            r#"
+            INSERT INTO fhir_resource_history (
+                tenant_id,
+                resource_type,
+                id,
+                version_id,
+                last_updated,
+                deleted,
+                resource
+            )
+            VALUES ($1, $2, $3, $4, $5, FALSE, $6)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(new_version_id)
+        .bind(last_updated)
+        .bind(updated_resource.clone())
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(Some(StoredResource {
+            id: id.to_owned(),
+            version_id: new_version_id,
+            last_updated,
+            resource: updated_resource,
+        }))
+    }
+
     pub async fn delete(
         &self,
         tenant_id: &str,

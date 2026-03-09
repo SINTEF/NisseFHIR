@@ -287,10 +287,22 @@ pub fn put_resource_with_token(
     body: &Value,
     token: &str,
 ) -> Request<Body> {
+    put_resource_with_token_if_match(resource_type, id, body, token, "W/\"1\"")
+}
+
+/// Build an authenticated PUT request with an explicit If-Match precondition.
+pub fn put_resource_with_token_if_match(
+    resource_type: &str,
+    id: &str,
+    body: &Value,
+    token: &str,
+    if_match: &str,
+) -> Request<Body> {
     Request::builder()
         .method("PUT")
         .uri(format!("/fhir/{resource_type}/{id}"))
         .header("content-type", "application/json")
+        .header(header::IF_MATCH, if_match)
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::from(serde_json::to_string(body).unwrap()))
         .expect("request should build")

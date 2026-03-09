@@ -29,10 +29,21 @@ fn patch_resource_with_token(
     body: &serde_json::Value,
     token: &str,
 ) -> axum::http::Request<axum::body::Body> {
+    patch_resource_with_token_if_match(resource_type, id, body, token, "W/\"1\"")
+}
+
+fn patch_resource_with_token_if_match(
+    resource_type: &str,
+    id: &str,
+    body: &serde_json::Value,
+    token: &str,
+    if_match: &str,
+) -> axum::http::Request<axum::body::Body> {
     axum::http::Request::builder()
         .method("PATCH")
         .uri(format!("/fhir/{resource_type}/{id}"))
         .header("content-type", "application/json-patch+json")
+        .header(axum::http::header::IF_MATCH, if_match)
         .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
         .body(axum::body::Body::from(serde_json::to_string(body).unwrap()))
         .expect("request should build")
@@ -460,4 +471,89 @@ async fn patch_rejects_id_change() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_operation_outcome(&body, "invalid");
+}
+
+#[tokio::test]
+async fn patch_without_if_match_succeeds() {
+    let (pool, token) = setup("patch-no-if-match").await;
+    let app = build_test_app_auth_required(pool);
+
+    let patient = json!({
+        "resourceType": "Patient",
+        "id": "patch-missing-if-match-1",
+        "active": true
+    });
+    let (status, _) = send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &patient, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let patch = json!([
+        {"op": "replace", "path": "/active", "value": false}
+    ]);
+
+    let request = axum::http::Request::builder()
+        .method("PATCH")
+        .uri("/fhir/Patient/patch-missing-if-match-1")
+        .header("content-type", "application/json-patch+json")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(axum::body::Body::from(serde_json::to_string(&patch).unwrap()))
+        .unwrap();
+
+    let (status, body) = send_request(app, request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["active"], false);
+}
+
+#[tokio::test]
+async fn patch_stale_if_match_returns_412() {
+    let (pool, token) = setup("patch-stale-if-match").await;
+    let app = build_test_app_auth_required(pool);
+
+    let patient = json!({
+        "resourceType": "Patient",
+        "id": "patch-stale-if-match-1",
+        "active": true
+    });
+    let (status, _) = send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &patient, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let patch_true = json!([
+        {"op": "replace", "path": "/active", "value": true}
+    ]);
+    let (status, _) = send_request(
+        app.clone(),
+        patch_resource_with_token_if_match(
+            "Patient",
+            "patch-stale-if-match-1",
+            &patch_true,
+            &token,
+            "W/\"1\"",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let patch_false = json!([
+        {"op": "replace", "path": "/active", "value": false}
+    ]);
+    let (status, body) = send_request(
+        app.clone(),
+        patch_resource_with_token_if_match(
+            "Patient",
+            "patch-stale-if-match-1",
+            &patch_false,
+            &token,
+            "W/\"1\"",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_operation_outcome(&body, "conflict");
 }
