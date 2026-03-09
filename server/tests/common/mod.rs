@@ -3,9 +3,9 @@ pub mod test_data;
 use std::sync::{Arc, LazyLock};
 
 use axum::{
+    Router,
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
-    Router,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde_json::Value;
@@ -35,9 +35,9 @@ pub struct TestClaims {
 /// requests that default to the "public" tenant—for per-test isolation,
 /// prefer `build_test_app_for_tenant`.
 pub fn build_test_app(pool: PgPool) -> Router {
-    use fhir_server::{AppState, build_router};
     use fhir_server::auth::AuthConfig;
     use fhir_server::store::PgStore;
+    use fhir_server::{AppState, build_router};
 
     let state = AppState {
         store: PgStore::new(pool),
@@ -54,9 +54,9 @@ pub fn build_test_app(pool: PgPool) -> Router {
 
 /// Build a test app with authentication enforced (unauthenticated requests are rejected).
 pub fn build_test_app_auth_required(pool: PgPool) -> Router {
-    use fhir_server::{AppState, build_router};
     use fhir_server::auth::AuthConfig;
     use fhir_server::store::PgStore;
+    use fhir_server::{AppState, build_router};
 
     let state = AppState {
         store: PgStore::new(pool),
@@ -173,10 +173,7 @@ pub async fn clean_tenant(pool: &PgPool, tenant_id: &str) {
 
 /// Send a request and return (status, body_value).
 pub async fn send_request(app: Router, req: Request<Body>) -> (StatusCode, Value) {
-    let response = app
-        .oneshot(req)
-        .await
-        .expect("request should complete");
+    let response = app.oneshot(req).await.expect("request should complete");
 
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX)
@@ -292,7 +289,10 @@ pub fn assert_operation_outcome(value: &Value, expected_code: &str) {
         "OperationOutcome must have issues array"
     );
     let issues = value["issue"].as_array().unwrap();
-    assert!(!issues.is_empty(), "OperationOutcome must have at least one issue");
+    assert!(
+        !issues.is_empty(),
+        "OperationOutcome must have at least one issue"
+    );
     assert_eq!(
         issues[0]["code"], expected_code,
         "expected issue code '{expected_code}', got: {}",

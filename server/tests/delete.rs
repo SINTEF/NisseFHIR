@@ -2,11 +2,9 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{
-    build_test_app_auth_required, clean_tenant, count_resources,
-    delete_resource, delete_resource_with_token, get_resource_with_token,
-    post_resource_with_token, read_only_token, restricted_token,
-    send_request, setup_test_db, tenant_token,
-    test_data,
+    build_test_app_auth_required, clean_tenant, count_resources, delete_resource,
+    delete_resource_with_token, get_resource_with_token, post_resource_with_token, read_only_token,
+    restricted_token, send_request, setup_test_db, tenant_token, test_data,
 };
 
 async fn setup(tenant: &str) -> (sqlx::PgPool, String) {
@@ -22,10 +20,18 @@ async fn delete_existing_resource_returns_204() {
     let token = tenant_token("del-204");
     let patient = test_data::minimal_patient();
 
-    let (status, _) = send_request(app.clone(), post_resource_with_token("Patient", &patient, &token)).await;
+    let (status, _) = send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &patient, &token),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    let (status, _) = send_request(app, delete_resource_with_token("Patient", "minimal-patient", &token)).await;
+    let (status, _) = send_request(
+        app,
+        delete_resource_with_token("Patient", "minimal-patient", &token),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
@@ -35,7 +41,11 @@ async fn delete_nonexistent_resource_returns_404() {
     let app = build_test_app_auth_required(pool);
     let token = tenant_token("del-404");
 
-    let (status, _) = send_request(app, delete_resource_with_token("Patient", "does-not-exist", &token)).await;
+    let (status, _) = send_request(
+        app,
+        delete_resource_with_token("Patient", "does-not-exist", &token),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -46,10 +56,22 @@ async fn deleted_resource_no_longer_readable() {
     let token = tenant_token("del-gone");
     let patient = test_data::minimal_patient();
 
-    send_request(app.clone(), post_resource_with_token("Patient", &patient, &token)).await;
-    send_request(app.clone(), delete_resource_with_token("Patient", "minimal-patient", &token)).await;
+    send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &patient, &token),
+    )
+    .await;
+    send_request(
+        app.clone(),
+        delete_resource_with_token("Patient", "minimal-patient", &token),
+    )
+    .await;
 
-    let (status, _) = send_request(app, get_resource_with_token("Patient", "minimal-patient", &token)).await;
+    let (status, _) = send_request(
+        app,
+        get_resource_with_token("Patient", "minimal-patient", &token),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -59,10 +81,18 @@ async fn delete_reduces_resource_count() {
     let app = build_test_app_auth_required(pool.clone());
     let token = tenant_token("del-count");
 
-    send_request(app.clone(), post_resource_with_token("Patient", &test_data::minimal_patient(), &token)).await;
+    send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &test_data::minimal_patient(), &token),
+    )
+    .await;
     assert_eq!(count_resources(&pool, "del-count").await, 1);
 
-    send_request(app, delete_resource_with_token("Patient", "minimal-patient", &token)).await;
+    send_request(
+        app,
+        delete_resource_with_token("Patient", "minimal-patient", &token),
+    )
+    .await;
     assert_eq!(count_resources(&pool, "del-count").await, 0);
 }
 
@@ -73,12 +103,17 @@ async fn delete_requires_write_scope() {
     let token = tenant_token("del-scope");
     let ro_token = read_only_token("del-scope");
 
-    send_request(app.clone(), post_resource_with_token("Patient", &test_data::minimal_patient(), &token)).await;
+    send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &test_data::minimal_patient(), &token),
+    )
+    .await;
 
     let (status, _) = send_request(
         app,
         delete_resource_with_token("Patient", "minimal-patient", &ro_token),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
@@ -92,12 +127,14 @@ async fn delete_respects_resource_type_restriction() {
     send_request(
         app.clone(),
         post_resource_with_token("Patient", &test_data::minimal_patient(), &full_token),
-    ).await;
+    )
+    .await;
 
     let (status, _) = send_request(
         app,
         delete_resource_with_token("Patient", "minimal-patient", &obs_only),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
@@ -113,20 +150,23 @@ async fn delete_respects_tenant_isolation() {
     send_request(
         app.clone(),
         post_resource_with_token("Patient", &test_data::minimal_patient(), &token_a),
-    ).await;
+    )
+    .await;
 
     // Tenant B cannot delete tenant A's resource
     let (status, _) = send_request(
         app.clone(),
         delete_resource_with_token("Patient", "minimal-patient", &token_b),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     // Tenant A can still read it
     let (status, _) = send_request(
         app,
         get_resource_with_token("Patient", "minimal-patient", &token_a),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 }
 

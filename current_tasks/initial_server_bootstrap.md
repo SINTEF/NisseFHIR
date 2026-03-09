@@ -10,7 +10,8 @@
 - Added JSON Schema validation against the bundled `fhir.schema.json` with per-resource-type validator caching
 - Returned FHIR `OperationOutcome` bodies for all error responses
 - Added baseline collection search (`GET /fhir/:resource_type`) returning paged FHIR `searchset` Bundles
-- Comprehensive test suites: 43 unit tests + 89 integration tests (132 total, all passing)
+- Added first-pass resource-specific search parameters: Patient (`name`, `birthdate`, `identifier`) and Observation (`code`, `status`, `subject`)
+- Comprehensive test suites: 47 unit tests + 96 integration tests (143 total)
 - Capability statement with security metadata (JWT, CORS, scopes), patch interaction, patchFormat
 - Dockerfile for containerized deployment
 - Python E2E harness that boots native or Docker deployments, prefers local PostgreSQL for native runs, scans both the HL7 `examples/` directory and `fhir-test-cases/r5/examples/` in parallel by inferred `resourceType`, classifies accepted/invalid/unsupported/payload-too-large outcomes, and runs real CRUD/search checks over HTTP
@@ -24,9 +25,9 @@
 
 ## Remaining (near-term)
 
-1. Add resource-specific search parameters (e.g., `Patient?name=Smith`, `Observation?code=...`).
-2. Add history endpoint for reading previous versions of a resource.
-3. Add conditional interactions (If-Match on update/delete, If-None-Exist on create).
-4. Add transaction/batch Bundle processing.
+1. Add history endpoint for reading previous versions of a resource.
+2. Add conditional interactions (If-Match on update/delete, If-None-Exist on create).
+3. Add transaction/batch Bundle processing.
+4. Expand search support to additional resource types and closer FHIR semantics where needed.
 5. Add ND-JSON bulk data export support.
 6. Add CI pipeline with disposable PostgreSQL and run the Python E2E harness in both native and Docker modes.

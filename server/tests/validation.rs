@@ -9,8 +9,7 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{
-    assert_operation_outcome, build_test_app, post_resource, send_request, setup_test_db,
-    test_data,
+    assert_operation_outcome, build_test_app, post_resource, send_request, setup_test_db, test_data,
 };
 use serde_json::json;
 
@@ -45,11 +44,8 @@ async fn accepts_comprehensive_patient() {
 async fn accepts_infant_patient() {
     let pool = setup_test_db().await;
     let app = build_test_app(pool);
-    let (status, body) = send_request(
-        app,
-        post_resource("Patient", &test_data::patient_infant()),
-    )
-    .await;
+    let (status, body) =
+        send_request(app, post_resource("Patient", &test_data::patient_infant())).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
@@ -247,8 +243,7 @@ async fn rejects_unsupported_resource_type() {
         "resourceType": "MadeUpResource",
         "id": "bogus"
     });
-    let (status, body) =
-        send_request(app, post_resource("MadeUpResource", &resource)).await;
+    let (status, body) = send_request(app, post_resource("MadeUpResource", &resource)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_operation_outcome(&body, "invalid");
     let diagnostics = body["issue"][0]["diagnostics"].as_str().unwrap();

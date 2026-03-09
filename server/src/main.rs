@@ -1,5 +1,8 @@
 use anyhow::Context;
-use fhir_server::{AppState, auth::AuthConfig, build_router, config::AppConfig, store::PgStore, validation::FhirSchemaValidator};
+use fhir_server::{
+    AppState, auth::AuthConfig, build_router, config::AppConfig, store::PgStore,
+    validation::FhirSchemaValidator,
+};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use tracing::info;

@@ -1,6 +1,15 @@
 use serde_json::{Value, json};
 
 pub fn capability_statement(base_url: &str) -> Value {
+    let generic_interactions = json!([
+        {"code": "create"},
+        {"code": "read"},
+        {"code": "update"},
+        {"code": "patch"},
+        {"code": "delete"},
+        {"code": "search-type"}
+    ]);
+
     json!({
         "resourceType": "CapabilityStatement",
         "status": "active",
@@ -29,14 +38,7 @@ pub fn capability_statement(base_url: &str) -> Value {
             "resource": [
                 {
                     "type": "*",
-                    "interaction": [
-                        {"code": "create"},
-                        {"code": "read"},
-                        {"code": "update"},
-                        {"code": "patch"},
-                        {"code": "delete"},
-                        {"code": "search-type"}
-                    ],
+                    "interaction": generic_interactions,
                     "searchParam": [
                         {
                             "name": "_count",
@@ -47,6 +49,68 @@ pub fn capability_statement(base_url: &str) -> Value {
                             "name": "_offset",
                             "type": "number",
                             "documentation": "Skips a number of resources before returning the current page."
+                        }
+                    ]
+                },
+                {
+                    "type": "Patient",
+                    "interaction": generic_interactions,
+                    "searchParam": [
+                        {
+                            "name": "_count",
+                            "type": "number",
+                            "documentation": "Limits the number of resources returned per page."
+                        },
+                        {
+                            "name": "_offset",
+                            "type": "number",
+                            "documentation": "Skips a number of resources before returning the current page."
+                        },
+                        {
+                            "name": "name",
+                            "type": "string",
+                            "documentation": "Matches a patient's family or given names using case-insensitive partial matching."
+                        },
+                        {
+                            "name": "birthdate",
+                            "type": "date",
+                            "documentation": "Matches the patient's exact birthDate value."
+                        },
+                        {
+                            "name": "identifier",
+                            "type": "token",
+                            "documentation": "Matches a patient identifier by exact value or exact system|value pair."
+                        }
+                    ]
+                },
+                {
+                    "type": "Observation",
+                    "interaction": generic_interactions,
+                    "searchParam": [
+                        {
+                            "name": "_count",
+                            "type": "number",
+                            "documentation": "Limits the number of resources returned per page."
+                        },
+                        {
+                            "name": "_offset",
+                            "type": "number",
+                            "documentation": "Skips a number of resources before returning the current page."
+                        },
+                        {
+                            "name": "code",
+                            "type": "token",
+                            "documentation": "Matches an observation code.coding.code value exactly."
+                        },
+                        {
+                            "name": "status",
+                            "type": "token",
+                            "documentation": "Matches the observation status exactly."
+                        },
+                        {
+                            "name": "subject",
+                            "type": "reference",
+                            "documentation": "Matches the exact subject reference, for example Patient/example."
                         }
                     ]
                 }
@@ -123,9 +187,47 @@ mod tests {
     }
 
     #[test]
+    fn capability_lists_patient_and_observation_search_parameters() {
+        let value = capability_statement("http://localhost:8080/fhir");
+        let resources = value["rest"][0]["resource"].as_array().unwrap();
+
+        let patient = resources
+            .iter()
+            .find(|resource| resource["type"] == "Patient")
+            .unwrap();
+        let observation = resources
+            .iter()
+            .find(|resource| resource["type"] == "Observation")
+            .unwrap();
+
+        let patient_params: Vec<&str> = patient["searchParam"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|param| param["name"].as_str().unwrap())
+            .collect();
+        let observation_params: Vec<&str> = observation["searchParam"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|param| param["name"].as_str().unwrap())
+            .collect();
+
+        assert!(patient_params.contains(&"name"));
+        assert!(patient_params.contains(&"birthdate"));
+        assert!(patient_params.contains(&"identifier"));
+        assert!(observation_params.contains(&"code"));
+        assert!(observation_params.contains(&"status"));
+        assert!(observation_params.contains(&"subject"));
+    }
+
+    #[test]
     fn capability_includes_implementation_url() {
         let value = capability_statement("https://fhir.example.com/api");
-        assert_eq!(value["implementation"]["url"], "https://fhir.example.com/api");
+        assert_eq!(
+            value["implementation"]["url"],
+            "https://fhir.example.com/api"
+        );
         assert_eq!(
             value["implementation"]["description"],
             "Lightweight Rust FHIR server"

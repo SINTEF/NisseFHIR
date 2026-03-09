@@ -7,9 +7,8 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{
-    build_test_app_auth_required, clean_tenant, count_resources,
-    get_resource_with_token, post_resource_with_token, put_resource_with_token,
-    send_request, setup_test_db, tenant_token,
+    build_test_app_auth_required, clean_tenant, count_resources, get_resource_with_token,
+    post_resource_with_token, put_resource_with_token, send_request, setup_test_db, tenant_token,
     test_data,
 };
 use tower::ServiceExt;
@@ -152,7 +151,11 @@ async fn read_returns_etag_and_last_modified() {
 
     let app = build_test_app_auth_required(pool);
     let response = app
-        .oneshot(get_resource_with_token("Patient", "minimal-patient", &token))
+        .oneshot(get_resource_with_token(
+            "Patient",
+            "minimal-patient",
+            &token,
+        ))
         .await
         .expect("request should complete");
 
@@ -166,8 +169,11 @@ async fn read_nonexistent_returns_404() {
     let (pool, token) = setup("crud-read-404").await;
     let app = build_test_app_auth_required(pool);
 
-    let (status, body) =
-        send_request(app, get_resource_with_token("Patient", "does-not-exist", &token)).await;
+    let (status, body) = send_request(
+        app,
+        get_resource_with_token("Patient", "does-not-exist", &token),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["resourceType"], "OperationOutcome");
@@ -183,8 +189,11 @@ async fn read_wrong_resource_type_returns_404() {
     let _ = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
 
     let app = build_test_app_auth_required(pool);
-    let (status, _) =
-        send_request(app, get_resource_with_token("Observation", "minimal-patient", &token)).await;
+    let (status, _) = send_request(
+        app,
+        get_resource_with_token("Observation", "minimal-patient", &token),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -314,14 +323,15 @@ async fn roundtrip_all_valid_resources() {
     let (pool, token) = setup("crud-roundtrip").await;
 
     for (resource_type, resource) in test_data::all_valid_resources() {
-        let id = resource["id"]
-            .as_str()
-            .expect("test resource must have id");
+        let id = resource["id"].as_str().expect("test resource must have id");
 
         // Create
         let app = build_test_app_auth_required(pool.clone());
-        let (status, created) =
-            send_request(app, post_resource_with_token(resource_type, &resource, &token)).await;
+        let (status, created) = send_request(
+            app,
+            post_resource_with_token(resource_type, &resource, &token),
+        )
+        .await;
         assert_eq!(
             status,
             StatusCode::CREATED,
@@ -338,10 +348,7 @@ async fn roundtrip_all_valid_resources() {
             "Failed to read {resource_type}/{id}"
         );
 
-        assert_eq!(
-            created, read,
-            "Roundtrip mismatch for {resource_type}/{id}"
-        );
+        assert_eq!(created, read, "Roundtrip mismatch for {resource_type}/{id}");
     }
 }
 
@@ -354,23 +361,27 @@ async fn multiple_resources_coexist() {
     let obs = test_data::minimal_observation();
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s, _) =
-        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (s, _) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(s, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s, _) =
-        send_request(app, post_resource_with_token("Observation", &obs, &token)).await;
+    let (s, _) = send_request(app, post_resource_with_token("Observation", &obs, &token)).await;
     assert_eq!(s, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s, _) =
-        send_request(app, get_resource_with_token("Patient", "minimal-patient", &token)).await;
+    let (s, _) = send_request(
+        app,
+        get_resource_with_token("Patient", "minimal-patient", &token),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s, _) =
-        send_request(app, get_resource_with_token("Observation", "minimal-obs", &token)).await;
+    let (s, _) = send_request(
+        app,
+        get_resource_with_token("Observation", "minimal-obs", &token),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
 
     assert_eq!(count_resources(&pool, "crud-multi-coexist").await, 2);
@@ -436,10 +447,7 @@ async fn metadata_returns_capability_statement() {
     assert_eq!(body["kind"], "instance");
     assert_eq!(body["fhirVersion"], "6.0.0-ballot3");
     assert_eq!(body["format"][0], "json");
-    assert_eq!(
-        body["implementation"]["url"],
-        "http://localhost:8080/fhir"
-    );
+    assert_eq!(body["implementation"]["url"], "http://localhost:8080/fhir");
 
     let rest = &body["rest"][0];
     assert_eq!(rest["mode"], "server");
@@ -454,13 +462,11 @@ async fn double_create_upserts_same_resource() {
     let patient = test_data::minimal_patient();
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s1, _) =
-        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (s1, _) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(s1, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s2, _) =
-        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (s2, _) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(s2, StatusCode::CREATED);
 
     assert_eq!(count_resources(&pool, "crud-double-create").await, 1);

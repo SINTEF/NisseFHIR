@@ -54,7 +54,10 @@ impl IntoResponse for AppError {
         let (status, issues) = match self {
             AppError::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
-                vec![OperationIssue::error("login", "missing or invalid bearer token")],
+                vec![OperationIssue::error(
+                    "login",
+                    "missing or invalid bearer token",
+                )],
             ),
             AppError::Forbidden => (
                 StatusCode::FORBIDDEN,
@@ -65,7 +68,10 @@ impl IntoResponse for AppError {
             ),
             AppError::NotFound => (
                 StatusCode::NOT_FOUND,
-                vec![OperationIssue::error("not-found", "requested resource was not found")],
+                vec![OperationIssue::error(
+                    "not-found",
+                    "requested resource was not found",
+                )],
             ),
             AppError::BadRequest(message) => (
                 StatusCode::BAD_REQUEST,
@@ -81,10 +87,7 @@ impl IntoResponse for AppError {
             AppError::Validation(issues) => (StatusCode::BAD_REQUEST, issues),
             AppError::Database(_) | AppError::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                vec![OperationIssue::error(
-                    "exception",
-                    "internal server error",
-                )],
+                vec![OperationIssue::error("exception", "internal server error")],
             ),
         };
 

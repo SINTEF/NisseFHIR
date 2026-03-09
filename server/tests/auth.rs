@@ -6,9 +6,8 @@ use axum::http::StatusCode;
 use common::{
     build_test_app, build_test_app_auth_required, clean_tenant, expired_token, get_resource,
     get_resource_with_token, post_resource, post_resource_with_token, put_resource_with_token,
-    read_only_token, restricted_token, send_request, setup_test_db, tenant_token,
+    read_only_token, restricted_token, send_request, setup_test_db, tenant_token, test_data,
     write_only_token,
-    test_data,
 };
 
 // ─── UNAUTHENTICATED MODE ──────────────────────────────────────────────────
@@ -37,10 +36,11 @@ async fn unauthenticated_mode_uses_public_tenant() {
     let _ = send_request(app, post_resource("Patient", &patient)).await;
 
     // Verify it's stored under the "public" tenant
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM fhir_resources WHERE tenant_id = 'public'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fhir_resources WHERE tenant_id = 'public'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(count, 1);
 }
 
@@ -81,8 +81,11 @@ async fn auth_required_accepts_valid_token() {
     assert_eq!(status, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) =
-        send_request(app, get_resource_with_token("Patient", "minimal-patient", &token)).await;
+    let (status, _) = send_request(
+        app,
+        get_resource_with_token("Patient", "minimal-patient", &token),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -151,15 +154,21 @@ async fn read_only_token_can_read() {
     let rw_token = tenant_token("auth-ro-read");
     let patient = test_data::minimal_patient();
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) =
-        send_request(app, post_resource_with_token("Patient", &patient, &rw_token)).await;
+    let (status, _) = send_request(
+        app,
+        post_resource_with_token("Patient", &patient, &rw_token),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
 
     // Then read with read-only
     let ro_token = read_only_token("auth-ro-read");
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) =
-        send_request(app, get_resource_with_token("Patient", "minimal-patient", &ro_token)).await;
+    let (status, _) = send_request(
+        app,
+        get_resource_with_token("Patient", "minimal-patient", &ro_token),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -171,13 +180,20 @@ async fn write_only_token_cannot_read() {
     let rw_token = tenant_token("auth-wo-deny");
     let patient = test_data::minimal_patient();
     let app = build_test_app_auth_required(pool.clone());
-    let _ = send_request(app, post_resource_with_token("Patient", &patient, &rw_token)).await;
+    let _ = send_request(
+        app,
+        post_resource_with_token("Patient", &patient, &rw_token),
+    )
+    .await;
 
     // Try read with write-only
     let wo_token = write_only_token("auth-wo-deny");
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) =
-        send_request(app, get_resource_with_token("Patient", "minimal-patient", &wo_token)).await;
+    let (status, _) = send_request(
+        app,
+        get_resource_with_token("Patient", "minimal-patient", &wo_token),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
@@ -226,8 +242,11 @@ async fn restricted_token_denies_read_of_unpermitted_type() {
     let token = restricted_token("auth-restrict-rd", vec!["Patient".to_string()]);
 
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) =
-        send_request(app, get_resource_with_token("Observation", "whatever", &token)).await;
+    let (status, _) = send_request(
+        app,
+        get_resource_with_token("Observation", "whatever", &token),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
@@ -281,13 +300,11 @@ async fn different_tenants_can_have_same_id() {
 
     // Both tenants create a Patient with the same id
     let app = build_test_app_auth_required(pool.clone());
-    let (s, _) =
-        send_request(app, post_resource_with_token("Patient", &patient, &token_a)).await;
+    let (s, _) = send_request(app, post_resource_with_token("Patient", &patient, &token_a)).await;
     assert_eq!(s, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s, _) =
-        send_request(app, post_resource_with_token("Patient", &patient, &token_b)).await;
+    let (s, _) = send_request(app, post_resource_with_token("Patient", &patient, &token_b)).await;
     assert_eq!(s, StatusCode::CREATED);
 
     // Each can read their own copy
@@ -307,7 +324,6 @@ async fn different_tenants_can_have_same_id() {
     .await;
     assert_eq!(s, StatusCode::OK);
 }
-
 
 // ─── TOKEN CLAIM VARIANTS ──────────────────────────────────────────────────
 
@@ -329,20 +345,18 @@ async fn tenant_claim_takes_precedence_over_sub() {
     let _ = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
 
     // Verify stored under "tenant-value", not "sub-value"
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM fhir_resources WHERE tenant_id = 'tenant-value'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fhir_resources WHERE tenant_id = 'tenant-value'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(count, 1);
 
-    let count_sub: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM fhir_resources WHERE tenant_id = 'sub-value'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let count_sub: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fhir_resources WHERE tenant_id = 'sub-value'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(count_sub, 0);
 }
 

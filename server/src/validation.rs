@@ -125,7 +125,10 @@ mod tests {
     fn rejects_additional_properties() {
         let validator = FhirSchemaValidator::new().expect("validator should load");
         let err = validator
-            .validate_resource("Patient", &json!({"resourceType": "Patient", "bogus": true}))
+            .validate_resource(
+                "Patient",
+                &json!({"resourceType": "Patient", "bogus": true}),
+            )
             .expect_err("schema validation must fail");
 
         assert!(err.to_string().contains("validation failed"));

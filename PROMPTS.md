@@ -113,3 +113,7 @@ Good, let's continue and work on this methodically. Here are some thoughts, plea
 - I quote: "A natural next step is to make the server return a proper HTTP 413 plus OperationOutcome for oversized payloads instead of letting that 45 MB bundle fail at the transport level.Expanded the E2E harness to scan all example files by parsed resourceType, classify accepted/invalid/unsupported/transport-limited outcomes, verified the full 2410-file run in both native and Docker modes, and updated the Docker builder image and supporting docs to match the broader coverage."
 ---
 stop using subagents to read files ffs, use them with proper interesting tasks if you them.
+---
+## VScode GPT-5.4/autopilot
+
+#file:fhir-specs.md

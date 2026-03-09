@@ -6,12 +6,14 @@ use axum::{
     routing::get,
 };
 use json_patch::patch as apply_json_patch;
-use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use url::form_urlencoded::Serializer;
 use uuid::Uuid;
 
 use crate::{
     AppState, auth::extract_access_context, capability::capability_statement, error::AppError,
+    store::SearchFilter,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -34,12 +36,12 @@ pub fn routes() -> Router<AppState> {
 const DEFAULT_SEARCH_COUNT: u32 = 20;
 const MAX_SEARCH_COUNT: u32 = 100;
 
-#[derive(Debug, Default, Deserialize)]
-pub struct SearchParams {
-    #[serde(rename = "_count")]
-    count: Option<u32>,
-    #[serde(rename = "_offset")]
-    offset: Option<u32>,
+#[derive(Debug)]
+pub struct ParsedSearchParams {
+    count: u32,
+    offset: u32,
+    filters: Vec<SearchFilter>,
+    canonical_filters: Vec<(String, String)>,
 }
 
 #[utoipa::path(get, path = "/healthz", responses((status = 200, description = "Server is healthy")))]
@@ -59,33 +61,33 @@ pub async fn search_resources(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(resource_type): Path<String>,
-    Query(params): Query<SearchParams>,
+    Query(query): Query<BTreeMap<String, String>>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
     if !access.can_read || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
 
-    let count = params.count.unwrap_or(DEFAULT_SEARCH_COUNT);
-    if count > MAX_SEARCH_COUNT {
-        return Err(AppError::BadRequest(format!(
-            "_count must be less than or equal to {MAX_SEARCH_COUNT}"
-        )));
-    }
-
-    let offset = params.offset.unwrap_or(0);
+    let params = parse_search_params(&resource_type, query)?;
     let results = state
         .store
-        .search(&access.tenant_id, &resource_type, i64::from(count), i64::from(offset))
+        .search(
+            &access.tenant_id,
+            &resource_type,
+            &params.filters,
+            i64::from(params.count),
+            i64::from(params.offset),
+        )
         .await?;
 
     let response = Json(build_search_bundle(
         &state.fhir_base_url,
         &resource_type,
-        count,
-        offset,
+        params.count,
+        params.offset,
         results.total,
         results.resources,
+        &params.canonical_filters,
     ));
 
     Ok((StatusCode::OK, response).into_response())
@@ -278,7 +280,9 @@ pub async fn patch_resource(
         ));
     }
 
-    state.validator.validate_resource(&resource_type, &resource)?;
+    state
+        .validator
+        .validate_resource(&resource_type, &resource)?;
 
     let stored = state
         .store
@@ -300,7 +304,9 @@ pub async fn patch_resource(
     Ok((StatusCode::OK, response_headers, Json(stored.resource)).into_response())
 }
 
-fn parse_json_payload(payload: Result<Json<Value>, JsonRejection>) -> Result<Json<Value>, AppError> {
+fn parse_json_payload(
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Json<Value>, AppError> {
     payload.map_err(|rejection| {
         let message = rejection.body_text();
         if message.contains("length limit") || message.contains("payload too large") {
@@ -354,9 +360,10 @@ fn build_search_bundle(
     offset: u32,
     total: i64,
     resources: Vec<crate::store::StoredResource>,
+    filters: &[(String, String)],
 ) -> Value {
     let base_url = base_url.trim_end_matches('/');
-    let search_url = format!("{base_url}/{resource_type}?_count={count}&_offset={offset}");
+    let search_url = build_search_url(base_url, resource_type, count, offset, filters);
     let next_offset = offset.saturating_add(count);
     let has_next = i64::from(next_offset) < total;
 
@@ -368,7 +375,7 @@ fn build_search_bundle(
     if has_next {
         links.push(json!({
             "relation": "next",
-            "url": format!("{base_url}/{resource_type}?_count={count}&_offset={next_offset}"),
+            "url": build_search_url(base_url, resource_type, count, next_offset, filters),
         }));
     }
 
@@ -401,8 +408,119 @@ fn build_search_bundle(
     })
 }
 
+fn parse_search_params(
+    resource_type: &str,
+    query: BTreeMap<String, String>,
+) -> Result<ParsedSearchParams, AppError> {
+    let mut count = DEFAULT_SEARCH_COUNT;
+    let mut offset = 0;
+    let mut filters = Vec::new();
+    let mut canonical_filters = Vec::new();
+
+    for (key, value) in query {
+        match key.as_str() {
+            "_count" => {
+                count = parse_u32_query_param("_count", &value)?;
+                if count > MAX_SEARCH_COUNT {
+                    return Err(AppError::BadRequest(format!(
+                        "_count must be less than or equal to {MAX_SEARCH_COUNT}"
+                    )));
+                }
+            }
+            "_offset" => {
+                offset = parse_u32_query_param("_offset", &value)?;
+            }
+            "name" if resource_type.eq_ignore_ascii_case("Patient") => {
+                filters.push(SearchFilter::PatientName(value.clone()));
+                canonical_filters.push((key, value));
+            }
+            "birthdate" if resource_type.eq_ignore_ascii_case("Patient") => {
+                filters.push(SearchFilter::PatientBirthDate(value.clone()));
+                canonical_filters.push((key, value));
+            }
+            "identifier" if resource_type.eq_ignore_ascii_case("Patient") => {
+                let (system, identifier_value) = parse_identifier_filter(&value)?;
+                filters.push(SearchFilter::PatientIdentifier {
+                    system,
+                    value: identifier_value,
+                });
+                canonical_filters.push((key, value));
+            }
+            "code" if resource_type.eq_ignore_ascii_case("Observation") => {
+                filters.push(SearchFilter::ObservationCode(value.clone()));
+                canonical_filters.push((key, value));
+            }
+            "status" if resource_type.eq_ignore_ascii_case("Observation") => {
+                filters.push(SearchFilter::ObservationStatus(value.clone()));
+                canonical_filters.push((key, value));
+            }
+            "subject" if resource_type.eq_ignore_ascii_case("Observation") => {
+                filters.push(SearchFilter::ObservationSubject(value.clone()));
+                canonical_filters.push((key, value));
+            }
+            _ => {
+                return Err(AppError::BadRequest(format!(
+                    "unsupported search parameter '{key}' for resource type '{resource_type}'"
+                )));
+            }
+        }
+    }
+
+    Ok(ParsedSearchParams {
+        count,
+        offset,
+        filters,
+        canonical_filters,
+    })
+}
+
+fn parse_u32_query_param(name: &str, value: &str) -> Result<u32, AppError> {
+    value
+        .parse::<u32>()
+        .map_err(|_| AppError::BadRequest(format!("{name} must be an unsigned integer")))
+}
+
+fn parse_identifier_filter(value: &str) -> Result<(Option<String>, String), AppError> {
+    if let Some((system, identifier_value)) = value.split_once('|') {
+        if system.is_empty() || identifier_value.is_empty() {
+            return Err(AppError::BadRequest(
+                "identifier must be 'value' or 'system|value'".to_owned(),
+            ));
+        }
+
+        return Ok((Some(system.to_owned()), identifier_value.to_owned()));
+    }
+
+    if value.is_empty() {
+        return Err(AppError::BadRequest(
+            "identifier must be 'value' or 'system|value'".to_owned(),
+        ));
+    }
+
+    Ok((None, value.to_owned()))
+}
+
+fn build_search_url(
+    base_url: &str,
+    resource_type: &str,
+    count: u32,
+    offset: u32,
+    filters: &[(String, String)],
+) -> String {
+    let mut serializer = Serializer::new(String::new());
+    serializer.append_pair("_count", &count.to_string());
+    serializer.append_pair("_offset", &offset.to_string());
+
+    for (key, value) in filters {
+        serializer.append_pair(key, value);
+    }
+
+    format!("{base_url}/{resource_type}?{}", serializer.finish())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use axum::{
@@ -412,11 +530,15 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
-    use super::{build_search_bundle, validate_resource_payload};
+    use super::{
+        build_search_bundle, parse_identifier_filter, parse_search_params,
+        validate_resource_payload,
+    };
     use crate::{
         AppState,
         auth::AuthConfig,
         build_router,
+        error::AppError,
         store::{PgStore, StoredResource},
         validation::FhirSchemaValidator,
     };
@@ -452,6 +574,7 @@ mod tests {
                     "id": "example"
                 }),
             }],
+            &[],
         );
 
         assert_eq!(bundle["resourceType"], "Bundle");
@@ -460,6 +583,50 @@ mod tests {
         assert_eq!(bundle["link"][0]["relation"], "self");
         assert_eq!(bundle["link"][1]["relation"], "next");
         assert_eq!(bundle["entry"][0]["resource"]["id"], "example");
+    }
+
+    #[test]
+    fn parse_search_params_builds_patient_filters() {
+        let params = parse_search_params(
+            "Patient",
+            BTreeMap::from([
+                ("_count".to_owned(), "5".to_owned()),
+                ("name".to_owned(), "peter".to_owned()),
+                (
+                    "identifier".to_owned(),
+                    "urn:oid:1.2.36.146.595.217.0.1|12345".to_owned(),
+                ),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(params.count, 5);
+        assert_eq!(params.offset, 0);
+        assert_eq!(params.filters.len(), 2);
+        assert_eq!(params.canonical_filters.len(), 2);
+    }
+
+    #[test]
+    fn parse_search_params_rejects_unknown_resource_search_parameter() {
+        let error = parse_search_params(
+            "Patient",
+            BTreeMap::from([("status".to_owned(), "final".to_owned())]),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn parse_identifier_filter_accepts_value_or_system_value() {
+        assert_eq!(
+            parse_identifier_filter("12345").unwrap(),
+            (None, "12345".to_owned())
+        );
+        assert_eq!(
+            parse_identifier_filter("urn:test|12345").unwrap(),
+            (Some("urn:test".to_owned()), "12345".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -485,9 +652,7 @@ mod tests {
                     .method("POST")
                     .uri("/fhir/Patient")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"resourceType":"Patient","bogus":true}"#,
-                    ))
+                    .body(Body::from(r#"{"resourceType":"Patient","bogus":true}"#))
                     .expect("request should build"),
             )
             .await
@@ -543,9 +708,11 @@ mod tests {
             serde_json::from_slice(&body).expect("response should be valid json");
 
         assert_eq!(value["resourceType"], "OperationOutcome");
-        assert!(value["issue"][0]["diagnostics"]
-            .as_str()
-            .expect("diagnostics should be present")
-            .contains("invalid JSON payload"));
+        assert!(
+            value["issue"][0]["diagnostics"]
+                .as_str()
+                .expect("diagnostics should be present")
+                .contains("invalid JSON payload")
+        );
     }
 }

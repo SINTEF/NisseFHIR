@@ -6,10 +6,10 @@ pub mod fhir;
 pub mod store;
 pub mod validation;
 
+use auth::AuthConfig;
 use axum::Router;
 use std::sync::Arc;
 use store::PgStore;
-use auth::AuthConfig;
 use tower_helmet::HelmetLayer;
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 use utoipa::OpenApi;
@@ -43,7 +43,7 @@ pub struct AppState {
         fhir::update_resource,
         fhir::patch_resource,
         fhir::delete_resource,
-    ),
+    )
 )]
 struct ApiDoc;
 
