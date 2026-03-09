@@ -2,10 +2,13 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{
-    build_test_app_auth_required, clean_tenant, count_resources, delete_resource,
-    delete_resource_with_token, get_resource_with_token, post_resource_with_token, read_only_token,
-    restricted_token, send_request, setup_test_db, tenant_token, test_data,
+    build_test_app_auth_required, clean_tenant, count_history_entries, count_resources,
+    delete_resource, delete_resource_with_token, get_resource_with_token,
+    post_resource_with_token, read_only_token, restricted_token, send_request, setup_test_db,
+    tenant_token, test_data,
 };
+use sqlx::Row;
+use tower::ServiceExt;
 
 async fn setup(tenant: &str) -> (sqlx::PgPool, String) {
     let pool = setup_test_db().await;
@@ -177,4 +180,84 @@ async fn delete_unauthenticated_rejected_when_required() {
 
     let (status, _) = send_request(app, delete_resource("Patient", "any-id")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn delete_writes_history_tombstone() {
+    let (pool, _) = setup("del-history").await;
+    let app = build_test_app_auth_required(pool.clone());
+    let token = tenant_token("del-history");
+
+    let (status, _) = send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &test_data::minimal_patient(), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _) = send_request(
+        app,
+        delete_resource_with_token("Patient", "minimal-patient", &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    assert_eq!(count_history_entries(&pool, "del-history").await, 2);
+
+    let row = sqlx::query(
+        r#"
+        SELECT version_id, deleted
+        FROM fhir_resource_history
+        WHERE tenant_id = $1 AND resource_type = 'Patient' AND id = 'minimal-patient'
+        ORDER BY version_id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind("del-history")
+    .fetch_one(&pool)
+    .await
+    .expect("history query should succeed");
+
+    assert_eq!(row.get::<i64, _>("version_id"), 2);
+    assert!(row.get::<bool, _>("deleted"));
+}
+
+#[tokio::test]
+async fn recreate_after_delete_continues_version_sequence() {
+    let (pool, _) = setup("del-recreate-version").await;
+    let app = build_test_app_auth_required(pool.clone());
+    let token = tenant_token("del-recreate-version");
+
+    let response = app
+        .clone()
+        .oneshot(post_resource_with_token(
+            "Patient",
+            &test_data::minimal_patient(),
+            &token,
+        ))
+        .await
+        .expect("create should complete");
+    assert_eq!(response.headers().get("ETag").unwrap(), "W/\"1\"");
+
+    let response = app
+        .clone()
+        .oneshot(delete_resource_with_token(
+            "Patient",
+            "minimal-patient",
+            &token,
+        ))
+        .await
+        .expect("delete should complete");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = app
+        .oneshot(post_resource_with_token(
+            "Patient",
+            &test_data::minimal_patient(),
+            &token,
+        ))
+        .await
+        .expect("recreate should complete");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers().get("ETag").unwrap(), "W/\"3\"");
 }

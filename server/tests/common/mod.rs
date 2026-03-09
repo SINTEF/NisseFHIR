@@ -176,6 +176,12 @@ pub async fn setup_test_db() -> PgPool {
 
 /// Clean all data for a specific tenant.
 pub async fn clean_tenant(pool: &PgPool, tenant_id: &str) {
+    sqlx::query("DELETE FROM fhir_resource_history WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .expect("failed to clean tenant history");
+
     sqlx::query("DELETE FROM fhir_resources WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)
@@ -338,5 +344,15 @@ pub async fn count_resources(pool: &PgPool, tenant_id: &str) -> i64 {
         .fetch_one(pool)
         .await
         .expect("count query should succeed")
+        .get::<i64, _>("cnt")
+}
+
+/// Count rows in fhir_resource_history for a given tenant.
+pub async fn count_history_entries(pool: &PgPool, tenant_id: &str) -> i64 {
+    sqlx::query("SELECT count(*) as cnt FROM fhir_resource_history WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .fetch_one(pool)
+        .await
+        .expect("history count query should succeed")
         .get::<i64, _>("cnt")
 }

@@ -7,10 +7,11 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{
-    build_test_app_auth_required, clean_tenant, count_resources, get_resource_with_token,
-    post_resource_with_token, put_resource_with_token, send_request, setup_test_db, tenant_token,
-    test_data,
+    build_test_app_auth_required, clean_tenant, count_history_entries, count_resources,
+    get_resource_with_token, post_resource_with_token, put_resource_with_token, send_request,
+    setup_test_db, tenant_token, test_data,
 };
+use sqlx::Row;
 use tower::ServiceExt;
 
 /// Helper: set up a test with its own isolated tenant.
@@ -267,6 +268,61 @@ async fn update_increments_version() {
         resp.headers().get("ETag").unwrap().to_str().unwrap(),
         "W/\"3\""
     );
+}
+
+#[tokio::test]
+async fn create_and_update_write_history_versions() {
+    let (pool, token) = setup("crud-history-versions").await;
+    let patient = test_data::minimal_patient();
+
+    let app = build_test_app_auth_required(pool.clone());
+    let response = app
+        .oneshot(post_resource_with_token("Patient", &patient, &token))
+        .await
+        .expect("create should complete");
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let mut updated = patient.clone();
+    updated["active"] = serde_json::json!(true);
+
+    let app = build_test_app_auth_required(pool.clone());
+    let response = app
+        .oneshot(put_resource_with_token(
+            "Patient",
+            "minimal-patient",
+            &updated,
+            &token,
+        ))
+        .await
+        .expect("update should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(count_history_entries(&pool, "crud-history-versions").await, 2);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT version_id, deleted
+        FROM fhir_resource_history
+        WHERE tenant_id = $1 AND resource_type = 'Patient' AND id = 'minimal-patient'
+        ORDER BY version_id ASC
+        "#,
+    )
+    .bind("crud-history-versions")
+    .fetch_all(&pool)
+    .await
+    .expect("history query should succeed");
+
+    let history: Vec<(i64, bool)> = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<i64, _>("version_id"),
+                row.get::<bool, _>("deleted"),
+            )
+        })
+        .collect();
+
+    assert_eq!(history, vec![(1, false), (2, false)]);
 }
 
 #[tokio::test]

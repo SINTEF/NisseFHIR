@@ -77,13 +77,43 @@ impl PgStore {
     ) -> Result<StoredResource, AppError> {
         let row = sqlx::query(
             r#"
-            INSERT INTO fhir_resources (tenant_id, resource_type, id, version_id, resource)
-            VALUES ($1, $2, $3, 1, $4)
-            ON CONFLICT (resource_type, tenant_id, id)
-            DO UPDATE SET
-                resource = EXCLUDED.resource,
-                version_id = fhir_resources.version_id + 1,
-                last_updated = now()
+            WITH next_version AS (
+                SELECT COALESCE(
+                    (
+                        SELECT version_id + 1
+                        FROM fhir_resources
+                        WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+                    ),
+                    (
+                        SELECT MAX(version_id) + 1
+                        FROM fhir_resource_history
+                        WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+                    ),
+                    1
+                ) AS version_id
+            ),
+            upserted AS (
+                INSERT INTO fhir_resources (tenant_id, resource_type, id, version_id, resource)
+                SELECT $1, $2, $3, next_version.version_id, $4
+                FROM next_version
+                ON CONFLICT (resource_type, tenant_id, id)
+                DO UPDATE SET
+                    resource = EXCLUDED.resource,
+                    version_id = fhir_resources.version_id + 1,
+                    last_updated = now()
+                RETURNING version_id, last_updated, resource
+            )
+            INSERT INTO fhir_resource_history (
+                tenant_id,
+                resource_type,
+                id,
+                version_id,
+                last_updated,
+                deleted,
+                resource
+            )
+            SELECT $1, $2, $3, version_id, last_updated, FALSE, resource
+            FROM upserted
             RETURNING version_id, last_updated, resource
             "#,
         )
@@ -107,19 +137,52 @@ impl PgStore {
         resource_type: &str,
         id: &str,
     ) -> Result<bool, AppError> {
-        let result = sqlx::query(
+        let mut tx = self.pool.begin().await?;
+        let deleted = sqlx::query(
             r#"
             DELETE FROM fhir_resources
             WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+            RETURNING version_id, resource
             "#,
         )
         .bind(tenant_id)
         .bind(resource_type)
         .bind(id)
-        .execute(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
-        Ok(result.rows_affected() > 0)
+        let Some(row) = deleted else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+
+        let version_id = row.get::<i64, _>("version_id") + 1;
+        let resource = row.get::<Value, _>("resource");
+
+        sqlx::query(
+            r#"
+            INSERT INTO fhir_resource_history (
+                tenant_id,
+                resource_type,
+                id,
+                version_id,
+                last_updated,
+                deleted,
+                resource
+            )
+            VALUES ($1, $2, $3, $4, now(), TRUE, $5)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(version_id)
+        .bind(resource)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(true)
     }
 
     pub async fn search(
@@ -204,42 +267,22 @@ fn push_search_filters(query: &mut QueryBuilder<'_, Postgres>, filters: &[Search
                 query.push_bind(value.clone());
             }
             SearchFilter::PatientIdentifier { system, value } => {
-                query.push(
-                    r#"
-                    AND EXISTS (
-                        SELECT 1
-                        FROM jsonb_array_elements(COALESCE(resource->'identifier', '[]'::jsonb)) AS identifier
-                        WHERE identifier->>'value' =
-                    "#,
-                );
+                query.push(" AND COALESCE(resource->'identifier', '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('value', to_jsonb(");
                 query.push_bind(value.clone());
+                query.push("::text)");
 
                 if let Some(system) = system {
-                    query.push(" AND identifier->>'system' = ");
+                    query.push(", 'system', to_jsonb(");
                     query.push_bind(system.clone());
+                    query.push("::text)");
                 }
 
-                query.push(
-                    r#"
-                    )
-                    "#,
-                );
+                query.push("))");
             }
             SearchFilter::ObservationCode(value) => {
-                query.push(
-                    r#"
-                    AND EXISTS (
-                        SELECT 1
-                        FROM jsonb_array_elements(COALESCE(resource->'code'->'coding', '[]'::jsonb)) AS coding
-                        WHERE coding->>'code' =
-                    "#,
-                );
+                query.push(" AND COALESCE(resource->'code'->'coding', '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('code', to_jsonb(");
                 query.push_bind(value.clone());
-                query.push(
-                    r#"
-                    )
-                    "#,
-                );
+                query.push("::text)))");
             }
             SearchFilter::ObservationStatus(value) => {
                 query.push(" AND resource->>'status' = ");

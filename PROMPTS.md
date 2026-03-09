@@ -144,3 +144,14 @@ remember to run/update the end 2 end tests in python too ;)
 ## VScode GPT-5.4/autopilot
 
 Could you review the SQL schema. Are we doing this correctly? Is it correct format? Are we following best practices?
+
+---
+1. yes add the necessary checks and search indexes. don't overdo it in terms of checks, focus on the minimum the server validates the json schema.
+2. an history table sounds like a good idea indeed. let's implement this.
+3. yeah you can add more search indexes, but don't over do it, do that using sub agents perhaps in parallel, or something simple and fast, it's many to find, perhaps use python to extract that from the documentation XML ? I don't know, it can be many.
+
+Also you don't need to migrate any data for now. we are at prototype scale still.
+---
+## VScode Claude Opus 4.6/autopilot
+
+Using llvm-cov, I would like to work on improving the test coverage. Can you please run the tests with coverage instrumentation, check the reports, see what is not tested, write more test, and repeat until we reach a satisfactory coverage level? Thank you.
