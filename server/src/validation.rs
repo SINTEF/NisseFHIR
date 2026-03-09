@@ -238,7 +238,9 @@ fn primitive_constraint(
         (Some("string"), Some(INTEGER_PATTERN), _) => Some(PrimitiveConstraint::Integer64),
         (Some("number"), Some(POSITIVE_INT_PATTERN), _) => Some(PrimitiveConstraint::PositiveInt),
         (Some("number"), Some(UNSIGNED_INT_PATTERN), _) => Some(PrimitiveConstraint::UnsignedInt),
-        (Some("string"), Some("^\\S*$"), Some("valueCanonical")) => Some(PrimitiveConstraint::Canonical),
+        (Some("string"), Some("^\\S*$"), Some("valueCanonical")) => {
+            Some(PrimitiveConstraint::Canonical)
+        }
         _ => None,
     }
 }
@@ -292,7 +294,10 @@ fn validate_date_value(instance: &Value, path: &str) -> Option<OperationIssue> {
     } else {
         Some(OperationIssue::error(
             "invalid",
-            format!("FHIR date at instance path '{}' must be a valid calendar date", display_path(path)),
+            format!(
+                "FHIR date at instance path '{}' must be a valid calendar date",
+                display_path(path)
+            ),
         ))
     }
 }
@@ -419,7 +424,9 @@ fn validate_canonical_value(instance: &Value, path: &str) -> Option<OperationIss
     let valid = if base.starts_with('#') {
         UriRef::parse(base).is_ok()
     } else {
-        UriRef::parse(base).map(|uri| uri.has_scheme()).unwrap_or(false)
+        UriRef::parse(base)
+            .map(|uri| uri.has_scheme())
+            .unwrap_or(false)
     };
 
     if valid {
@@ -560,11 +567,17 @@ fn parse_year(value: &str) -> Option<i32> {
 }
 
 fn parse_month(value: &str) -> Option<u32> {
-    value.parse::<u32>().ok().filter(|month| (1..=12).contains(month))
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|month| (1..=12).contains(month))
 }
 
 fn parse_day(value: &str) -> Option<u32> {
-    value.parse::<u32>().ok().filter(|day| (1..=31).contains(day))
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|day| (1..=31).contains(day))
 }
 
 fn period_low_boundary(value: &str) -> Option<DateTime<Utc>> {
@@ -616,7 +629,11 @@ fn parse_period_boundary(value: &str, low: bool) -> Option<DateTime<Utc>> {
         NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_999)?
     };
 
-    Some(FixedOffset::east_opt(0)?.from_utc_datetime(&date.and_time(time)).with_timezone(&Utc))
+    Some(
+        FixedOffset::east_opt(0)?
+            .from_utc_datetime(&date.and_time(time))
+            .with_timezone(&Utc),
+    )
 }
 
 fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
@@ -639,11 +656,7 @@ fn join_instance_path(base: &str, segment: &str) -> String {
 }
 
 fn display_path(path: &str) -> &str {
-    if path.is_empty() {
-        "/"
-    } else {
-        path
-    }
+    if path.is_empty() { "/" } else { path }
 }
 
 #[cfg(test)]

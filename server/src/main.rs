@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
         store: PgStore::new(pool),
         auth: config.auth.clone(),
         fhir_base_url: config.fhir_base_url,
+        search: config.search,
         validator: Arc::new(FhirSchemaValidator::new()?),
         cors_allowed_origins: config.cors_allowed_origins.clone(),
         serve_docs: config.serve_docs,

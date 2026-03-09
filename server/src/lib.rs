@@ -7,6 +7,9 @@ pub mod jwks;
 pub mod store;
 pub mod validation;
 
+pub const DEFAULT_SEARCH_PAGE_COUNT: u32 = 20;
+pub const DEFAULT_MAX_SEARCH_PAGE_COUNT: u32 = 100;
+
 use auth::AuthConfig;
 use axum::{
     Router,
@@ -21,19 +24,29 @@ use tower_http::{
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
+use utoipa::openapi::{
+    Components,
+    security::{Http, HttpAuthScheme, SecurityScheme},
+};
 use utoipa::{Modify, OpenApi};
-use utoipa::openapi::{Components, security::{Http, HttpAuthScheme, SecurityScheme}};
 use utoipa_swagger_ui::{Config as SwaggerUiConfig, SwaggerUi};
 use validation::FhirSchemaValidator;
 
 /// Maximum request body size: 10 MB.
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug)]
+pub struct SearchConfig {
+    pub default_count: u32,
+    pub max_count: u32,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: PgStore,
     pub auth: AuthConfig,
     pub fhir_base_url: String,
+    pub search: SearchConfig,
     pub validator: Arc<FhirSchemaValidator>,
     pub cors_allowed_origins: Vec<header::HeaderValue>,
     pub serve_docs: bool,

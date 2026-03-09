@@ -297,7 +297,10 @@ async fn create_and_update_write_history_versions() {
         .expect("update should complete");
     assert_eq!(response.status(), StatusCode::OK);
 
-    assert_eq!(count_history_entries(&pool, "crud-history-versions").await, 2);
+    assert_eq!(
+        count_history_entries(&pool, "crud-history-versions").await,
+        2
+    );
 
     let rows = sqlx::query(
         r#"
@@ -548,7 +551,9 @@ async fn create_rejects_payload_too_large() {
         .uri("/fhir/Patient")
         .header("content-type", "application/json")
         .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
-        .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
+        .body(axum::body::Body::from(
+            serde_json::to_string(&body).unwrap(),
+        ))
         .expect("request should build");
 
     let (status, _body) = send_request(app, req).await;

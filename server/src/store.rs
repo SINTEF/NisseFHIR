@@ -10,6 +10,7 @@ pub struct PgStore {
 }
 
 pub struct StoredResource {
+    pub id: String,
     pub version_id: i64,
     pub last_updated: DateTime<Utc>,
     pub resource: Value,
@@ -18,6 +19,7 @@ pub struct StoredResource {
 pub struct SearchResults {
     pub total: i64,
     pub resources: Vec<StoredResource>,
+    pub next_after_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -62,6 +64,7 @@ impl PgStore {
         .await?;
 
         Ok(row.map(|r| StoredResource {
+            id: id.to_owned(),
             version_id: r.get::<i64, _>("version_id"),
             last_updated: r.get::<DateTime<Utc>, _>("last_updated"),
             resource: r.get::<Value, _>("resource"),
@@ -125,6 +128,7 @@ impl PgStore {
         .await?;
 
         Ok(StoredResource {
+            id: id.to_owned(),
             version_id: row.get::<i64, _>("version_id"),
             last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
             resource: row.get::<Value, _>("resource"),
@@ -191,7 +195,7 @@ impl PgStore {
         resource_type: &str,
         filters: &[SearchFilter],
         limit: i64,
-        offset: i64,
+        after_id: Option<&str>,
     ) -> Result<SearchResults, AppError> {
         let mut total_query: QueryBuilder<'_, Postgres> =
             QueryBuilder::new("SELECT count(*) FROM fhir_resources WHERE tenant_id = ");
@@ -205,30 +209,54 @@ impl PgStore {
             .fetch_one(&self.pool)
             .await?;
 
+        if limit <= 0 {
+            return Ok(SearchResults {
+                total,
+                resources: Vec::new(),
+                next_after_id: None,
+            });
+        }
+
         let mut resource_query: QueryBuilder<'_, Postgres> = QueryBuilder::new(
-            "SELECT version_id, last_updated, resource FROM fhir_resources WHERE tenant_id = ",
+            "SELECT id, version_id, last_updated, resource FROM fhir_resources WHERE tenant_id = ",
         );
         resource_query.push_bind(tenant_id);
         resource_query.push(" AND resource_type = ");
         resource_query.push_bind(resource_type);
         push_search_filters(&mut resource_query, filters);
-        resource_query.push(" ORDER BY last_updated DESC, id ASC LIMIT ");
-        resource_query.push_bind(limit);
-        resource_query.push(" OFFSET ");
-        resource_query.push_bind(offset);
+
+        if let Some(after_id) = after_id {
+            resource_query.push(" AND id > ");
+            resource_query.push_bind(after_id);
+        }
+
+        resource_query.push(" ORDER BY id ASC LIMIT ");
+        resource_query.push_bind(limit.saturating_add(1));
 
         let rows = resource_query.build().fetch_all(&self.pool).await?;
 
-        let resources = rows
+        let mut resources = rows
             .into_iter()
             .map(|row| StoredResource {
+                id: row.get::<String, _>("id"),
                 version_id: row.get::<i64, _>("version_id"),
                 last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
                 resource: row.get::<Value, _>("resource"),
             })
-            .collect();
+            .collect::<Vec<_>>();
 
-        Ok(SearchResults { total, resources })
+        let next_after_id = if resources.len() > limit as usize {
+            resources.truncate(limit as usize);
+            resources.last().map(|resource| resource.id.clone())
+        } else {
+            None
+        };
+
+        Ok(SearchResults {
+            total,
+            resources,
+            next_after_id,
+        })
     }
 }
 

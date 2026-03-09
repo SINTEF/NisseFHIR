@@ -46,9 +46,9 @@ pub fn capability_statement(base_url: &str) -> Value {
                             "documentation": "Limits the number of resources returned per page."
                         },
                         {
-                            "name": "_offset",
-                            "type": "number",
-                            "documentation": "Skips a number of resources before returning the current page."
+                            "name": "_after_id",
+                            "type": "string",
+                            "documentation": "Returns resources that sort after the supplied resource id cursor."
                         }
                     ]
                 },
@@ -62,9 +62,9 @@ pub fn capability_statement(base_url: &str) -> Value {
                             "documentation": "Limits the number of resources returned per page."
                         },
                         {
-                            "name": "_offset",
-                            "type": "number",
-                            "documentation": "Skips a number of resources before returning the current page."
+                            "name": "_after_id",
+                            "type": "string",
+                            "documentation": "Returns resources that sort after the supplied resource id cursor."
                         },
                         {
                             "name": "name",
@@ -93,9 +93,9 @@ pub fn capability_statement(base_url: &str) -> Value {
                             "documentation": "Limits the number of resources returned per page."
                         },
                         {
-                            "name": "_offset",
-                            "type": "number",
-                            "documentation": "Skips a number of resources before returning the current page."
+                            "name": "_after_id",
+                            "type": "string",
+                            "documentation": "Returns resources that sort after the supplied resource id cursor."
                         },
                         {
                             "name": "code",
@@ -183,7 +183,7 @@ mod tests {
             .collect();
 
         assert!(names.contains(&"_count"));
-        assert!(names.contains(&"_offset"));
+        assert!(names.contains(&"_after_id"));
     }
 
     #[test]

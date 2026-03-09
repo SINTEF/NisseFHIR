@@ -72,7 +72,12 @@ pub struct StaticKeyConfig {
 }
 
 impl StaticKeyConfig {
-    pub fn new(algorithm: Algorithm, secret: &str, issuer: Option<&str>, audience: Option<&str>) -> Self {
+    pub fn new(
+        algorithm: Algorithm,
+        secret: &str,
+        issuer: Option<&str>,
+        audience: Option<&str>,
+    ) -> Self {
         let validation = build_validation(algorithm, issuer, audience);
         Self {
             decoding_key: Arc::new(DecodingKey::from_secret(secret.as_bytes())),
@@ -83,13 +88,19 @@ impl StaticKeyConfig {
     pub fn from_rsa_pem(pem: &str, validation: Validation) -> Result<Self> {
         let key = DecodingKey::from_rsa_pem(pem.as_bytes())
             .context("failed to parse RSA public key PEM")?;
-        Ok(Self { decoding_key: Arc::new(key), validation: Arc::new(validation) })
+        Ok(Self {
+            decoding_key: Arc::new(key),
+            validation: Arc::new(validation),
+        })
     }
 
     pub fn from_ec_pem(pem: &str, validation: Validation) -> Result<Self> {
         let key = DecodingKey::from_ec_pem(pem.as_bytes())
             .context("failed to parse EC public key PEM")?;
-        Ok(Self { decoding_key: Arc::new(key), validation: Arc::new(validation) })
+        Ok(Self {
+            decoding_key: Arc::new(key),
+            validation: Arc::new(validation),
+        })
     }
 }
 
@@ -149,16 +160,22 @@ pub fn extract_access_context(
         .ok_or(AppError::Unauthorized)?;
 
     let claims = match cfg {
-        AuthConfig::Static(sc) => decode::<Claims>(token, &sc.decoding_key, &sc.validation)
-            .map_err(|_| AppError::Unauthorized)?
-            .claims,
+        AuthConfig::Static(sc) => {
+            decode::<Claims>(token, &sc.decoding_key, &sc.validation)
+                .map_err(|_| AppError::Unauthorized)?
+                .claims
+        }
         AuthConfig::Jwks(jc) => verify_with_jwks(token, jc)?,
     };
 
     let tenant_id = claims.tenant.or(claims.sub).ok_or(AppError::Unauthorized)?;
     let scope = claims.scope.unwrap_or_else(|| "read write".to_owned());
-    let can_read = scope.split_whitespace().any(|s| s.eq_ignore_ascii_case("read"));
-    let can_write = scope.split_whitespace().any(|s| s.eq_ignore_ascii_case("write"));
+    let can_read = scope
+        .split_whitespace()
+        .any(|s| s.eq_ignore_ascii_case("read"));
+    let can_write = scope
+        .split_whitespace()
+        .any(|s| s.eq_ignore_ascii_case("write"));
 
     Ok(AccessContext {
         tenant_id,
@@ -239,7 +256,11 @@ fn key_algorithm_to_algorithm(ka: &jsonwebtoken::jwk::KeyAlgorithm) -> Option<Al
 // Helpers
 // ---------------------------------------------------------------------------
 
-pub fn build_validation(algorithm: Algorithm, issuer: Option<&str>, audience: Option<&str>) -> Validation {
+pub fn build_validation(
+    algorithm: Algorithm,
+    issuer: Option<&str>,
+    audience: Option<&str>,
+) -> Validation {
     let mut v = Validation::new(algorithm);
     v.validate_exp = true;
     if let Some(iss) = issuer {
@@ -352,8 +373,8 @@ mod tests {
             exp: Some(4_102_444_800),
         });
 
-        let access = extract_access_context(&bearer_headers(&token), &make_config())
-            .expect("should decode");
+        let access =
+            extract_access_context(&bearer_headers(&token), &make_config()).expect("should decode");
 
         assert_eq!(access.tenant_id, "tenant-val");
     }
@@ -478,9 +499,9 @@ mod tests {
 
     #[test]
     fn jwks_rejects_token_without_kid() {
-        use std::sync::{Arc, RwLock};
         use super::JwksConfig;
         use jsonwebtoken::jwk::JwkSet;
+        use std::sync::{Arc, RwLock};
 
         let cfg = AuthConfig::Jwks(JwksConfig {
             key_store: Arc::new(RwLock::new(JwkSet { keys: vec![] })),
@@ -505,9 +526,9 @@ mod tests {
 
     #[test]
     fn jwks_rejects_unknown_kid() {
-        use std::sync::{Arc, RwLock};
         use super::JwksConfig;
         use jsonwebtoken::jwk::JwkSet;
+        use std::sync::{Arc, RwLock};
 
         let cfg = AuthConfig::Jwks(JwksConfig {
             key_store: Arc::new(RwLock::new(JwkSet { keys: vec![] })),
@@ -620,12 +641,8 @@ mod tests {
 
     #[test]
     fn static_key_config_new() {
-        let cfg = super::StaticKeyConfig::new(
-            Algorithm::HS256,
-            TEST_SECRET,
-            Some("iss"),
-            Some("aud"),
-        );
+        let cfg =
+            super::StaticKeyConfig::new(Algorithm::HS256, TEST_SECRET, Some("iss"), Some("aud"));
         // Verify the config was constructed with issuer/audience validation.
         // A token with the matching iss and aud should succeed.
         let token = encode(
@@ -668,9 +685,7 @@ mod tests {
 
     #[test]
     fn algorithm_for_jwk_rsa_default() {
-        use jsonwebtoken::jwk::{
-            AlgorithmParameters, CommonParameters, Jwk, RSAKeyParameters,
-        };
+        use jsonwebtoken::jwk::{AlgorithmParameters, CommonParameters, Jwk, RSAKeyParameters};
 
         let jwk = Jwk {
             common: CommonParameters {
@@ -696,8 +711,7 @@ mod tests {
     #[test]
     fn algorithm_for_jwk_ec_p256() {
         use jsonwebtoken::jwk::{
-            AlgorithmParameters, CommonParameters, EllipticCurve,
-            EllipticCurveKeyParameters, Jwk,
+            AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters, Jwk,
         };
 
         let jwk = Jwk {
@@ -725,8 +739,7 @@ mod tests {
     #[test]
     fn algorithm_for_jwk_ec_p384() {
         use jsonwebtoken::jwk::{
-            AlgorithmParameters, CommonParameters, EllipticCurve,
-            EllipticCurveKeyParameters, Jwk,
+            AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters, Jwk,
         };
 
         let jwk = Jwk {
@@ -753,9 +766,7 @@ mod tests {
 
     #[test]
     fn algorithm_for_jwk_octet_key() {
-        use jsonwebtoken::jwk::{
-            AlgorithmParameters, CommonParameters, Jwk, OctetKeyParameters,
-        };
+        use jsonwebtoken::jwk::{AlgorithmParameters, CommonParameters, Jwk, OctetKeyParameters};
 
         let jwk = Jwk {
             common: CommonParameters {
@@ -780,8 +791,7 @@ mod tests {
     #[test]
     fn algorithm_for_jwk_octet_key_pair() {
         use jsonwebtoken::jwk::{
-            AlgorithmParameters, CommonParameters, Jwk, OctetKeyPairParameters,
-            EllipticCurve,
+            AlgorithmParameters, CommonParameters, EllipticCurve, Jwk, OctetKeyPairParameters,
         };
 
         let jwk = Jwk {
@@ -808,8 +818,7 @@ mod tests {
     #[test]
     fn algorithm_for_jwk_unsupported_ec_curve() {
         use jsonwebtoken::jwk::{
-            AlgorithmParameters, CommonParameters, EllipticCurve,
-            EllipticCurveKeyParameters, Jwk,
+            AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters, Jwk,
         };
 
         let jwk = Jwk {
@@ -837,8 +846,7 @@ mod tests {
     #[test]
     fn algorithm_for_jwk_uses_key_algorithm_when_present() {
         use jsonwebtoken::jwk::{
-            AlgorithmParameters, CommonParameters, Jwk, KeyAlgorithm,
-            RSAKeyParameters,
+            AlgorithmParameters, CommonParameters, Jwk, KeyAlgorithm, RSAKeyParameters,
         };
 
         let jwk = Jwk {
@@ -871,18 +879,54 @@ mod tests {
     fn key_algorithm_to_algorithm_all_known() {
         use jsonwebtoken::jwk::KeyAlgorithm;
 
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::HS256), Some(Algorithm::HS256));
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::HS384), Some(Algorithm::HS384));
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::HS512), Some(Algorithm::HS512));
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::RS256), Some(Algorithm::RS256));
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::RS384), Some(Algorithm::RS384));
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::RS512), Some(Algorithm::RS512));
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::ES256), Some(Algorithm::ES256));
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::ES384), Some(Algorithm::ES384));
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::PS256), Some(Algorithm::PS256));
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::PS384), Some(Algorithm::PS384));
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::PS512), Some(Algorithm::PS512));
-        assert_eq!(super::key_algorithm_to_algorithm(&KeyAlgorithm::EdDSA), Some(Algorithm::EdDSA));
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::HS256),
+            Some(Algorithm::HS256)
+        );
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::HS384),
+            Some(Algorithm::HS384)
+        );
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::HS512),
+            Some(Algorithm::HS512)
+        );
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::RS256),
+            Some(Algorithm::RS256)
+        );
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::RS384),
+            Some(Algorithm::RS384)
+        );
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::RS512),
+            Some(Algorithm::RS512)
+        );
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::ES256),
+            Some(Algorithm::ES256)
+        );
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::ES384),
+            Some(Algorithm::ES384)
+        );
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::PS256),
+            Some(Algorithm::PS256)
+        );
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::PS384),
+            Some(Algorithm::PS384)
+        );
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::PS512),
+            Some(Algorithm::PS512)
+        );
+        assert_eq!(
+            super::key_algorithm_to_algorithm(&KeyAlgorithm::EdDSA),
+            Some(Algorithm::EdDSA)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1040,13 +1084,29 @@ mod tests {
             let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
             let triple = (b0 << 16) | (b1 << 8) | b2;
 
-            let _ = write!(out, "{}", url_safe.as_bytes()[((triple >> 18) & 0x3F) as usize] as char);
-            let _ = write!(out, "{}", url_safe.as_bytes()[((triple >> 12) & 0x3F) as usize] as char);
+            let _ = write!(
+                out,
+                "{}",
+                url_safe.as_bytes()[((triple >> 18) & 0x3F) as usize] as char
+            );
+            let _ = write!(
+                out,
+                "{}",
+                url_safe.as_bytes()[((triple >> 12) & 0x3F) as usize] as char
+            );
             if chunk.len() > 1 {
-                let _ = write!(out, "{}", url_safe.as_bytes()[((triple >> 6) & 0x3F) as usize] as char);
+                let _ = write!(
+                    out,
+                    "{}",
+                    url_safe.as_bytes()[((triple >> 6) & 0x3F) as usize] as char
+                );
             }
             if chunk.len() > 2 {
-                let _ = write!(out, "{}", url_safe.as_bytes()[(triple & 0x3F) as usize] as char);
+                let _ = write!(
+                    out,
+                    "{}",
+                    url_safe.as_bytes()[(triple & 0x3F) as usize] as char
+                );
             }
         }
         out

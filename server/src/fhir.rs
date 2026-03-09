@@ -12,8 +12,8 @@ use url::form_urlencoded::Serializer;
 use uuid::Uuid;
 
 use crate::{
-    AppState, auth::extract_access_context, capability::capability_statement, error::AppError,
-    store::SearchFilter,
+    AppState, SearchConfig, auth::extract_access_context, capability::capability_statement,
+    error::AppError, store::SearchFilter,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -33,15 +33,18 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-const DEFAULT_SEARCH_COUNT: u32 = 20;
-const MAX_SEARCH_COUNT: u32 = 100;
-
 #[derive(Debug)]
 pub struct ParsedSearchParams {
     count: u32,
-    offset: u32,
+    after_id: Option<String>,
     filters: Vec<SearchFilter>,
     canonical_filters: Vec<(String, String)>,
+}
+
+struct SearchPage<'a> {
+    count: u32,
+    after_id: Option<&'a str>,
+    next_after_id: Option<&'a str>,
 }
 
 #[utoipa::path(get, path = "/healthz", responses((status = 200, description = "Server is healthy")))]
@@ -69,7 +72,7 @@ pub async fn search_resources(
         return Err(AppError::Forbidden);
     }
 
-    let params = parse_search_params(&resource_type, query)?;
+    let params = parse_search_params(&resource_type, query, state.search)?;
     let results = state
         .store
         .search(
@@ -77,15 +80,18 @@ pub async fn search_resources(
             &resource_type,
             &params.filters,
             i64::from(params.count),
-            i64::from(params.offset),
+            params.after_id.as_deref(),
         )
         .await?;
 
     let response = Json(build_search_bundle(
         &state.fhir_base_url,
         &resource_type,
-        params.count,
-        params.offset,
+        SearchPage {
+            count: params.count,
+            after_id: params.after_id.as_deref(),
+            next_after_id: results.next_after_id.as_deref(),
+        },
         results.total,
         results.resources,
         &params.canonical_filters,
@@ -362,41 +368,31 @@ fn validate_resource_payload(
 fn build_search_bundle(
     base_url: &str,
     resource_type: &str,
-    count: u32,
-    offset: u32,
+    page: SearchPage<'_>,
     total: i64,
     resources: Vec<crate::store::StoredResource>,
     filters: &[(String, String)],
 ) -> Value {
     let base_url = base_url.trim_end_matches('/');
-    let search_url = build_search_url(base_url, resource_type, count, offset, filters);
-    let next_offset = offset.saturating_add(count);
-    let has_next = i64::from(next_offset) < total;
+    let search_url = build_search_url(base_url, resource_type, page.count, page.after_id, filters);
 
     let mut links = vec![json!({
         "relation": "self",
         "url": search_url,
     })];
 
-    if has_next {
+    if let Some(next_after_id) = page.next_after_id {
         links.push(json!({
             "relation": "next",
-            "url": build_search_url(base_url, resource_type, count, next_offset, filters),
+            "url": build_search_url(base_url, resource_type, page.count, Some(next_after_id), filters),
         }));
     }
 
     let entry = resources
         .into_iter()
         .map(|stored| {
-            let resource_id = stored
-                .resource
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-
             json!({
-                "fullUrl": format!("{base_url}/{resource_type}/{resource_id}"),
+                "fullUrl": format!("{base_url}/{resource_type}/{}", stored.id),
                 "resource": stored.resource,
                 "search": {
                     "mode": "match"
@@ -417,9 +413,10 @@ fn build_search_bundle(
 fn parse_search_params(
     resource_type: &str,
     query: BTreeMap<String, String>,
+    search: SearchConfig,
 ) -> Result<ParsedSearchParams, AppError> {
-    let mut count = DEFAULT_SEARCH_COUNT;
-    let mut offset = 0;
+    let mut count = search.default_count;
+    let mut after_id = None;
     let mut filters = Vec::new();
     let mut canonical_filters = Vec::new();
 
@@ -427,14 +424,25 @@ fn parse_search_params(
         match key.as_str() {
             "_count" => {
                 count = parse_u32_query_param("_count", &value)?;
-                if count > MAX_SEARCH_COUNT {
+                if count > search.max_count {
                     return Err(AppError::BadRequest(format!(
-                        "_count must be less than or equal to {MAX_SEARCH_COUNT}"
+                        "_count must be less than or equal to {}",
+                        search.max_count
                     )));
                 }
             }
+            "_after_id" => {
+                if value.is_empty() {
+                    return Err(AppError::BadRequest(
+                        "_after_id must not be empty".to_owned(),
+                    ));
+                }
+                after_id = Some(value);
+            }
             "_offset" => {
-                offset = parse_u32_query_param("_offset", &value)?;
+                return Err(AppError::BadRequest(
+                    "_offset is no longer supported; use _after_id cursor pagination".to_owned(),
+                ));
             }
             "name" if resource_type.eq_ignore_ascii_case("Patient") => {
                 filters.push(SearchFilter::PatientName(value.clone()));
@@ -474,7 +482,7 @@ fn parse_search_params(
 
     Ok(ParsedSearchParams {
         count,
-        offset,
+        after_id,
         filters,
         canonical_filters,
     })
@@ -510,12 +518,15 @@ fn build_search_url(
     base_url: &str,
     resource_type: &str,
     count: u32,
-    offset: u32,
+    after_id: Option<&str>,
     filters: &[(String, String)],
 ) -> String {
     let mut serializer = Serializer::new(String::new());
     serializer.append_pair("_count", &count.to_string());
-    serializer.append_pair("_offset", &offset.to_string());
+
+    if let Some(after_id) = after_id {
+        serializer.append_pair("_after_id", after_id);
+    }
 
     for (key, value) in filters {
         serializer.append_pair(key, value);
@@ -537,11 +548,11 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        build_search_bundle, parse_identifier_filter, parse_search_params,
+        SearchPage, build_search_bundle, parse_identifier_filter, parse_search_params,
         validate_resource_payload,
     };
     use crate::{
-        AppState,
+        AppState, SearchConfig,
         auth::AuthConfig,
         build_router,
         error::AppError,
@@ -571,10 +582,14 @@ mod tests {
         let bundle = build_search_bundle(
             "http://localhost:8080/fhir",
             "Patient",
-            1,
-            0,
+            SearchPage {
+                count: 1,
+                after_id: None,
+                next_after_id: Some("example"),
+            },
             2,
             vec![StoredResource {
+                id: "example".to_owned(),
                 version_id: 1,
                 last_updated: Utc::now(),
                 resource: json!({
@@ -590,6 +605,10 @@ mod tests {
         assert_eq!(bundle["total"], 2);
         assert_eq!(bundle["link"][0]["relation"], "self");
         assert_eq!(bundle["link"][1]["relation"], "next");
+        assert_eq!(
+            bundle["link"][1]["url"],
+            "http://localhost:8080/fhir/Patient?_count=1&_after_id=example"
+        );
         assert_eq!(bundle["entry"][0]["resource"]["id"], "example");
     }
 
@@ -605,13 +624,33 @@ mod tests {
                     "urn:oid:1.2.36.146.595.217.0.1|12345".to_owned(),
                 ),
             ]),
+            SearchConfig {
+                default_count: 20,
+                max_count: 100,
+            },
         )
         .unwrap();
 
         assert_eq!(params.count, 5);
-        assert_eq!(params.offset, 0);
+        assert_eq!(params.after_id, None);
         assert_eq!(params.filters.len(), 2);
         assert_eq!(params.canonical_filters.len(), 2);
+    }
+
+    #[test]
+    fn parse_search_params_accepts_after_id_cursor() {
+        let params = parse_search_params(
+            "Patient",
+            BTreeMap::from([("_after_id".to_owned(), "patient-123".to_owned())]),
+            SearchConfig {
+                default_count: 20,
+                max_count: 100,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(params.count, 20);
+        assert_eq!(params.after_id.as_deref(), Some("patient-123"));
     }
 
     #[test]
@@ -619,6 +658,10 @@ mod tests {
         let error = parse_search_params(
             "Patient",
             BTreeMap::from([("status".to_owned(), "final".to_owned())]),
+            SearchConfig {
+                default_count: 20,
+                max_count: 100,
+            },
         )
         .unwrap_err();
 
@@ -648,6 +691,10 @@ mod tests {
             store: PgStore::new(pool),
             auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_SECRET),
             fhir_base_url: "http://localhost:8080/fhir".to_owned(),
+            search: SearchConfig {
+                default_count: 20,
+                max_count: 100,
+            },
             validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
             cors_allowed_origins: Vec::new(),
             serve_docs: false,
@@ -702,6 +749,10 @@ mod tests {
             store: PgStore::new(pool),
             auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_SECRET),
             fhir_base_url: "http://localhost:8080/fhir".to_owned(),
+            search: SearchConfig {
+                default_count: 20,
+                max_count: 100,
+            },
             validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
             cors_allowed_origins: Vec::new(),
             serve_docs: false,

@@ -17,7 +17,7 @@ Initial lightweight FHIR 6.0 server implementation in Rust.
   - `GET /fhir/:resource_type/:id`
   - `PUT /fhir/:resource_type/:id`
   - `DELETE /fhir/:resource_type/:id`
-  - `GET /fhir/:resource_type` with `_count` and `_offset`
+  - `GET /fhir/:resource_type` with `_count` and `_after_id`
 
 ## Environment
 
@@ -26,6 +26,8 @@ Initial lightweight FHIR 6.0 server implementation in Rust.
 - `DATABASE_URL` (required)
 - `BIND_ADDR` (default: `0.0.0.0:8080`)
 - `FHIR_BASE_URL` (default: `http://localhost:8080/fhir`)
+- `SEARCH_DEFAULT_COUNT` (default: `20`)
+- `SEARCH_MAX_COUNT` (default: `100`)
 - `CORS_ALLOWED_ORIGINS` (optional comma-separated origin allowlist; unset means no cross-origin access)
 - `SERVE_DOCS` (default: `false`; set to `true` to expose `/docs` with vendored Swagger UI assets)
 
@@ -158,6 +160,7 @@ What it does:
 ## Notes
 
 - Capability statement advertises create/read/update/delete/search-type interactions.
+- Collection search uses cursor pagination ordered by resource id. Clients request the first page with `_count` and follow the returned `next` link using `_after_id`.
 - Create and update requests validate both the FHIR envelope (`resourceType`, `id`) and the resource-specific JSON Schema definition.
 - Invalid JSON, schema failures, auth failures, and missing resources return FHIR-shaped `OperationOutcome` bodies.
 - TLS is expected to be terminated by a reverse proxy or ingress layer; the server itself only listens on HTTP.

@@ -1,4 +1,7 @@
-use std::{env, fs, sync::{Arc, RwLock}};
+use std::{
+    env, fs,
+    sync::{Arc, RwLock},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use http::HeaderValue;
@@ -7,6 +10,7 @@ use jsonwebtoken::jwk::JwkSet;
 use tracing::warn;
 
 use crate::auth::{AuthConfig, JwksConfig, StaticKeyConfig, build_validation};
+use crate::{DEFAULT_MAX_SEARCH_PAGE_COUNT, DEFAULT_SEARCH_PAGE_COUNT, SearchConfig};
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -14,6 +18,7 @@ pub struct AppConfig {
     pub database_url: String,
     pub auth: AuthConfig,
     pub fhir_base_url: String,
+    pub search: SearchConfig,
     pub cors_allowed_origins: Vec<HeaderValue>,
     pub serve_docs: bool,
 }
@@ -24,6 +29,7 @@ impl AppConfig {
         let database_url = env::var("DATABASE_URL").context("missing DATABASE_URL")?;
         let fhir_base_url =
             env::var("FHIR_BASE_URL").unwrap_or_else(|_| "http://localhost:8080/fhir".to_owned());
+        let search = load_search_config()?;
         let auth = load_auth_config()?;
         let cors_allowed_origins = parse_cors_allowed_origins()?;
         let serve_docs = env_flag("SERVE_DOCS");
@@ -33,6 +39,7 @@ impl AppConfig {
             database_url,
             auth,
             fhir_base_url,
+            search,
             cors_allowed_origins,
             serve_docs,
         })
@@ -57,12 +64,34 @@ fn load_auth_config() -> Result<AuthConfig> {
     }
 }
 
+fn load_search_config() -> Result<SearchConfig> {
+    let default_count =
+        parse_u32_env_var("SEARCH_DEFAULT_COUNT")?.unwrap_or(DEFAULT_SEARCH_PAGE_COUNT);
+    let max_count = parse_u32_env_var("SEARCH_MAX_COUNT")?.unwrap_or(DEFAULT_MAX_SEARCH_PAGE_COUNT);
+
+    if default_count == 0 {
+        bail!("SEARCH_DEFAULT_COUNT must be greater than 0");
+    }
+
+    if max_count == 0 {
+        bail!("SEARCH_MAX_COUNT must be greater than 0");
+    }
+
+    if default_count > max_count {
+        bail!("SEARCH_DEFAULT_COUNT must be less than or equal to SEARCH_MAX_COUNT");
+    }
+
+    Ok(SearchConfig {
+        default_count,
+        max_count,
+    })
+}
+
 // --- static mode ---
 
 fn load_static_auth(issuer: Option<&str>, audience: Option<&str>) -> Result<AuthConfig> {
-    let algorithm = parse_algorithm(
-        &env::var("JWT_ALGORITHM").unwrap_or_else(|_| "HS256".to_owned()),
-    )?;
+    let algorithm =
+        parse_algorithm(&env::var("JWT_ALGORITHM").unwrap_or_else(|_| "HS256".to_owned()))?;
     let validation = build_validation(algorithm, issuer, audience);
 
     match algorithm {
@@ -78,11 +107,15 @@ fn load_static_auth(issuer: Option<&str>, audience: Option<&str>) -> Result<Auth
         }
         Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 => {
             let pem = load_public_key_pem()?;
-            Ok(AuthConfig::Static(StaticKeyConfig::from_rsa_pem(&pem, validation)?))
+            Ok(AuthConfig::Static(StaticKeyConfig::from_rsa_pem(
+                &pem, validation,
+            )?))
         }
         Algorithm::ES256 | Algorithm::ES384 => {
             let pem = load_public_key_pem()?;
-            Ok(AuthConfig::Static(StaticKeyConfig::from_ec_pem(&pem, validation)?))
+            Ok(AuthConfig::Static(StaticKeyConfig::from_ec_pem(
+                &pem, validation,
+            )?))
         }
         unsupported => bail!("unsupported JWT_ALGORITHM '{unsupported:?}'"),
     }
@@ -91,8 +124,8 @@ fn load_static_auth(issuer: Option<&str>, audience: Option<&str>) -> Result<Auth
 // --- jwks mode ---
 
 fn load_jwks_auth(issuer: Option<String>, audience: Option<String>) -> Result<AuthConfig> {
-    let jwks_uri = env::var("JWT_JWKS_URI")
-        .context("JWT_JWKS_URI is required when JWT_MODE=jwks")?;
+    let jwks_uri =
+        env::var("JWT_JWKS_URI").context("JWT_JWKS_URI is required when JWT_MODE=jwks")?;
 
     url::Url::parse(&jwks_uri)
         .with_context(|| format!("JWT_JWKS_URI '{jwks_uri}' is not a valid URL"))?;
@@ -133,12 +166,17 @@ fn maybe_warn_on_development_secret(secret: &str) {
         || normalized.contains("example")
         || normalized.contains("test-secret")
     {
-        warn!("JWT_SECRET appears to be a development value; do not reuse it outside local testing");
+        warn!(
+            "JWT_SECRET appears to be a development value; do not reuse it outside local testing"
+        );
     }
 }
 
 fn load_public_key_pem() -> Result<String> {
-    match (env::var("JWT_PUBLIC_KEY_PEM"), env::var("JWT_PUBLIC_KEY_PATH")) {
+    match (
+        env::var("JWT_PUBLIC_KEY_PEM"),
+        env::var("JWT_PUBLIC_KEY_PATH"),
+    ) {
         (Ok(pem), _) if !pem.trim().is_empty() => Ok(pem),
         (_, Ok(path)) if !path.trim().is_empty() => fs::read_to_string(&path)
             .with_context(|| format!("failed to read JWT public key from {path}")),
@@ -178,6 +216,17 @@ fn parse_cors_allowed_origins() -> Result<Vec<HeaderValue>> {
         })
         .transpose()
         .map(|origins| origins.unwrap_or_default())
+}
+
+fn parse_u32_env_var(name: &str) -> Result<Option<u32>> {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .with_context(|| format!("{name} must be an unsigned integer"))
+        })
+        .transpose()
 }
 
 fn env_flag(name: &str) -> bool {
@@ -415,7 +464,12 @@ mod tests {
         with_env_vars(&[("JWT_MODE", Some("bogus"))], || {
             let result = load_auth_config();
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("unsupported JWT_MODE"));
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unsupported JWT_MODE")
+            );
         });
     }
 
@@ -424,7 +478,10 @@ mod tests {
         with_env_vars(
             &[
                 ("JWT_MODE", Some("jwks")),
-                ("JWT_JWKS_URI", Some("https://example.com/.well-known/jwks.json")),
+                (
+                    "JWT_JWKS_URI",
+                    Some("https://example.com/.well-known/jwks.json"),
+                ),
                 ("JWT_JWKS_REFRESH_SECS", None),
                 ("JWT_ISSUER", Some("https://issuer.example.com")),
                 ("JWT_AUDIENCE", Some("my-audience")),
@@ -439,10 +496,7 @@ mod tests {
     #[test]
     fn load_jwks_mode_missing_uri() {
         with_env_vars(
-            &[
-                ("JWT_MODE", Some("jwks")),
-                ("JWT_JWKS_URI", None),
-            ],
+            &[("JWT_MODE", Some("jwks")), ("JWT_JWKS_URI", None)],
             || {
                 let result = load_auth_config();
                 assert!(result.is_err());
@@ -550,16 +604,11 @@ mod tests {
 
     #[test]
     fn from_env_missing_database_url() {
-        with_env_vars(
-            &[
-                ("DATABASE_URL", None),
-            ],
-            || {
-                let result = AppConfig::from_env();
-                assert!(result.is_err());
-                assert!(result.unwrap_err().to_string().contains("DATABASE_URL"));
-            },
-        );
+        with_env_vars(&[("DATABASE_URL", None)], || {
+            let result = AppConfig::from_env();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("DATABASE_URL"));
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -570,7 +619,10 @@ mod tests {
     fn load_public_key_from_inline_pem() {
         with_env_vars(
             &[
-                ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----\nfake\n-----END PUBLIC KEY-----")),
+                (
+                    "JWT_PUBLIC_KEY_PEM",
+                    Some("-----BEGIN PUBLIC KEY-----\nfake\n-----END PUBLIC KEY-----"),
+                ),
                 ("JWT_PUBLIC_KEY_PATH", None),
             ],
             || {
@@ -584,8 +636,11 @@ mod tests {
     fn load_public_key_from_file() {
         // Write a temporary file
         let tmp = "/tmp/__test_jwt_public_key.pem";
-        std::fs::write(tmp, "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----")
-            .expect("write tmp file");
+        std::fs::write(
+            tmp,
+            "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----",
+        )
+        .expect("write tmp file");
         with_env_vars(
             &[
                 ("JWT_PUBLIC_KEY_PEM", None),
@@ -602,10 +657,7 @@ mod tests {
     #[test]
     fn load_public_key_missing_both() {
         with_env_vars(
-            &[
-                ("JWT_PUBLIC_KEY_PEM", None),
-                ("JWT_PUBLIC_KEY_PATH", None),
-            ],
+            &[("JWT_PUBLIC_KEY_PEM", None), ("JWT_PUBLIC_KEY_PATH", None)],
             || {
                 let result = load_public_key_pem();
                 assert!(result.is_err());
@@ -638,6 +690,8 @@ mod tests {
                 ("DATABASE_URL", Some("postgres://localhost/test")),
                 ("BIND_ADDR", Some("127.0.0.1:9090")),
                 ("FHIR_BASE_URL", Some("http://localhost:9090/fhir")),
+                ("SEARCH_DEFAULT_COUNT", Some("15")),
+                ("SEARCH_MAX_COUNT", Some("60")),
                 ("JWT_MODE", Some("static")),
                 ("JWT_ALGORITHM", Some("HS256")),
                 ("JWT_SECRET", Some("a-very-long-secret-at-least-32-chars!!")),
@@ -653,8 +707,34 @@ mod tests {
                 assert_eq!(config.bind_addr, "127.0.0.1:9090");
                 assert_eq!(config.database_url, "postgres://localhost/test");
                 assert_eq!(config.fhir_base_url, "http://localhost:9090/fhir");
+                assert_eq!(config.search.default_count, 15);
+                assert_eq!(config.search.max_count, 60);
                 assert!(config.serve_docs);
                 assert_eq!(config.cors_allowed_origins.len(), 1);
+            },
+        );
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_search_page_config() {
+        with_env_vars(
+            &[
+                ("DATABASE_URL", Some("postgres://localhost/test")),
+                ("SEARCH_DEFAULT_COUNT", Some("70")),
+                ("SEARCH_MAX_COUNT", Some("60")),
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("a-very-long-secret-at-least-32-chars!!")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let error = AppConfig::from_env().unwrap_err();
+                assert!(error.to_string().contains(
+                    "SEARCH_DEFAULT_COUNT must be less than or equal to SEARCH_MAX_COUNT"
+                ));
             },
         );
     }
@@ -688,7 +768,10 @@ mod tests {
         with_env_vars(
             &[
                 ("JWT_MODE", Some("jwks")),
-                ("JWT_JWKS_URI", Some("https://example.com/.well-known/jwks.json")),
+                (
+                    "JWT_JWKS_URI",
+                    Some("https://example.com/.well-known/jwks.json"),
+                ),
                 ("JWT_ISSUER", None),
                 ("JWT_AUDIENCE", None),
             ],

@@ -575,11 +575,11 @@ def verify_search_summary(
     expected_ids: set[str],
 ) -> None:
     ids: set[str] = set()
-    offset = 0
+    search_url = f"{base_url}/fhir/{resource_type}?_count={SEARCH_COUNT}"
     while True:
         status, body, _ = request_json(
             "GET",
-            f"{base_url}/fhir/{resource_type}?_count={SEARCH_COUNT}&_offset={offset}",
+            search_url,
             token=token,
         )
         assert_equal(status, 200, f"search {resource_type}")
@@ -595,9 +595,21 @@ def verify_search_summary(
                     resource_id = resource.get("id")
                     if isinstance(resource_id, str):
                         ids.add(resource_id)
-        if len(entries) < SEARCH_COUNT:
+
+        links = body.get("link") or []
+        next_url = None
+        if isinstance(links, list):
+            for link in links:
+                if not isinstance(link, dict):
+                    continue
+                if link.get("relation") == "next" and isinstance(link.get("url"), str):
+                    next_url = link["url"]
+                    break
+
+        if next_url is None:
             break
-        offset += SEARCH_COUNT
+
+        search_url = next_url
 
     missing = sorted(resource_id for resource_id in expected_ids if resource_id not in ids)
     if missing:

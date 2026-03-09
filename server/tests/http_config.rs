@@ -1,10 +1,10 @@
 mod common;
 
+use axum::body::to_bytes;
 use axum::{
     body::Body,
     http::{HeaderValue, Method, Request, StatusCode, header},
 };
-use axum::body::to_bytes;
 use common::{build_test_app, build_test_app_with_options};
 use tower::ServiceExt;
 
@@ -124,7 +124,10 @@ async fn cors_allows_only_configured_origin() {
                 .uri("/fhir/Patient")
                 .header(header::ORIGIN, "https://app.example")
                 .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
-                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization,content-type")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "authorization,content-type",
+                )
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -156,7 +159,10 @@ async fn cors_does_not_reflect_unconfigured_origin() {
                 .uri("/fhir/Patient")
                 .header(header::ORIGIN, "https://evil.example")
                 .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
-                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization,content-type")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "authorization,content-type",
+                )
                 .body(Body::empty())
                 .expect("request should build"),
         )

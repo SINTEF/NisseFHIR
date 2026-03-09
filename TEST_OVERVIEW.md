@@ -7,7 +7,7 @@
 - `auth::tests` — JWT validation, scope parsing, resource allow-list case sensitivity, tenant claim precedence, missing-exp rejection, malformed bearer rejection, JWKS missing/unknown kid rejection, dev-mode self-verification.
 - `capability::tests` — Capability statement shape: resource type, FHIR version, status, server mode, supported interactions (create/read/update/delete/patch/search-type), generic search parameters, Patient/Observation resource-specific search parameters, patchFormat, implementation URL, JSON-only format.
 - `error::tests` — OperationOutcome mapping for all error variants (400/401/403/404/413/500), issue severity and codes.
-- `fhir::tests` — ID generation for create, resourceType mismatch rejection, search bundle link/pagination structure, resource-specific search parameter parsing, identifier filter parsing, schema validation OperationOutcome, malformed JSON OperationOutcome.
+- `fhir::tests` — ID generation for create, resourceType mismatch rejection, search bundle cursor-link structure, resource-specific search parameter parsing, identifier filter parsing, schema validation OperationOutcome, malformed JSON OperationOutcome.
 - `validation::tests` — Schema validator plus secondary datatype checks: accepts minimal and named Patient, minimal Observation with any code string for status, integer boundary values, and fragment canonical values; rejects unknown resource types, additional properties, wrong types, invalid calendar dates/dateTimes, fractional or out-of-range integer fields, invalid positiveInt/unsignedInt values, overflowing integer64 strings, invalid `uri`/`url`/`canonical` values, `ContactPoint.value` without `system`, `Attachment.data` without `contentType`, `Quantity.code` without `system`, and `Period.start > end`. Validator caching and multi-type support.
 
 ### Integration Tests (108 tests in `server/tests/`)
@@ -17,7 +17,7 @@
 - `delete.rs` (8 tests) — Delete returns 204, nonexistent returns 404, deleted resource no longer readable, count reduction after delete, write scope required, resource type restriction enforced, tenant isolation on delete, unauthenticated rejection when auth required.
 - `http_config.rs` (8 tests) — Docs route disabled by default, can be enabled, CORS allows only configured origin, CORS rejects unconfigured origin, dev token endpoint mints valid tokens, dev token defaults on empty body, dev token endpoint hidden in static mode, dev-minted tokens authenticate requests.
 - `patch.rs` (11 tests) — PATCH add/replace/remove field operations, 404 for nonexistent resource, 400 for invalid patch ops, version increment on patch, rejection of resourceType change, write scope required, resource type restriction enforced, read-after-patch roundtrip, schema validation of patched result.
-- `search.rs` — Searchset bundle shape and total, pagination with _count/_offset and next links, tenant isolation, forbidden resource type, _count above limit rejected, Patient search by `name`/`birthdate`/`identifier`, Observation search by `code`/`status`/`subject`, filtered pagination links, unsupported parameter rejection, malformed identifier rejection.
+- `search.rs` — Searchset bundle shape and total, cursor pagination with `_count`/`_after_id` and next links, multi-page filtered traversal across a moderate generated dataset, tenant isolation, forbidden resource type, `_count` above limit rejected, legacy `_offset` rejection, Patient search by `name`/`birthdate`/`identifier`, Observation search by `code`/`status`/`subject`, filtered pagination links, unsupported parameter rejection, malformed identifier rejection.
 - `validation.rs` (30 tests) — Acceptance of comprehensive Patient/Observation/Organization/Practitioner/Encounter/Condition/Procedure/DiagnosticReport examples. Rejection of extra properties, invalid types, unsupported resource types, missing resourceType, type mismatch, malformed/truncated/empty JSON, invalid calendar birth dates, invalid positiveInt extension values, invalid identifier URIs, `ContactPoint.value` without `system`, `Quantity.code` without `system`, `Period.start > end`, case-insensitive path matching, multiple validation errors, diagnostics content.
 
 ### External E2E Harness
@@ -39,6 +39,7 @@ Current full-scan baseline:
 - Transaction/batch Bundle processing.
 - Search parameters beyond the current first slice. Patient now supports `name`, `birthdate`, and `identifier`; Observation now supports `code`, `status`, and `subject`. Other resource-specific filters remain unimplemented.
 - Performance regression tests as part of CI.
+- Query-plan and index assertions for larger cursor-paginated datasets.
 - ND-JSON bulk data export.
 - Automated CI execution of the external E2E harness in both native and Docker modes.
 - Broader FHIR datatype and invariant coverage beyond the current second-pass slice, especially decimal precision and range checks, string length limits, richer URI/canonical rules where the schema is inlined in more places, and additional complex datatype invariants such as `Timing`, `SampledData`, `Range`, and `Ratio`.

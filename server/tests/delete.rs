@@ -3,9 +3,8 @@ mod common;
 use axum::http::StatusCode;
 use common::{
     build_test_app_auth_required, clean_tenant, count_history_entries, count_resources,
-    delete_resource, delete_resource_with_token, get_resource_with_token,
-    post_resource_with_token, read_only_token, restricted_token, send_request, setup_test_db,
-    tenant_token, test_data,
+    delete_resource, delete_resource_with_token, get_resource_with_token, post_resource_with_token,
+    read_only_token, restricted_token, send_request, setup_test_db, tenant_token, test_data,
 };
 use sqlx::Row;
 use tower::ServiceExt;

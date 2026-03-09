@@ -9,8 +9,8 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{
-    assert_operation_outcome, build_test_app_auth_required, post_resource_with_token,
-    send_request, setup_test_db, tenant_token, test_data,
+    assert_operation_outcome, build_test_app_auth_required, post_resource_with_token, send_request,
+    setup_test_db, tenant_token, test_data,
 };
 use serde_json::json;
 
@@ -67,7 +67,11 @@ async fn accepts_blood_glucose_observation() {
     let (app, token) = setup("validation-blood-glucose").await;
     let (status, body) = send_request(
         app,
-        post_resource_with_token("Observation", &test_data::observation_blood_glucose(), &token),
+        post_resource_with_token(
+            "Observation",
+            &test_data::observation_blood_glucose(),
+            &token,
+        ),
     )
     .await;
     assert_eq!(
@@ -209,7 +213,11 @@ async fn rejects_observation_with_invalid_status_type() {
     let (app, token) = setup("validation-invalid-status").await;
     let (status, body) = send_request(
         app,
-        post_resource_with_token("Observation", &test_data::observation_invalid_status(), &token),
+        post_resource_with_token(
+            "Observation",
+            &test_data::observation_invalid_status(),
+            &token,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -233,7 +241,11 @@ async fn rejects_patient_with_wrong_type_birthdate() {
     let (app, token) = setup("validation-wrong-birthdate").await;
     let (status, body) = send_request(
         app,
-        post_resource_with_token("Patient", &test_data::patient_wrong_type_birthdate(), &token),
+        post_resource_with_token(
+            "Patient",
+            &test_data::patient_wrong_type_birthdate(),
+            &token,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -248,7 +260,8 @@ async fn rejects_patient_with_invalid_calendar_birthdate() {
         "birthDate": "2024-02-30"
     });
 
-    let (status, body) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (status, body) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_operation_outcome(&body, "invalid");
 }
@@ -264,7 +277,8 @@ async fn rejects_patient_with_invalid_positive_int_extension() {
         }]
     });
 
-    let (status, body) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (status, body) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_operation_outcome(&body, "invalid");
 }
@@ -280,7 +294,8 @@ async fn rejects_patient_with_invalid_identifier_system_uri() {
         }]
     });
 
-    let (status, body) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (status, body) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_operation_outcome(&body, "invalid");
 }
@@ -295,7 +310,8 @@ async fn rejects_patient_with_contact_point_value_without_system() {
         }]
     });
 
-    let (status, body) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (status, body) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_operation_outcome(&body, "invalid");
 }
@@ -318,7 +334,11 @@ async fn rejects_observation_with_quantity_code_without_system() {
         }
     });
 
-    let (status, body) = send_request(app, post_resource_with_token("Observation", &observation, &token)).await;
+    let (status, body) = send_request(
+        app,
+        post_resource_with_token("Observation", &observation, &token),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_operation_outcome(&body, "invalid");
 }
@@ -341,7 +361,11 @@ async fn rejects_observation_with_effective_period_start_after_end() {
         }
     });
 
-    let (status, body) = send_request(app, post_resource_with_token("Observation", &observation, &token)).await;
+    let (status, body) = send_request(
+        app,
+        post_resource_with_token("Observation", &observation, &token),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_operation_outcome(&body, "invalid");
 }
@@ -478,7 +502,11 @@ async fn multiple_validation_errors_are_reported() {
         "active": "not-a-bool",
         "bogusField": true
     });
-    let (status, body) = send_request(app, post_resource_with_token("Patient", &bad_patient, &token)).await;
+    let (status, body) = send_request(
+        app,
+        post_resource_with_token("Patient", &bad_patient, &token),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let issues = body["issue"].as_array().unwrap();
@@ -497,7 +525,8 @@ async fn resource_type_matching_is_case_insensitive_in_path() {
         "resourceType": "patient",
         "id": "case-test"
     });
-    let (status, _) = send_request(app, post_resource_with_token("Patient", &resource, &token)).await;
+    let (status, _) =
+        send_request(app, post_resource_with_token("Patient", &resource, &token)).await;
     assert!(
         status == StatusCode::CREATED || status == StatusCode::BAD_REQUEST,
         "Should either accept or fail schema validation, not 500"
