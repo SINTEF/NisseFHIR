@@ -300,6 +300,25 @@ pub fn assert_operation_outcome(value: &Value, expected_code: &str) {
     );
 }
 
+/// Build a DELETE request to delete a FHIR resource.
+pub fn delete_resource(resource_type: &str, id: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(format!("/fhir/{resource_type}/{id}"))
+        .body(Body::empty())
+        .expect("request should build")
+}
+
+/// Build an authenticated DELETE request.
+pub fn delete_resource_with_token(resource_type: &str, id: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(format!("/fhir/{resource_type}/{id}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request should build")
+}
+
 /// Count rows in fhir_resources for a given tenant.
 pub async fn count_resources(pool: &PgPool, tenant_id: &str) -> i64 {
     sqlx::query("SELECT count(*) as cnt FROM fhir_resources WHERE tenant_id = $1")

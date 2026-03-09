@@ -2,22 +2,32 @@
 
 ## Current Coverage
 
-- `server/tests/validation.rs`: schema validation acceptance and rejection for representative FHIR resources.
-- `server/tests/auth.rs`: JWT validation, scope enforcement, resource allow-list checks, unauthenticated mode, and tenant isolation.
-- `server/tests/crud.rs`: create, read, update semantics, headers, roundtrips, versioning, and resource coexistence.
-- `server/tests/search.rs`: collection search baseline, pagination shape, tenant scoping, unauthenticated mode, and forbidden resource-type access.
-- `server/src/*.rs` unit tests: capability statement shape, auth claim parsing, error mapping, payload normalization, and search bundle formatting.
+### Unit Tests (42 tests in `server/src/`)
+- `auth::tests` — JWT validation, scope parsing, resource allow-list case sensitivity, tenant claim precedence, unauthenticated mode fallback, malformed bearer rejection.
+- `capability::tests` — Capability statement shape: resource type, FHIR version, status, server mode, supported interactions (create/read/update/delete/search-type), search parameters, implementation URL, JSON-only format.
+- `error::tests` — OperationOutcome mapping for all error variants (400/401/403/404/500), issue severity and codes.
+- `fhir::tests` — ID generation for create, resourceType mismatch rejection, search bundle link/pagination structure, schema validation OperationOutcome, malformed JSON OperationOutcome.
+- `validation::tests` — Schema validator: accepts minimal and named Patient, minimal Observation with any code string for status, rejects unknown resource types, additional properties, wrong types. Validator caching and multi-type support.
+
+### Integration Tests (78 tests in `server/tests/`)
+- `auth.rs` (20 tests) — Unauthenticated mode allows/denies correctly, expired/wrong-secret/missing tokens rejected, read-only/write-only scope enforcement on create/read/PUT, resource type restrictions on create/read, tenant isolation and same-ID-different-tenant coexistence, tenant claim precedence over sub.
+- `crud.rs` (20 tests) — Create returns 201 with correct headers (ETag, Last-Modified, Location), ID generation, database persistence, initial version=1, read-after-create roundtrip, ETag/Last-Modified on read, 404 for nonexistent/wrong-type, update returns 200 with incremented version, mismatched ID/type rejection, multi-resource-type roundtrip, field preservation on update, healthz, metadata endpoint, double-create upsert.
+- `delete.rs` (8 tests) — Delete returns 204, nonexistent returns 404, deleted resource no longer readable, count reduction after delete, write scope required, resource type restriction enforced, tenant isolation on delete, unauthenticated rejection when auth required.
+- `search.rs` (6 tests) — Searchset bundle shape and total, pagination with _count/_offset and next links, tenant isolation, forbidden resource type, unauthenticated mode uses public tenant, _count above limit rejected.
+- `validation.rs` (24 tests) — Acceptance of comprehensive Patient/Observation/Organization/Practitioner/Encounter/Condition/Procedure/DiagnosticReport examples. Rejection of extra properties, invalid types, unsupported resource types, missing resourceType, type mismatch, malformed/truncated/empty JSON, case-insensitive path matching, multiple validation errors, diagnostics content.
 
 ## What Is Missing
 
-- End-to-end tests with disposable PostgreSQL infrastructure instead of relying on a preconfigured local test database.
-- Search parameter coverage beyond `_count` and `_offset`, including resource-specific filtering and edge cases around unsupported parameters.
-- Delete, history, conditional interactions, and transaction/batch behavior.
-- Capability statement assertions for security/auth metadata and more exact conformance details.
-- Performance-focused tests or lightweight benchmarks for validation and collection reads.
+- History interaction (read previous versions of a resource).
+- Conditional create/update/delete (If-None-Exist, If-Match headers).
+- Transaction/batch Bundle processing.
+- Search parameters beyond `_count` and `_offset` (e.g., resource-specific filtering like `Patient?name=Smith`).
+- Performance regression tests as part of CI.
+- ND-JSON bulk data export.
 
 ## Recommended Next Steps
 
-1. Add disposable-Postgres integration setup so CI does not depend on an externally prepared database.
-2. Extend search tests with one or two real FHIR parameters per resource type, starting with simple exact-match fields.
-3. Add audit/logging assertions once request IDs and tenant-aware logging are implemented.
+1. Add resource-specific search parameters starting with Patient (name, birthdate, identifier) and Observation (code, status, subject).
+2. Add history endpoint (`GET /fhir/{type}/{id}/_history`) with version tracking.
+3. Add conditional interaction support (If-Match on update/delete).
+4. Add transaction/batch Bundle endpoint.

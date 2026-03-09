@@ -88,6 +88,27 @@ impl PgStore {
         })
     }
 
+    pub async fn delete(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<bool, AppError> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM fhir_resources
+            WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn search(
         &self,
         tenant_id: &str,

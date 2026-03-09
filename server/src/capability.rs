@@ -9,6 +9,22 @@ pub fn capability_statement(base_url: &str) -> Value {
         "format": ["json"],
         "rest": [{
             "mode": "server",
+            "security": {
+                "cors": true,
+                "service": [
+                    {
+                        "coding": [
+                            {
+                                "system": "http://terminology.hl7.org/CodeSystem/restful-security-service",
+                                "code": "SMART-on-FHIR",
+                                "display": "SMART on FHIR"
+                            }
+                        ],
+                        "text": "JWT Bearer Token authentication. Tokens must include tenant, scope (read/write), and optionally resource_types claims."
+                    }
+                ],
+                "description": "This server supports JWT Bearer Token authentication with HS256. Tokens encode tenant identity, read/write scopes, and optional resource type restrictions. An unauthenticated mode is available for development."
+            },
             "resource": [
                 {
                     "type": "*",
@@ -16,6 +32,7 @@ pub fn capability_statement(base_url: &str) -> Value {
                         {"code": "create"},
                         {"code": "read"},
                         {"code": "update"},
+                        {"code": "delete"},
                         {"code": "search-type"}
                     ],
                     "searchParam": [
@@ -83,6 +100,7 @@ mod tests {
         assert!(codes.contains(&"create"));
         assert!(codes.contains(&"read"));
         assert!(codes.contains(&"update"));
+        assert!(codes.contains(&"delete"));
         assert!(codes.contains(&"search-type"));
     }
 

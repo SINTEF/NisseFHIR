@@ -23,7 +23,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/fhir/{resource_type}/{id}",
-            get(read_resource).put(update_resource),
+            get(read_resource).put(update_resource).delete(delete_resource),
         )
 }
 
@@ -192,6 +192,28 @@ async fn update_resource(
     );
 
     Ok((StatusCode::OK, response_headers, Json(stored.resource)).into_response())
+}
+
+async fn delete_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((resource_type, id)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let access = extract_access_context(&headers, &state.auth)?;
+    if !access.can_write || !access.can_access_resource_type(&resource_type) {
+        return Err(AppError::Forbidden);
+    }
+
+    let deleted = state
+        .store
+        .delete(&access.tenant_id, &resource_type, &id)
+        .await?;
+
+    if !deleted {
+        return Err(AppError::NotFound);
+    }
+
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 fn parse_json_payload(payload: Result<Json<Value>, JsonRejection>) -> Result<Json<Value>, AppError> {
