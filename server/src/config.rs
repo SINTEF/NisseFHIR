@@ -205,3 +205,553 @@ fn env_flag(name: &str) -> bool {
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Guard to serialize env-mutating tests (env vars are process-global).
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Helper: run a closure with specific env vars set, then restore them.
+    fn with_env_vars<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut saved: Vec<(&str, Option<String>)> = Vec::new();
+        for &(key, val) in vars {
+            saved.push((key, env::var(key).ok()));
+            // SAFETY: tests are serialized via ENV_MUTEX so no concurrent access.
+            unsafe {
+                match val {
+                    Some(v) => env::set_var(key, v),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+        f();
+        for (key, old_val) in saved {
+            // SAFETY: tests are serialized via ENV_MUTEX so no concurrent access.
+            unsafe {
+                match old_val {
+                    Some(v) => env::set_var(key, v),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_algorithm
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_algorithm_all_supported() {
+        assert_eq!(parse_algorithm("HS256").unwrap(), Algorithm::HS256);
+        assert_eq!(parse_algorithm("HS384").unwrap(), Algorithm::HS384);
+        assert_eq!(parse_algorithm("HS512").unwrap(), Algorithm::HS512);
+        assert_eq!(parse_algorithm("RS256").unwrap(), Algorithm::RS256);
+        assert_eq!(parse_algorithm("RS384").unwrap(), Algorithm::RS384);
+        assert_eq!(parse_algorithm("RS512").unwrap(), Algorithm::RS512);
+        assert_eq!(parse_algorithm("ES256").unwrap(), Algorithm::ES256);
+        assert_eq!(parse_algorithm("ES384").unwrap(), Algorithm::ES384);
+    }
+
+    #[test]
+    fn parse_algorithm_case_insensitive() {
+        assert_eq!(parse_algorithm("hs256").unwrap(), Algorithm::HS256);
+        assert_eq!(parse_algorithm("  Rs384  ").unwrap(), Algorithm::RS384);
+    }
+
+    #[test]
+    fn parse_algorithm_unsupported() {
+        let err = parse_algorithm("NONE").unwrap_err();
+        assert!(err.to_string().contains("unsupported JWT_ALGORITHM"));
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_hmac_secret
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_hmac_secret_accepts_long() {
+        assert!(validate_hmac_secret("01234567890123456789012345678901").is_ok());
+    }
+
+    #[test]
+    fn validate_hmac_secret_rejects_short() {
+        let err = validate_hmac_secret("too-short").unwrap_err();
+        assert!(err.to_string().contains("at least 32 characters"));
+    }
+
+    // -----------------------------------------------------------------------
+    // maybe_warn_on_development_secret (smoke test — just ensure no panic)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn warn_on_development_secret_does_not_panic() {
+        maybe_warn_on_development_secret("change-me-secret-0123456789abcd");
+        maybe_warn_on_development_secret("dev-secret-0123456789abcdefghij");
+        maybe_warn_on_development_secret("example-0123456789abcdefghijklm");
+        maybe_warn_on_development_secret("test-secret-0123456789abcdefghi");
+        maybe_warn_on_development_secret("perfect-production-secret-000000");
+    }
+
+    // -----------------------------------------------------------------------
+    // env_flag
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn env_flag_truthy_values() {
+        with_env_vars(&[("__TEST_FLAG", Some("1"))], || {
+            assert!(env_flag("__TEST_FLAG"));
+        });
+        with_env_vars(&[("__TEST_FLAG", Some("true"))], || {
+            assert!(env_flag("__TEST_FLAG"));
+        });
+        with_env_vars(&[("__TEST_FLAG", Some("TRUE"))], || {
+            assert!(env_flag("__TEST_FLAG"));
+        });
+        with_env_vars(&[("__TEST_FLAG", Some("yes"))], || {
+            assert!(env_flag("__TEST_FLAG"));
+        });
+        with_env_vars(&[("__TEST_FLAG", Some("YES"))], || {
+            assert!(env_flag("__TEST_FLAG"));
+        });
+    }
+
+    #[test]
+    fn env_flag_falsy_values() {
+        with_env_vars(&[("__TEST_FLAG", Some("0"))], || {
+            assert!(!env_flag("__TEST_FLAG"));
+        });
+        with_env_vars(&[("__TEST_FLAG", Some("false"))], || {
+            assert!(!env_flag("__TEST_FLAG"));
+        });
+        with_env_vars(&[("__TEST_FLAG", None)], || {
+            assert!(!env_flag("__TEST_FLAG"));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_cors_allowed_origins
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_cors_empty_when_unset() {
+        with_env_vars(&[("CORS_ALLOWED_ORIGINS", None)], || {
+            let origins = parse_cors_allowed_origins().unwrap();
+            assert!(origins.is_empty());
+        });
+    }
+
+    #[test]
+    fn parse_cors_single_origin() {
+        with_env_vars(
+            &[("CORS_ALLOWED_ORIGINS", Some("https://example.com"))],
+            || {
+                let origins = parse_cors_allowed_origins().unwrap();
+                assert_eq!(origins.len(), 1);
+                assert_eq!(origins[0].to_str().unwrap(), "https://example.com");
+            },
+        );
+    }
+
+    #[test]
+    fn parse_cors_multiple_origins() {
+        with_env_vars(
+            &[(
+                "CORS_ALLOWED_ORIGINS",
+                Some("https://a.com, https://b.com , https://c.com"),
+            )],
+            || {
+                let origins = parse_cors_allowed_origins().unwrap();
+                assert_eq!(origins.len(), 3);
+            },
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // load_auth_config (integration-level, env-driven)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_static_hmac_from_env() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("a]very-long-secret-at-least-32-chars!")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let auth = load_auth_config().unwrap();
+                assert!(matches!(auth, AuthConfig::Static(_)));
+            },
+        );
+    }
+
+    #[test]
+    fn load_static_hmac_missing_secret() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let result = load_auth_config();
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("JWT_SECRET"));
+            },
+        );
+    }
+
+    #[test]
+    fn load_static_hmac_secret_too_short() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("short")),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let result = load_auth_config();
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("at least 32"));
+            },
+        );
+    }
+
+    #[test]
+    fn load_dev_mode_from_env() {
+        with_env_vars(&[("JWT_MODE", Some("dev"))], || {
+            let auth = load_auth_config().unwrap();
+            assert!(matches!(auth, AuthConfig::Dev(_)));
+        });
+    }
+
+    #[test]
+    fn load_unsupported_mode() {
+        with_env_vars(&[("JWT_MODE", Some("bogus"))], || {
+            let result = load_auth_config();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("unsupported JWT_MODE"));
+        });
+    }
+
+    #[test]
+    fn load_jwks_mode_from_env() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("jwks")),
+                ("JWT_JWKS_URI", Some("https://example.com/.well-known/jwks.json")),
+                ("JWT_JWKS_REFRESH_SECS", None),
+                ("JWT_ISSUER", Some("https://issuer.example.com")),
+                ("JWT_AUDIENCE", Some("my-audience")),
+            ],
+            || {
+                let auth = load_auth_config().unwrap();
+                assert!(matches!(auth, AuthConfig::Jwks(_)));
+            },
+        );
+    }
+
+    #[test]
+    fn load_jwks_mode_missing_uri() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("jwks")),
+                ("JWT_JWKS_URI", None),
+            ],
+            || {
+                let result = load_auth_config();
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("JWT_JWKS_URI"));
+            },
+        );
+    }
+
+    #[test]
+    fn load_jwks_mode_invalid_uri() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("jwks")),
+                ("JWT_JWKS_URI", Some("not a url")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+            ],
+            || {
+                let result = load_auth_config();
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("not a valid URL"));
+            },
+        );
+    }
+
+    #[test]
+    fn load_static_rsa_missing_key() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("RS256")),
+                ("JWT_SECRET", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let result = load_auth_config();
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("JWT public key"));
+            },
+        );
+    }
+
+    #[test]
+    fn load_static_ec_missing_key() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("ES256")),
+                ("JWT_SECRET", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let result = load_auth_config();
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("JWT public key"));
+            },
+        );
+    }
+
+    // The RSA public key PEM used for testing (2048-bit).
+    const TEST_RSA_PUB_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu1SU1LfVLPHCozMxH2Mo\n4lgOEePzNm0tRgeLezV6ffAt0gunVTLw7onLRnrq0/IzW7yWR7QkrmBL7jTKEn5u\n+qKhbwKfBstIs+bMY2Zkp18gnTxklLgs0gG+o0561MRpmHAXE5gTa5RiP3InC8gJ\ncLJPQGmNR/Vu36MThEoSjks2Lg2aaGr/sMbmGrUK5cYXWIFiAPxsWfRMUSN7YZFJ\nkdqPsm9Lo1E9jqnukEif+F61VBJ6mIUfpE6YiOvJim2rk+0M20IHXBQ/8v7U5I7r\nXIq6NKPHKxR3n9+niPKtkHQCb3TGpN/M5W7g7XyxAZ3RYMg+hWqcIGXflNiLt5Ei\nQwIDAQAB\n-----END PUBLIC KEY-----";
+
+    // The EC public key PEM used for testing (P-256).
+    const TEST_EC_PUB_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoBGIlAqHWzG7aIgjDzY9a/dcCurC\np0+MjUBT8JKfj9aTLoYMYYS4YDYhzEGf4WC0w3xJP/M888igBJaOGtsk1g==\n-----END PUBLIC KEY-----";
+
+    #[test]
+    fn load_static_rsa_with_pem() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("RS256")),
+                ("JWT_SECRET", None),
+                ("JWT_PUBLIC_KEY_PEM", Some(TEST_RSA_PUB_PEM)),
+                ("JWT_PUBLIC_KEY_PATH", None),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+            ],
+            || {
+                let auth = load_auth_config().unwrap();
+                assert!(matches!(auth, AuthConfig::Static(_)));
+            },
+        );
+    }
+
+    #[test]
+    fn load_static_ec_with_pem() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("ES256")),
+                ("JWT_SECRET", None),
+                ("JWT_PUBLIC_KEY_PEM", Some(TEST_EC_PUB_PEM)),
+                ("JWT_PUBLIC_KEY_PATH", None),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+            ],
+            || {
+                let auth = load_auth_config().unwrap();
+                assert!(matches!(auth, AuthConfig::Static(_)));
+            },
+        );
+    }
+
+    #[test]
+    fn from_env_missing_database_url() {
+        with_env_vars(
+            &[
+                ("DATABASE_URL", None),
+            ],
+            || {
+                let result = AppConfig::from_env();
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("DATABASE_URL"));
+            },
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // load_public_key_pem
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_public_key_from_inline_pem() {
+        with_env_vars(
+            &[
+                ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----\nfake\n-----END PUBLIC KEY-----")),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let pem = load_public_key_pem().unwrap();
+                assert!(pem.contains("BEGIN PUBLIC KEY"));
+            },
+        );
+    }
+
+    #[test]
+    fn load_public_key_from_file() {
+        // Write a temporary file
+        let tmp = "/tmp/__test_jwt_public_key.pem";
+        std::fs::write(tmp, "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----")
+            .expect("write tmp file");
+        with_env_vars(
+            &[
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", Some(tmp)),
+            ],
+            || {
+                let pem = load_public_key_pem().unwrap();
+                assert!(pem.contains("BEGIN PUBLIC KEY"));
+            },
+        );
+        let _ = std::fs::remove_file(tmp);
+    }
+
+    #[test]
+    fn load_public_key_missing_both() {
+        with_env_vars(
+            &[
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let result = load_public_key_pem();
+                assert!(result.is_err());
+            },
+        );
+    }
+
+    #[test]
+    fn load_public_key_empty_pem_falls_through() {
+        with_env_vars(
+            &[
+                ("JWT_PUBLIC_KEY_PEM", Some("   ")),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let result = load_public_key_pem();
+                assert!(result.is_err());
+            },
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Full AppConfig::from_env with valid HMAC config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_env_with_full_hmac_config() {
+        with_env_vars(
+            &[
+                ("DATABASE_URL", Some("postgres://localhost/test")),
+                ("BIND_ADDR", Some("127.0.0.1:9090")),
+                ("FHIR_BASE_URL", Some("http://localhost:9090/fhir")),
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("a-very-long-secret-at-least-32-chars!!")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+                ("CORS_ALLOWED_ORIGINS", Some("https://example.com")),
+                ("SERVE_DOCS", Some("true")),
+            ],
+            || {
+                let config = AppConfig::from_env().unwrap();
+                assert_eq!(config.bind_addr, "127.0.0.1:9090");
+                assert_eq!(config.database_url, "postgres://localhost/test");
+                assert_eq!(config.fhir_base_url, "http://localhost:9090/fhir");
+                assert!(config.serve_docs);
+                assert_eq!(config.cors_allowed_origins.len(), 1);
+            },
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AuthConfig Debug implementation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auth_config_debug_static() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("a-very-long-secret-at-least-32-chars!!")),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+            ],
+            || {
+                let auth = load_auth_config().unwrap();
+                let debug_str = format!("{auth:?}");
+                assert!(debug_str.contains("Static"));
+            },
+        );
+    }
+
+    #[test]
+    fn auth_config_debug_dev() {
+        with_env_vars(&[("JWT_MODE", Some("dev"))], || {
+            let auth = load_auth_config().unwrap();
+            let debug_str = format!("{auth:?}");
+            assert!(debug_str.contains("Dev"));
+        });
+    }
+
+    #[test]
+    fn auth_config_debug_jwks() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("jwks")),
+                ("JWT_JWKS_URI", Some("https://example.com/.well-known/jwks.json")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+            ],
+            || {
+                let auth = load_auth_config().unwrap();
+                let debug_str = format!("{auth:?}");
+                assert!(debug_str.contains("Jwks"));
+            },
+        );
+    }
+
+    #[test]
+    fn load_static_with_issuer_and_audience() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("a-very-long-secret-at-least-32-chars!!")),
+                ("JWT_ISSUER", Some("https://issuer.example.com")),
+                ("JWT_AUDIENCE", Some("my-audience")),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let auth = load_auth_config().unwrap();
+                assert!(matches!(auth, AuthConfig::Static(_)));
+            },
+        );
+    }
+}

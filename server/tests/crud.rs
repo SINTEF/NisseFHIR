@@ -527,3 +527,30 @@ async fn double_create_upserts_same_resource() {
 
     assert_eq!(count_resources(&pool, "crud-double-create").await, 1);
 }
+
+// ─── PAYLOAD TOO LARGE ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_rejects_payload_too_large() {
+    let (pool, token) = setup("crud-too-large").await;
+    let app = build_test_app_auth_required(pool);
+
+    // 10 MB is the configured max body size; send > 10 MB
+    let large_string = "x".repeat(11 * 1024 * 1024);
+    let body = serde_json::json!({
+        "resourceType": "Patient",
+        "id": "too-large",
+        "text": { "status": "generated", "div": large_string }
+    });
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/fhir/Patient")
+        .header("content-type", "application/json")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
+        .expect("request should build");
+
+    let (status, _body) = send_request(app, req).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}

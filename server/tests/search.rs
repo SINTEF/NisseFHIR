@@ -335,3 +335,35 @@ async fn search_rejects_malformed_identifier_filter() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["issue"][0]["code"], "invalid");
 }
+
+#[tokio::test]
+async fn search_rejects_empty_identifier_value() {
+    let pool = setup_test_db().await;
+    let token = tenant_token("search-empty-identifier");
+
+    let app = build_test_app_auth_required(pool);
+    let (status, body) = send_request(
+        app,
+        search_resource_with_token("Patient", Some("identifier="), &token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["issue"][0]["code"], "invalid");
+}
+
+#[tokio::test]
+async fn search_rejects_identifier_with_empty_system() {
+    let pool = setup_test_db().await;
+    let token = tenant_token("search-empty-sys-ident");
+
+    let app = build_test_app_auth_required(pool);
+    let (status, body) = send_request(
+        app,
+        search_resource_with_token("Patient", Some("identifier=|value"), &token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["issue"][0]["code"], "invalid");
+}
