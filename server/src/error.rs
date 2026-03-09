@@ -34,6 +34,8 @@ pub enum AppError {
     BadRequest(String),
     #[error("precondition failed: {0}")]
     PreconditionFailed(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("payload too large")]
     PayloadTooLarge,
     #[error("validation failed")]
@@ -81,6 +83,10 @@ impl IntoResponse for AppError {
             ),
             AppError::PreconditionFailed(message) => (
                 StatusCode::PRECONDITION_FAILED,
+                vec![OperationIssue::error("conflict", message)],
+            ),
+            AppError::Conflict(message) => (
+                StatusCode::CONFLICT,
                 vec![OperationIssue::error("conflict", message)],
             ),
             AppError::PayloadTooLarge => (
@@ -156,6 +162,12 @@ mod tests {
     fn precondition_failed_maps_to_412() {
         let (status, _) = error_response(AppError::PreconditionFailed("stale".to_owned()));
         assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    }
+
+    #[test]
+    fn conflict_maps_to_409() {
+        let (status, _) = error_response(AppError::Conflict("duplicate".to_owned()));
+        assert_eq!(status, StatusCode::CONFLICT);
     }
 
     #[test]

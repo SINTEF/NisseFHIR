@@ -13,6 +13,10 @@ pub fn capability_statement(base_url: &str) -> Value {
         {"code": "search-type"}
     ]);
 
+    let conditional_features = json!({
+        "conditionalCreate": true
+    });
+
     let pagination_params = vec![
         json!({
             "name": "_count",
@@ -33,6 +37,7 @@ pub fn capability_statement(base_url: &str) -> Value {
     resource_entries.push(json!({
         "type": "*",
         "interaction": generic_interactions,
+        "conditionalCreate": conditional_features["conditionalCreate"],
         "searchParam": pagination_params,
     }));
 
@@ -43,6 +48,7 @@ pub fn capability_statement(base_url: &str) -> Value {
             resource_entries.push(json!({
                 "type": rt,
                 "interaction": generic_interactions,
+                "conditionalCreate": conditional_features["conditionalCreate"],
             }));
             continue;
         }
@@ -69,6 +75,7 @@ pub fn capability_statement(base_url: &str) -> Value {
         resource_entries.push(json!({
             "type": rt,
             "interaction": generic_interactions,
+            "conditionalCreate": conditional_features["conditionalCreate"],
             "searchParam": search_params,
         }));
     }
@@ -78,7 +85,7 @@ pub fn capability_statement(base_url: &str) -> Value {
         "status": "active",
         "kind": "instance",
         "fhirVersion": "6.0.0-ballot3",
-        "format": ["json"],
+        "format": ["json", "application/fhir+json"],
         "patchFormat": ["application/json-patch+json"],
         "rest": [{
             "mode": "server",
@@ -224,10 +231,25 @@ mod tests {
     }
 
     #[test]
-    fn capability_only_supports_json() {
+    fn capability_only_supports_json_and_fhir_json() {
         let value = capability_statement("http://localhost:8080/fhir");
         let formats = value["format"].as_array().unwrap();
-        assert_eq!(formats.len(), 1);
+        assert_eq!(formats.len(), 2);
         assert_eq!(formats[0], "json");
+        assert_eq!(formats[1], "application/fhir+json");
+    }
+
+    #[test]
+    fn capability_advertises_conditional_create() {
+        let value = capability_statement("http://localhost:8080/fhir");
+        let resources = value["rest"][0]["resource"].as_array().unwrap();
+        // Wildcard entry
+        assert_eq!(resources[0]["conditionalCreate"], true);
+        // A specific resource type
+        let patient = resources
+            .iter()
+            .find(|r| r["type"] == "Patient")
+            .unwrap();
+        assert_eq!(patient["conditionalCreate"], true);
     }
 }

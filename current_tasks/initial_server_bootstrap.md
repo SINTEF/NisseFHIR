@@ -13,7 +13,8 @@
 - Returned FHIR `OperationOutcome` bodies for all error responses
 - Added baseline collection search (`GET /fhir/:resource_type`) returning paged FHIR `searchset` Bundles
 - Added first-pass resource-specific search parameters: Patient (`name`, `birthdate`, `identifier`) and Observation (`code`, `status`, `subject`)
-- Comprehensive test suites: 66 unit tests + 108 integration tests (174 total)
+- Transaction/batch Bundle processing via `POST /fhir` with full atomicity for transactions (rollback on failure) and independent processing for batches (inline OperationOutcome on failure)
+- Comprehensive test suites: 146 unit tests + 143 integration tests (289 total)
 - Capability statement with security metadata (JWT, CORS, scopes), patch interaction, patchFormat
 - Dockerfile for containerized deployment
 - Python E2E harness that boots native or Docker deployments, prefers local PostgreSQL for native runs, scans both the HL7 `examples/` directory and `fhir-test-cases/r5/examples/` in parallel by inferred `resourceType`, classifies accepted/invalid/unsupported/payload-too-large outcomes, and runs real CRUD/search checks over HTTP
@@ -29,8 +30,7 @@
 ## Remaining (near-term)
 
 1. Add conditional interactions (If-Match on update/delete, If-None-Exist on create).
-2. Add transaction/batch Bundle processing.
-3. Expand search support to additional resource types and closer FHIR semantics where needed.
-4. Add ND-JSON bulk data export support.
-5. Add CI pipeline with disposable PostgreSQL and run the Python E2E harness in both native and Docker modes.
-6. Extend secondary validation beyond the current slice: decimal precision/range, string length limits, and additional complex datatype invariants that JSON Schema does not enforce (`Timing`, `SampledData`, `Range`, `Ratio`, etc.).
+2. Expand search support to additional resource types and closer FHIR semantics where needed.
+3. Add ND-JSON bulk data export support.
+4. Add CI pipeline with disposable PostgreSQL and run the Python E2E harness in both native and Docker modes.
+5. Extend secondary validation beyond the current slice: decimal precision/range, string length limits, and additional complex datatype invariants that JSON Schema does not enforce (`Timing`, `SampledData`, `Range`, `Ratio`, etc.).

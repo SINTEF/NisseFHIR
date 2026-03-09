@@ -107,7 +107,7 @@ pub async fn search_resources(
 
 #[utoipa::path(post, path = "/fhir/{resource_type}",
     params(("resource_type" = String, Path, description = "FHIR resource type")),
-    responses((status = 201, description = "Resource created"), (status = 400, description = "Validation error"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 413, description = "Payload too large")),
+    responses((status = 201, description = "Resource created"), (status = 200, description = "Existing resource returned (If-None-Exist match)"), (status = 400, description = "Validation error"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 409, description = "Multiple matches for If-None-Exist"), (status = 413, description = "Payload too large")),
     security(("bearer_auth" = [])))]
 pub async fn create_resource(
     State(state): State<AppState>,
@@ -118,6 +118,50 @@ pub async fn create_resource(
     let access = extract_access_context(&headers, &state.auth)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
+    }
+
+    // Handle If-None-Exist conditional create
+    if let Some(if_none_exist) = parse_if_none_exist(&headers)? {
+        let query_params = parse_if_none_exist_query(&resource_type, &if_none_exist, state.search)?;
+        let results = state
+            .store
+            .search(
+                &access.tenant_id,
+                &resource_type,
+                &query_params.filters,
+                2, // only need to know if 0, 1, or >1 matches
+                None,
+            )
+            .await?;
+
+        match results.total {
+            0 => { /* no match — proceed with create below */ }
+            1 => {
+                // Exactly one match: return existing resource (200 OK)
+                let existing = &results.resources[0];
+                let mut response_headers = HeaderMap::new();
+                response_headers.insert(
+                    "ETag",
+                    HeaderValue::from_str(&format!("W/\"{}\"", existing.version_id))
+                        .map_err(|e| AppError::Internal(format!("invalid ETag header: {e}")))?,
+                );
+                response_headers.insert(
+                    "Last-Modified",
+                    HeaderValue::from_str(&existing.last_updated.to_rfc3339())
+                        .map_err(|e| {
+                            AppError::Internal(format!("invalid Last-Modified header: {e}"))
+                        })?,
+                );
+                return Ok((StatusCode::OK, response_headers, Json(existing.resource.clone()))
+                    .into_response());
+            }
+            _ => {
+                // Multiple matches: return 412 Precondition Failed per FHIR spec
+                return Err(AppError::PreconditionFailed(
+                    "If-None-Exist matched multiple resources".to_owned(),
+                ));
+            }
+        }
     }
 
     let Json(mut body) = parse_json_payload(payload)?;
@@ -862,6 +906,48 @@ fn parse_json_payload(
             AppError::BadRequest(format!("invalid JSON payload: {message}"))
         }
     })
+}
+
+/// Parse the `If-None-Exist` header for conditional create.
+///
+/// Returns the raw query string (e.g. "identifier=http://example.org|12345")
+/// or None if the header is absent.
+fn parse_if_none_exist(headers: &HeaderMap) -> Result<Option<String>, AppError> {
+    let Some(header_value) = headers.get("If-None-Exist") else {
+        return Ok(None);
+    };
+
+    let raw = header_value
+        .to_str()
+        .map_err(|e| AppError::BadRequest(format!("invalid If-None-Exist header: {e}")))?
+        .trim();
+
+    if raw.is_empty() {
+        return Err(AppError::BadRequest(
+            "If-None-Exist header must not be empty".to_owned(),
+        ));
+    }
+
+    Ok(Some(raw.to_owned()))
+}
+
+/// Parse the If-None-Exist query string into search filters.
+fn parse_if_none_exist_query(
+    resource_type: &str,
+    query_string: &str,
+    search: SearchConfig,
+) -> Result<ParsedSearchParams, AppError> {
+    let query: BTreeMap<String, String> = url::form_urlencoded::parse(query_string.as_bytes())
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+
+    if query.is_empty() {
+        return Err(AppError::BadRequest(
+            "If-None-Exist must contain at least one search parameter".to_owned(),
+        ));
+    }
+
+    parse_search_params(resource_type, query, search)
 }
 
 fn parse_if_match_version(headers: &HeaderMap) -> Result<Option<i64>, AppError> {

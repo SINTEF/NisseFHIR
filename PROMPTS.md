@@ -241,3 +241,9 @@ Please continue as stated in file:fhir-specs.md Thanks.
 Please continue as stated in file:fhir-specs.md Thanks.
 ---
 Sorry I panicked and interrupted. But please continue if you think this is worth supporting. I havn't supported such thing before because I thought it was a bit scary, but perhaps it makes sense to support. What do you think ?
+---
+## VScode Claude Opus 4.6/autopilot
+Please continue as stated in file:fhir-specs.md Thanks.
+---
+## VScode GPT-5.4/autopilot
+I think it's also time to tidy up the current_tasks and ideas folders, as most of them have been implemented by now. can you check what can safely be removed? It's in the git history worst case.

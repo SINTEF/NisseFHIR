@@ -349,6 +349,23 @@ pub fn delete_resource_with_token(resource_type: &str, id: &str, token: &str) ->
         .expect("request should build")
 }
 
+/// Build an authenticated POST request with an If-None-Exist header for conditional create.
+pub fn post_resource_conditional(
+    resource_type: &str,
+    body: &Value,
+    token: &str,
+    if_none_exist: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/fhir/{resource_type}"))
+        .header("content-type", "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("If-None-Exist", if_none_exist)
+        .body(Body::from(serde_json::to_string(body).unwrap()))
+        .expect("request should build")
+}
+
 /// Count rows in fhir_resources for a given tenant.
 pub async fn count_resources(pool: &PgPool, tenant_id: &str) -> i64 {
     sqlx::query("SELECT count(*) as cnt FROM fhir_resources WHERE tenant_id = $1")

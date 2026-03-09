@@ -15,6 +15,7 @@ use auth::AuthConfig;
 use axum::{
     Router,
     http::{Method, header},
+    middleware::{self, Next},
 };
 use std::sync::Arc;
 use store::PgStore;
@@ -110,6 +111,7 @@ pub fn build_router(state: AppState) -> Router {
     }
 
     router
+        .layer(middleware::from_fn(fhir_content_type))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(HelmetLayer::with_defaults())
         .layer(trace)
@@ -132,6 +134,7 @@ fn build_cors_layer(allowed_origins: &[header::HeaderValue]) -> CorsLayer {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::IF_MATCH,
+            header::HeaderName::from_static("if-none-exist"),
         ])
         .expose_headers([
             header::ETAG,
@@ -144,4 +147,25 @@ fn build_cors_layer(allowed_origins: &[header::HeaderValue]) -> CorsLayer {
     } else {
         cors.allow_origin(allowed_origins.to_vec())
     }
+}
+
+/// Middleware that sets `Content-Type: application/fhir+json` on JSON responses
+/// from FHIR endpoints.
+async fn fhir_content_type(
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let is_fhir_path = request.uri().path().starts_with("/fhir") || request.uri().path() == "/metadata";
+    let mut response = next.run(request).await;
+    if is_fhir_path {
+        if let Some(ct) = response.headers().get(header::CONTENT_TYPE) {
+            if ct.as_bytes().starts_with(b"application/json") {
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static("application/fhir+json; charset=utf-8"),
+                );
+            }
+        }
+    }
+    response
 }

@@ -572,3 +572,68 @@ pub fn json_array_payload() -> Value {
 pub fn empty_object() -> Value {
     json!({})
 }
+
+/// A minimal valid FHIR Condition resource.
+pub fn condition_example() -> Value {
+    json!({
+        "resourceType": "Condition",
+        "id": "condition-example",
+        "clinicalStatus": {
+            "coding": [{
+                "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+                "code": "active"
+            }]
+        },
+        "verificationStatus": {
+            "coding": [{
+                "system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+                "code": "confirmed"
+            }]
+        },
+        "category": [{
+            "coding": [{
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                "code": "encounter-diagnosis",
+                "display": "Encounter Diagnosis"
+            }]
+        }],
+        "code": {
+            "coding": [{
+                "system": "http://snomed.info/sct",
+                "code": "39065001",
+                "display": "Burn of ear"
+            }],
+            "text": "Burn of ear"
+        },
+        "subject": {
+            "reference": "Patient/example"
+        },
+        "onsetDateTime": "2012-05-24"
+    })
+}
+
+/// A minimal valid FHIR Encounter resource.
+pub fn encounter_example() -> Value {
+    json!({
+        "resourceType": "Encounter",
+        "id": "encounter-example",
+        "status": "completed",
+        "class": [{
+            "coding": [{
+                "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                "code": "IMP",
+                "display": "inpatient encounter"
+            }]
+        }],
+        "subject": {
+            "reference": "Patient/example"
+        },
+        "type": [{
+            "coding": [{
+                "system": "http://snomed.info/sct",
+                "code": "11429006",
+                "display": "Consultation"
+            }]
+        }]
+    })
+}
