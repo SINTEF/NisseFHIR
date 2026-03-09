@@ -61,7 +61,7 @@ impl PgStore {
             r#"
             INSERT INTO fhir_resources (tenant_id, resource_type, id, version_id, resource)
             VALUES ($1, $2, $3, 1, $4)
-            ON CONFLICT (tenant_id, resource_type, id)
+            ON CONFLICT (resource_type, tenant_id, id)
             DO UPDATE SET
                 resource = EXCLUDED.resource,
                 version_id = fhir_resources.version_id + 1,
