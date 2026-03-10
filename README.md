@@ -2,6 +2,8 @@
 
 NisseFHIR is a lightweight FHIR 6 server.
 
+A FHIR server securely stores healthcare data and provides standard APIs to share it between different medical systems and apps.
+
 This server does not support all FHIR features, but it should be good enough to support most common use cases. If you need XML, RDF or some exotic FHIR features, this is not the right server.
 
 ⚠️ **This has been developed using AI agents. Use at your own risks.**
