@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.4] - 2026-03-10
+
+### Changed
+
+- Increase request body size limit for large FHIR resources.
+
 ## [0.1.3] - 2026-03-10
 
 ### Changed
@@ -58,6 +64,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - CORS support with configurable allowed origins.
 - Configurable database timeouts and search limits.
 
+[0.1.4]: https://github.com/SINTEF/NisseFHIR/releases/tag/0.1.4
 [0.1.3]: https://github.com/SINTEF/NisseFHIR/releases/tag/0.1.3
 [0.1.2]: https://github.com/SINTEF/NisseFHIR/releases/tag/0.1.2
 [0.1.1]: https://github.com/SINTEF/NisseFHIR/releases/tag/0.1.1
