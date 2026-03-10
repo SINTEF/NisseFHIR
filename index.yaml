@@ -2,6 +2,23 @@ apiVersion: v1
 entries:
   fhir-autopilot:
   - apiVersion: v2
+    appVersion: 0.1.2
+    created: "2026-03-10T10:20:11.834343229Z"
+    description: Helm chart for deploying the FHIR Autopilot server with CloudNativePG.
+    digest: 4c5e1bf6a7eddaa33c109e95c1a3189800a9579d76a19c6aa4484cb771956ba5
+    keywords:
+    - fhir
+    - healthcare
+    - hl7
+    - rust
+    - postgresql
+    - cloudnativepg
+    name: fhir-autopilot
+    type: application
+    urls:
+    - https://github.com/SINTEF/NisseFHIR/releases/download/fhir-autopilot-0.1.2/fhir-autopilot-0.1.2.tgz
+    version: 0.1.2
+  - apiVersion: v2
     appVersion: 0.1.1
     created: "2026-03-10T09:59:44.645552035Z"
     description: Helm chart for deploying the FHIR Autopilot server with CloudNativePG.
@@ -35,4 +52,4 @@ entries:
     urls:
     - https://github.com/SINTEF/NisseFHIR/releases/download/fhir-autopilot-0.1.0/fhir-autopilot-0.1.0.tgz
     version: 0.1.0
-generated: "2026-03-10T09:59:44.645560921Z"
+generated: "2026-03-10T10:20:11.834354023Z"
