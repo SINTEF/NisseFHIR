@@ -7,28 +7,27 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy manifests first and cache dependency fetch
-COPY server/Cargo.toml server/Cargo.lock ./server/
+COPY Cargo.toml Cargo.lock ./
 
-RUN cd server \
-    && mkdir src \
+RUN mkdir src \
     && echo "fn main() {}" > src/main.rs \
     && cargo build --release \
     && rm -rf src
 
-# Copy schema file needed by include_str!("../../fhir.schema.json") at compile time
+# Copy schema file needed by include_str!("../fhir.schema.json") at compile time
 COPY fhir.schema.json ./fhir.schema.json
 
 # Copy actual source and migrations
-COPY server/src ./server/src
-COPY server/migrations ./server/migrations
+COPY src ./src
+COPY migrations ./migrations
 
-RUN cd server && cargo build --release
+RUN cargo build --release
 
 FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 
 WORKDIR /srv/app
 
-COPY --from=build /srv/app/server/target/release/fhir_server /usr/local/bin/fhir_server
+COPY --from=build /srv/app/target/release/fhir_server /usr/local/bin/fhir_server
 
 ENV BIND_ADDR=0.0.0.0:8080
 

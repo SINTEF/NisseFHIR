@@ -2,8 +2,8 @@
 """Generate Rust source code for FHIR search parameter registry.
 
 Reads the official FHIR search-parameters.json bundle and produces:
-- server/src/search_params/registry.rs  — static search parameter definitions
-- server/src/search_params/resource_types.rs — complete list of FHIR resource types
+- src/search_params/registry.rs  — static search parameter definitions
+- src/search_params/resource_types.rs — complete list of FHIR resource types
 """
 
 import json
@@ -13,7 +13,7 @@ import os
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SEARCH_PARAMS_JSON = os.path.join(BASE, "examples", "search-parameters.json")
 SCHEMA_JSON = os.path.join(BASE, "fhir.schema.json")
-OUT_DIR = os.path.join(BASE, "server", "src", "search_params")
+OUT_DIR = os.path.join(BASE, "src", "search_params")
 
 os.makedirs(OUT_DIR, exist_ok=True)
 

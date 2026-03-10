@@ -25,13 +25,13 @@ from typing import Any, Iterable
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-SERVER_DIR = ROOT_DIR / "server"
+SERVER_DIR = ROOT_DIR
 EXAMPLES_DIR = ROOT_DIR / "examples"
 EXAMPLES_ZIP = EXAMPLES_DIR / "examples-json.zip"
 COMPOSE_FILE = ROOT_DIR / "docker-compose.e2e.yml"
 
 # Additional example directories from fhir-test-cases submodule
-FHIR_TEST_CASES_DIR = ROOT_DIR / "fhir-test-cases"
+FHIR_TEST_CASES_DIR = ROOT_DIR / "references" / "fhir-test-cases"
 R5_EXAMPLES_DIR = FHIR_TEST_CASES_DIR / "r5" / "examples"
 
 EXAMPLES_URL = "https://build.fhir.org/examples-json.zip"

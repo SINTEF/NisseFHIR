@@ -1,6 +1,6 @@
-# fhir_server
+# Architecture
 
-Initial lightweight FHIR 6.0 server implementation in Rust.
+Lightweight FHIR 6.0 server implementation in Rust.
 
 ## Implemented in this milestone
 
@@ -69,7 +69,7 @@ The server decodes each token's `kid` header to find the matching key in the JWK
 ## Run
 
 ```bash
-cd server
+
 export JWT_SECRET="$(openssl rand -hex 32)"
 JWT_MODE=static \
 JWT_ALGORITHM=HS256 \
@@ -99,7 +99,7 @@ Issuer and audience validation are opt-in:
 For local testing with static HMAC mode, start the server as shown above and then generate a compatible JWT:
 
 ```bash
-python3 ../scripts/generate_static_jwt.py \
+python3 scripts/generate_static_jwt.py \\
   --tenant my-tenant \
   --scope 'read write'
 ```

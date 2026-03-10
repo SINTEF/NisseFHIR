@@ -4,7 +4,7 @@
 
 Code coverage: **93.04% line**, **91.21% region** (via `cargo llvm-cov`).
 
-### Unit Tests (182 tests in `server/src/`)
+### Unit Tests (182 tests in `src/`)
 
 - `auth::tests` — JWT validation, scope parsing, resource allow-list case sensitivity, tenant claim precedence, missing-exp rejection, malformed bearer rejection, JWKS missing/unknown kid rejection, dev-mode self-verification.
 - `capability::tests` — Capability statement shape: resource type, FHIR version, status, server mode, supported interactions (create/read/update/delete/patch/search-type), generic search parameters, Patient/Observation resource-specific search parameters, patchFormat, implementation URL, JSON-only format, conditionalCreate advertised, `application/fhir+json` format listed.
@@ -14,7 +14,7 @@ Code coverage: **93.04% line**, **91.21% region** (via `cargo llvm-cov`).
 - `search_params::sql::tests` (54 tests) — Comprehensive SQL-generation coverage for all search parameter types: string filters (single/nested/deep/WhereFilter/noop), reference filters (single/nested with and without reference suffix/WhereFilter/noop), date filters (single/nested/WhereFilter), URI filters (single/noop), number filters, quantity filters (value-only/full system+code/code-only), exists filters (true/false/other), token filters (identifier with/without system, nested 2-segment/deep, single-field CodeableConcept/array-of-CodeableConcept, WhereFilter with/without suffix), special/position filters, `push_search_filters` integration with multiple params, composite noop, `safe_array_elements` helper, geospatial `near` parsing and SQL generation, and regression coverage ensuring CodeableConcept token searches use containment-based (`@>`) predicates.
 - `validation::tests` — Schema validator plus secondary datatype checks: accepts minimal and named Patient, minimal Observation with any code string for status, integer boundary values, and fragment canonical values; rejects unknown resource types, additional properties, wrong types, invalid calendar dates/dateTimes, fractional or out-of-range integer fields, invalid positiveInt/unsignedInt values, overflowing integer64 strings, invalid `uri`/`url`/`canonical` values, `ContactPoint.value` without `system`, `Attachment.data` without `contentType`, `Quantity.code` without `system`, and `Period.start > end`. Validator caching and multi-type support.
 
-### Integration Tests (164 tests in `server/tests/`)
+### Integration Tests (164 tests in `tests/`)
 
 - `auth.rs` — Missing/expired/wrong-secret/missing-exp tokens rejected, read-only/write-only scope enforcement on create/read/PUT, resource type restrictions on create/read, tenant isolation and same-ID-different-tenant coexistence, tenant claim precedence over sub.
 - `bundle.rs` (16 tests) — Transaction Bundle: atomic multi-resource create, rollback on failure (patient not persisted when later entry fails), PUT update through transaction, DELETE through transaction, GET read within transaction, mixed operations (create + update + delete in one transaction), schema validation enforcement. Batch Bundle: independent multi-resource create, partial failure continues processing (failed entries reported inline with OperationOutcome, successful entries persist). Validation: rejects non-Bundle resourceType, rejects unsupported Bundle types (e.g. searchset), requires write scope, empty entries return empty response for both transaction and batch, missing request field rejected, response entries include ETag/Location/lastModified metadata.
@@ -31,7 +31,7 @@ Code coverage: **93.04% line**, **91.21% region** (via `cargo llvm-cov`).
 
 ### External E2E Harness
 
-- `scripts/e2e_examples.py` — Starts real infrastructure, downloads HL7 example data if needed, launches the server in native or Docker mode, then scans both the local `examples/` directory and `fhir-test-cases/r5/examples/` by parsing each file's top-level `resourceType`. It validates all resource-bearing JSON files in parallel over real HTTP, classifying each as accepted, schema-invalid, unsupported resource type, or payload-too-large for oversized payloads, and can finish with a CRUD smoke flow.
+- `scripts/e2e_examples.py` — Starts real infrastructure, downloads HL7 example data if needed, launches the server in native or Docker mode, then scans both the local `examples/` directory and `references/fhir-test-cases/r5/examples/` by parsing each file's top-level `resourceType`. It validates all resource-bearing JSON files in parallel over real HTTP, classifying each as accepted, schema-invalid, unsupported resource type, or payload-too-large for oversized payloads, and can finish with a CRUD smoke flow.
 
 Current full-scan baseline:
 

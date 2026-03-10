@@ -54,7 +54,7 @@ While intimidating at first, a FHIR server is also not a huge piece of software 
 
 ## AI Agents cannot write good enough FHIR servers on their own
 
-Reading the [Anthropic advertising experiment](https://www.anthropic.com/engineering/building-c-compiler) in which they built a C compiler using AI agents, I attempted to have AI agents build a FHIR 6 server. I wrote a comprehensive [specifications](./fhir-specs.md) document, attached the reference from FHIR, test data, and reference implementations using similar stacks.
+Reading the [Anthropic advertising experiment](https://www.anthropic.com/engineering/building-c-compiler) in which they built a C compiler using AI agents, I attempted to have AI agents build a FHIR 6 server. I wrote a comprehensive [specifications](./references/fhir-specs.md) document, attached the reference from FHIR, test data, and reference implementations using similar stacks.
 
 In early March 2026, using a mix of GPT-5.4 and Claude Opus 4.6, this did not work. Not at all.
 
