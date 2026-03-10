@@ -1297,9 +1297,10 @@ mod tests {
     #[test]
     fn rejects_unsupported_path_resource_type() {
         let err = validate_path_resource_type("ObviouslyNotAValidType").expect_err("must fail");
-        assert!(err
-            .to_string()
-            .contains("unsupported FHIR resource type 'ObviouslyNotAValidType'"));
+        assert!(
+            err.to_string()
+                .contains("unsupported FHIR resource type 'ObviouslyNotAValidType'")
+        );
     }
 
     #[test]

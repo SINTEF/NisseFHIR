@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2] - 2026-03-10
+
+### Fixed
+
+- Fix Rust formatting issue in `fhir.rs` that failed CI checks.
+
+### Changed
+
+- Release script now runs pre-flight checks (cargo fmt, clippy, tests, pre-commit) before bumping versions.
+
 ## [0.1.1] - 2026-03-10
 
 ### Added
@@ -39,5 +49,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - CORS support with configurable allowed origins.
 - Configurable database timeouts and search limits.
 
+[0.1.2]: https://github.com/SINTEF/fhir-autopilot/releases/tag/0.1.2
 [0.1.1]: https://github.com/SINTEF/fhir-autopilot/releases/tag/0.1.1
 [0.1.0]: https://github.com/SINTEF/fhir-autopilot/releases/tag/0.1.0

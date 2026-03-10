@@ -357,6 +357,8 @@ Can we have this release information in the source code, perhaps in the capabili
 ---
 Can we make version 0.1.1 now ? Could you make a nice script that does a bit of everything easily, like updating the cargo.toml, the cargo.lock (cargo install ?), create the commit, the tag, and so on. keep it minimal. it could be in the scripts folder. thank you.
 ---
+Alright, we failed the checks, like cargo check. I think when we do a release we should also do some of the checks, at least the pre-commit stuff and the cargo check stuff like in github ci, running the tests would be a plus too. can you improve the release script to do so, run it, see it fail, fix the failures (I think a rust format should do ?), and then make a new 0.1.2 release as 0.1.1 failed for some formattingissue. thank you.
+---
 ## VScode GPT-5.4/autopilot
 Doesn't look like we have resource type validation whatsoever???
 

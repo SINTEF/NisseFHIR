@@ -12,6 +12,28 @@ DATE=$(date +%Y-%m-%d)
 # Detect current version from Cargo.toml
 OLD=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 echo "Bumping $OLD → $NEW (date: $DATE)"
+echo ""
+
+# ── Pre-flight checks ──────────────────────────────────────────────
+echo "=== Running pre-flight checks ==="
+
+echo "→ cargo fmt --check"
+cargo fmt --all -- --check
+
+echo "→ cargo clippy"
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+echo "→ cargo test (lib + unit)"
+cargo test --lib
+
+echo "→ pre-commit"
+pre-commit run --all-files
+
+echo ""
+echo "=== All checks passed ==="
+echo ""
+
+# ── Version bump ────────────────────────────────────────────────────
 
 # 1. Cargo.toml
 sed -i "0,/^version = \"$OLD\"/s//version = \"$NEW\"/" Cargo.toml
@@ -39,7 +61,6 @@ sed -i "/^## \[$OLD\]/i\\$ENTRY" CHANGELOG.md
 # Update link references
 sed -i "s|\[$OLD\]: \(.*\)/releases/tag/$OLD|[$NEW]: \1/releases/tag/$NEW\n[$OLD]: \1/releases/tag/$OLD|" CHANGELOG.md
 
-echo ""
 echo "Files updated. Review with:  git diff"
 echo ""
 echo "When ready, run:"
