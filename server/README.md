@@ -44,7 +44,7 @@ The server supports two JWT modes selected via `JWT_MODE`:
 Verify tokens against a single static key — either HMAC or an asymmetric PEM.
 
 | Variable | Description |
-|---|---|
+| --- | --- |
 | `JWT_ALGORITHM` | `HS256` (default), `HS384`, `HS512`, `RS256`, `RS384`, `RS512`, `ES256`, `ES384` |
 | `JWT_SECRET` | Required for HMAC algorithms; minimum 32 chars |
 | `JWT_PUBLIC_KEY_PEM` or `JWT_PUBLIC_KEY_PATH` | Required for RSA/ECDSA algorithms |
@@ -58,7 +58,7 @@ For production, prefer asymmetric verification (`RS256`/`ES256`) with a mounted 
 Fetch signing keys from an OpenID Connect / OAuth2 JWKS endpoint. Keys are loaded at startup (server fails fast if unreachable) and refreshed in the background.
 
 | Variable | Description |
-|---|---|
+| --- | --- |
 | `JWT_JWKS_URI` | Required — URL to the provider's `/.well-known/jwks.json` |
 | `JWT_JWKS_REFRESH_SECS` | Background refresh interval (default: `300`) |
 | `JWT_ISSUER` | Optional — validate the `iss` claim |
@@ -70,9 +70,9 @@ The server decodes each token's `kid` header to find the matching key in the JWK
 
 ```bash
 cd server
+export JWT_SECRET="$(openssl rand -hex 32)"
 JWT_MODE=static \
 JWT_ALGORITHM=HS256 \
-JWT_SECRET='change-me-local-secret-0123456789abcdef' \
 SERVE_DOCS=true \
 DATABASE_URL=postgres://postgres:postgres@localhost/postgres \
 cargo run
@@ -100,10 +100,11 @@ For local testing with static HMAC mode, start the server as shown above and the
 
 ```bash
 python3 ../scripts/generate_static_jwt.py \
-  --secret 'change-me-local-secret-0123456789abcdef' \
   --tenant my-tenant \
   --scope 'read write'
 ```
+
+The script reads `JWT_SECRET` from the environment by default. Use `--secret` only if you intentionally want to override it.
 
 The script prints a JWT. Use it in requests like this:
 

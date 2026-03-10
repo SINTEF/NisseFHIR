@@ -708,6 +708,29 @@ mod tests {
     }
 
     #[test]
+    fn from_env_static_mode_missing_secret_fails_at_startup() {
+        with_env_vars(
+            &[
+                ("DATABASE_URL", Some("postgres://localhost/test")),
+                ("DATABASE_URL_FILE", None),
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", None),
+                ("JWT_SECRET_FILE", None),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let result = AppConfig::from_env();
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("JWT_SECRET"));
+            },
+        );
+    }
+
+    #[test]
     fn load_static_hmac_from_secret_file() {
         let tmp = "/tmp/__test_jwt_secret.txt";
         std::fs::write(tmp, "a-very-long-secret-from-file-at-least-32-chars!!\n")

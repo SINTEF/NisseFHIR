@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import sys
 import time
 
@@ -45,7 +46,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generate an HMAC JWT compatible with fhir_server static mode."
     )
-    parser.add_argument("--secret", required=True, help="JWT_SECRET used by the server")
+    parser.add_argument(
+        "--secret",
+        help="JWT_SECRET used by the server; defaults to the JWT_SECRET environment variable",
+    )
     parser.add_argument(
         "--algorithm",
         default="HS256",
@@ -81,8 +85,19 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    if len(args.secret) < 32:
-        print("error: --secret must be at least 32 characters", file=sys.stderr)
+    secret = args.secret or os.environ.get("JWT_SECRET")
+    if secret is None:
+        print(
+            "error: set JWT_SECRET or pass --secret",
+            file=sys.stderr,
+        )
+        return 2
+
+    if len(secret) < 32:
+        print(
+            "error: JWT secret must be at least 32 characters",
+            file=sys.stderr,
+        )
         return 2
     if args.expires_in <= 0:
         print("error: --expires-in must be positive", file=sys.stderr)
@@ -104,7 +119,7 @@ def main() -> int:
     if audience is not None:
         claims["aud"] = audience
 
-    print(build_token(args.secret, args.algorithm, claims))
+    print(build_token(secret, args.algorithm, claims))
     return 0
 
 
