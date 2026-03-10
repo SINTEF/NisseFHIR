@@ -355,6 +355,8 @@ Is it some concurrency issue ? Are we starting the server in the background corr
 Good work! We can now make the first release. Version 0.1.0!
 Can we have this release information in the source code, perhaps in the capabilities document? I think this document should include some information about the project. Also I think we can make a github tag (0.1.0 without a v), and push it and also update the docker-compose file to use a pre-built docker image with the right version (and comment out the build possibility). We can add a CHANGELOG.md, that is pretty simple. I may forget some important things about a release so please tell me and be proactive in such a situation.
 ---
+Can we make version 0.1.1 now ? Could you make a nice script that does a bit of everything easily, like updating the cargo.toml, the cargo.lock (cargo install ?), create the commit, the tag, and so on. keep it minimal. it could be in the scripts folder. thank you.
+---
 ## VScode GPT-5.4/autopilot
 Doesn't look like we have resource type validation whatsoever???
 

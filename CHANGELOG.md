@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-03-10
+
+### Added
+
+- Release script (`scripts/release.sh`) for automated version bumping.
+- Conditional create support with `If-None-Exist` header returning 412 on multiple matches.
+
+### Fixed
+
+- Reject unsupported resource types in URL paths with proper OperationOutcome.
+
 ## [0.1.0] - 2026-03-10
 
 ### Added
@@ -28,4 +39,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - CORS support with configurable allowed origins.
 - Configurable database timeouts and search limits.
 
+[0.1.1]: https://github.com/SINTEF/fhir-autopilot/releases/tag/0.1.1
 [0.1.0]: https://github.com/SINTEF/fhir-autopilot/releases/tag/0.1.0
