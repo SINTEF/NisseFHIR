@@ -86,14 +86,18 @@ async fn conditional_create_single_match_returns_existing() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::OK, "expected 200 for existing match, got: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "expected 200 for existing match, got: {body}"
+    );
     assert_eq!(body["id"], existing_id, "should return existing resource");
     // Should NOT have the "Different" family name — it returned the original
     assert!(
         body.get("name").is_none()
             || body["name"]
                 .as_array()
-                .map_or(true, |a| a.iter().all(|n| n["family"] != "Different")),
+                .is_none_or(|a| a.iter().all(|n| n["family"] != "Different")),
         "should return the original resource, not the new payload"
     );
 
@@ -150,8 +154,11 @@ async fn conditional_create_empty_header_returns_400() {
     let token = tenant_token(TENANT);
 
     let patient = minimal_patient();
-    let (status, body) =
-        send_request(app, post_resource_conditional("Patient", &patient, &token, "")).await;
+    let (status, body) = send_request(
+        app,
+        post_resource_conditional("Patient", &patient, &token, ""),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body}");
 }

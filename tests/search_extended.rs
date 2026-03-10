@@ -73,7 +73,10 @@ async fn search_condition_by_code() {
 
     assert_eq!(s, StatusCode::OK, "search failed: {body}");
     let total = body["total"].as_i64().unwrap_or(0);
-    assert!(total >= 1, "expected at least 1 match for code search, got {total}");
+    assert!(
+        total >= 1,
+        "expected at least 1 match for code search, got {total}"
+    );
 
     clean_tenant(&pool, tenant).await;
 }
@@ -103,7 +106,10 @@ async fn search_condition_by_subject() {
 
     assert_eq!(s, StatusCode::OK, "search failed: {body}");
     let total = body["total"].as_i64().unwrap_or(0);
-    assert!(total >= 1, "expected at least 1 match for subject search, got {total}");
+    assert!(
+        total >= 1,
+        "expected at least 1 match for subject search, got {total}"
+    );
 
     clean_tenant(&pool, tenant).await;
 }
@@ -132,7 +138,10 @@ async fn search_condition_by_category() {
 
     assert_eq!(s, StatusCode::OK, "search failed: {body}");
     let total = body["total"].as_i64().unwrap_or(0);
-    assert!(total >= 1, "expected at least 1 match for category search, got {total}");
+    assert!(
+        total >= 1,
+        "expected at least 1 match for category search, got {total}"
+    );
 
     clean_tenant(&pool, tenant).await;
 }
@@ -161,7 +170,10 @@ async fn search_condition_by_onset_date() {
 
     assert_eq!(s, StatusCode::OK, "search failed: {body}");
     let total = body["total"].as_i64().unwrap_or(0);
-    assert!(total >= 1, "expected at least 1 match for onset-date search, got {total}");
+    assert!(
+        total >= 1,
+        "expected at least 1 match for onset-date search, got {total}"
+    );
 
     clean_tenant(&pool, tenant).await;
 }
@@ -224,7 +236,10 @@ async fn search_encounter_by_status() {
 
     assert_eq!(s, StatusCode::OK, "search failed: {body}");
     let total = body["total"].as_i64().unwrap_or(0);
-    assert!(total >= 1, "expected at least 1 match for status search, got {total}");
+    assert!(
+        total >= 1,
+        "expected at least 1 match for status search, got {total}"
+    );
 
     clean_tenant(&pool, tenant).await;
 }
@@ -253,7 +268,10 @@ async fn search_encounter_by_subject() {
 
     assert_eq!(s, StatusCode::OK, "search failed: {body}");
     let total = body["total"].as_i64().unwrap_or(0);
-    assert!(total >= 1, "expected at least 1 match for subject search, got {total}");
+    assert!(
+        total >= 1,
+        "expected at least 1 match for subject search, got {total}"
+    );
 
     clean_tenant(&pool, tenant).await;
 }
@@ -286,7 +304,10 @@ async fn search_encounter_by_type() {
 
     assert_eq!(s, StatusCode::OK, "search failed: {body}");
     let total = body["total"].as_i64().unwrap_or(0);
-    assert!(total >= 1, "expected at least 1 match for type search, got {total}");
+    assert!(
+        total >= 1,
+        "expected at least 1 match for type search, got {total}"
+    );
 
     clean_tenant(&pool, tenant).await;
 }

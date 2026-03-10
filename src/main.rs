@@ -12,11 +12,12 @@ use tracing::info;
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     let config = AppConfig::from_env()?;
-    let mut db_url = url::Url::parse(&config.database_url)
-        .with_context(|| "failed to parse DATABASE_URL")?;
-    db_url
-        .query_pairs_mut()
-        .append_pair("connect_timeout", &config.db_connect_timeout_secs.to_string());
+    let mut db_url =
+        url::Url::parse(&config.database_url).with_context(|| "failed to parse DATABASE_URL")?;
+    db_url.query_pairs_mut().append_pair(
+        "connect_timeout",
+        &config.db_connect_timeout_secs.to_string(),
+    );
     let statement_timeout_ms = config.db_statement_timeout_ms;
 
     let pool = PgPoolOptions::new()

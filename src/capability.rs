@@ -246,10 +246,7 @@ mod tests {
         // Wildcard entry
         assert_eq!(resources[0]["conditionalCreate"], true);
         // A specific resource type
-        let patient = resources
-            .iter()
-            .find(|r| r["type"] == "Patient")
-            .unwrap();
+        let patient = resources.iter().find(|r| r["type"] == "Patient").unwrap();
         assert_eq!(patient["conditionalCreate"], true);
     }
 }

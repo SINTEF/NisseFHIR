@@ -1,11 +1,10 @@
 mod common;
 
-use axum::http::{StatusCode, header};
 use axum::body::{Body, to_bytes};
+use axum::http::{StatusCode, header};
 use common::{
-    build_test_app, get_resource_with_token, post_resource_with_token, send_request, setup_test_db,
-    tenant_token, clean_tenant,
-    test_data::minimal_patient,
+    build_test_app, clean_tenant, get_resource_with_token, post_resource_with_token, send_request,
+    setup_test_db, tenant_token, test_data::minimal_patient,
 };
 use tower::ServiceExt;
 
@@ -46,7 +45,8 @@ async fn read_resource_uses_fhir_json_content_type() {
     // Create a patient first
     let patient = minimal_patient();
     let app = build_test_app(pool.clone());
-    let (status, body) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (status, body) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(status, StatusCode::CREATED);
     let id = body["id"].as_str().unwrap();
 
@@ -170,7 +170,9 @@ async fn server_accepts_fhir_json_content_type_on_create() {
     // This might fail with "unsupported media type" if axum doesn't recognize
     // application/fhir+json. If so, we'll need to add content-type negotiation.
     assert!(
-        status == StatusCode::CREATED || status == StatusCode::BAD_REQUEST || status == StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        status == StatusCode::CREATED
+            || status == StatusCode::BAD_REQUEST
+            || status == StatusCode::UNSUPPORTED_MEDIA_TYPE,
         "unexpected status: {status}, body: {value}"
     );
 

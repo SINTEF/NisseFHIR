@@ -155,17 +155,17 @@ async fn fhir_content_type(
     request: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
-    let is_fhir_path = request.uri().path().starts_with("/fhir") || request.uri().path() == "/metadata";
+    let is_fhir_path =
+        request.uri().path().starts_with("/fhir") || request.uri().path() == "/metadata";
     let mut response = next.run(request).await;
-    if is_fhir_path {
-        if let Some(ct) = response.headers().get(header::CONTENT_TYPE) {
-            if ct.as_bytes().starts_with(b"application/json") {
-                response.headers_mut().insert(
-                    header::CONTENT_TYPE,
-                    header::HeaderValue::from_static("application/fhir+json; charset=utf-8"),
-                );
-            }
-        }
+    if is_fhir_path
+        && let Some(ct) = response.headers().get(header::CONTENT_TYPE)
+        && ct.as_bytes().starts_with(b"application/json")
+    {
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/fhir+json; charset=utf-8"),
+        );
     }
     response
 }

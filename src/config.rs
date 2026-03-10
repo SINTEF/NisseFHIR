@@ -700,11 +700,14 @@ mod tests {
 
     #[test]
     fn from_env_missing_database_url() {
-        with_env_vars(&[("DATABASE_URL", None), ("DATABASE_URL_FILE", None)], || {
-            let result = AppConfig::from_env();
-            assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("DATABASE_URL"));
-        });
+        with_env_vars(
+            &[("DATABASE_URL", None), ("DATABASE_URL_FILE", None)],
+            || {
+                let result = AppConfig::from_env();
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("DATABASE_URL"));
+            },
+        );
     }
 
     #[test]

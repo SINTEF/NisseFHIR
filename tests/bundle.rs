@@ -7,8 +7,8 @@ use axum::{
 use serde_json::{Value, json};
 
 use common::{
-    build_test_app, clean_tenant, send_request, setup_test_db, tenant_token, read_only_token,
-    get_resource_with_token,
+    build_test_app, clean_tenant, get_resource_with_token, read_only_token, send_request,
+    setup_test_db, tenant_token,
 };
 
 fn bundle_request(body: &Value, token: &str) -> Request<Body> {
@@ -657,7 +657,17 @@ async fn bundle_response_includes_etag_and_location() {
     let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let entry = &body["entry"][0];
-    assert!(entry["response"]["etag"].as_str().unwrap().starts_with("W/\""));
-    assert!(entry["response"]["location"].as_str().unwrap().contains("Patient/etag-pat"));
+    assert!(
+        entry["response"]["etag"]
+            .as_str()
+            .unwrap()
+            .starts_with("W/\"")
+    );
+    assert!(
+        entry["response"]["location"]
+            .as_str()
+            .unwrap()
+            .contains("Patient/etag-pat")
+    );
     assert!(entry["response"]["lastModified"].as_str().is_some());
 }

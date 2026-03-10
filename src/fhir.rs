@@ -147,12 +147,15 @@ pub async fn create_resource(
                 );
                 response_headers.insert(
                     "Last-Modified",
-                    HeaderValue::from_str(&existing.last_updated.to_rfc3339())
-                        .map_err(|e| {
-                            AppError::Internal(format!("invalid Last-Modified header: {e}"))
-                        })?,
+                    HeaderValue::from_str(&existing.last_updated.to_rfc3339()).map_err(|e| {
+                        AppError::Internal(format!("invalid Last-Modified header: {e}"))
+                    })?,
                 );
-                return Ok((StatusCode::OK, response_headers, Json(existing.resource.clone()))
+                return Ok((
+                    StatusCode::OK,
+                    response_headers,
+                    Json(existing.resource.clone()),
+                )
                     .into_response());
             }
             _ => {
@@ -510,10 +513,7 @@ pub async fn process_bundle(
         ));
     }
 
-    let bundle_type = body
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let bundle_type = body.get("type").and_then(Value::as_str).unwrap_or("");
     let is_transaction = match bundle_type {
         "transaction" => true,
         "batch" => false,
@@ -545,9 +545,7 @@ struct EntryRequest {
 }
 
 fn parse_entry_request(entry: &Value) -> Result<EntryRequest, String> {
-    let request = entry
-        .get("request")
-        .ok_or("entry is missing 'request'")?;
+    let request = entry.get("request").ok_or("entry is missing 'request'")?;
 
     let method = request
         .get("method")
@@ -578,7 +576,13 @@ fn parse_entry_request(entry: &Value) -> Result<EntryRequest, String> {
 }
 
 /// Build a single response entry for a successful operation.
-fn success_entry(status: &str, resource: Option<&Value>, location: Option<String>, etag: Option<String>, last_modified: Option<String>) -> Value {
+fn success_entry(
+    status: &str,
+    resource: Option<&Value>,
+    location: Option<String>,
+    etag: Option<String>,
+    last_modified: Option<String>,
+) -> Value {
     let mut response = json!({ "status": status });
     if let Some(loc) = location {
         response["location"] = Value::String(loc);
@@ -661,7 +665,10 @@ where
         }
         "PUT" => {
             // Update
-            let id = req.id.as_deref().ok_or("PUT requires a resource id in the URL")?;
+            let id = req
+                .id
+                .as_deref()
+                .ok_or("PUT requires a resource id in the URL")?;
             let mut resource = entry
                 .get("resource")
                 .cloned()
@@ -689,7 +696,10 @@ where
         }
         "GET" => {
             // Read
-            let id = req.id.as_deref().ok_or("GET requires a resource id in the URL")?;
+            let id = req
+                .id
+                .as_deref()
+                .ok_or("GET requires a resource id in the URL")?;
 
             let found = executor
                 .exec_read(tenant_id, &req.resource_type, id)
@@ -708,7 +718,10 @@ where
             }
         }
         "DELETE" => {
-            let id = req.id.as_deref().ok_or("DELETE requires a resource id in the URL")?;
+            let id = req
+                .id
+                .as_deref()
+                .ok_or("DELETE requires a resource id in the URL")?;
 
             let deleted = executor
                 .exec_delete(tenant_id, &req.resource_type, id)
@@ -801,7 +814,9 @@ impl BundleExecutor for PoolBundleExecutor<'_> {
         id: &str,
         resource: Value,
     ) -> Result<crate::store::StoredResource, AppError> {
-        self.store.upsert(tenant_id, resource_type, id, resource).await
+        self.store
+            .upsert(tenant_id, resource_type, id, resource)
+            .await
     }
 
     async fn exec_read(
@@ -841,9 +856,7 @@ async fn process_transaction(
             Err(msg) => {
                 // Transaction mode: any failure aborts the whole thing.
                 // The transaction is dropped (rolled back) automatically.
-                return Err(AppError::BadRequest(format!(
-                    "transaction failed: {msg}"
-                )));
+                return Err(AppError::BadRequest(format!("transaction failed: {msg}")));
             }
         }
     }
@@ -1186,11 +1199,12 @@ fn validate_identifier_value(value: &str) -> Result<(), AppError> {
         ));
     }
     if let Some((system, id_value)) = value.split_once('|')
-        && (system.is_empty() || id_value.is_empty()) {
-            return Err(AppError::BadRequest(
-                "identifier must be 'value' or 'system|value'".to_owned(),
-            ));
-        }
+        && (system.is_empty() || id_value.is_empty())
+    {
+        return Err(AppError::BadRequest(
+            "identifier must be 'value' or 'system|value'".to_owned(),
+        ));
+    }
     Ok(())
 }
 
