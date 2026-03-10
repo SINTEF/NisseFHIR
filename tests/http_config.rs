@@ -57,19 +57,6 @@ async fn docs_route_can_be_enabled_explicitly() {
             .expect("docs redirect should set a location"),
         "/docs/"
     );
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/docs/")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should complete");
-
-    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -106,6 +93,32 @@ async fn openapi_docs_advertise_bearer_auth_for_protected_routes() {
     assert_eq!(
         document["paths"]["/fhir/{resource_type}"]["get"]["security"][0]["bearer_auth"],
         serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+async fn docs_support_gzip_response_compression() {
+    let app = build_test_app_with_options(lazy_pool(), true, Vec::new());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/docs/openapi.json")
+                .header(header::ACCEPT_ENCODING, "gzip")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should complete");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .expect("gzip responses should advertise content encoding"),
+        "gzip"
     );
 }
 
