@@ -300,3 +300,57 @@ assertion `left == right` failed: expected 412 for multiple matches, got: {"id":
  right: 412
 ---
 Sorry postgresql wasn't running. run the test again takk.
+---
+## VScode Claude Opus 4.6/autopilot
+Good work! We can now make the first release. Version 0.1.0!
+Can we have this release information in the source code, perhaps in the capabilities document? I think this document should include some information about the project. Also I think we can make a github tag (0.1.0 without a v), and push it and also update the docker-compose file to use a pre-built docker image with the right version (and comment out the build possibility). We can add a CHANGELOG.md, that is pretty simple. I may forget some important things about a release so please tell me and be proactive in such a situation.
+---
+## VScode GPT-5.4/autopilot
+We got a weird bug in the #file:ci.yml  e2e tests:
+
+I can see in the build and start serivec logs:
+```
+ Container nissefhir-fhir-server-1  Healthy
+ Container nissefhir-postgres-1  Healthy
+```
+but in the wait for server readiness:
+```
+Waiting for server... (1/30)
+Waiting for server... (2/30)
+Waiting for server... (3/30)
+Waiting for server... (4/30)
+Waiting for server... (5/30)
+Waiting for server... (6/30)
+Waiting for server... (7/30)
+Waiting for server... (8/30)
+Waiting for server... (9/30)
+Waiting for server... (10/30)
+Waiting for server... (11/30)
+Waiting for server... (12/30)
+Waiting for server... (13/30)
+Waiting for server... (14/30)
+Waiting for server... (15/30)
+Waiting for server... (16/30)
+Waiting for server... (17/30)
+Waiting for server... (18/30)
+Waiting for server... (19/30)
+Waiting for server... (20/30)
+Waiting for server... (21/30)
+Waiting for server... (22/30)
+Waiting for server... (23/30)
+Waiting for server... (24/30)
+Waiting for server... (25/30)
+Waiting for server... (26/30)
+Waiting for server... (27/30)
+Waiting for server... (28/30)
+Waiting for server... (29/30)
+Waiting for server... (30/30)
+Server did not become ready
+fhir-server-1  | 2026-03-10T09:20:43.603150Z  INFO fhir_server: FHIR server listening address=0.0.0.0:8080
+fhir-server-1  | 2026-03-10T09:20:45.476676Z  INFO request{method=GET uri=/fhir/metadata version=HTTP/1.1}: tower_http::trace::on_response: finished processing request latency=0 ms status=401
+fhir-server-1  | 2026-03-10T09:20:47.484166Z  INFO request{method=GET uri=/fhir/metadata version=HTTP/1.1}: tower_http::trace::on_response: finished processing request latency=0 ms status=401
+fhir-server-1  | 2026-03-10T09:20:49.491485Z  INFO request{method=GET uri=/fhir/metadata version=HTTP/1.1}: tower_http::trace::on_response: finished processing request latency=0 ms status=401
+fhir-server-1  | 2026-03-10T09:20:51.498572Z  INFO request{method=GET uri=/fhir/metadata version=HTTP/1.1}: tower_http::trace::on_response: finished processing request latency=0 ms status=401
+```
+
+Is it some concurrency issue ? Are we starting the server in the background correctly ? Isn't this test completely unecessary anyway ??? Are we expecting to get the /fhir/metadata without a right token ? shouldn't we use the health one ? or something ? can you tellme and fix it ?
