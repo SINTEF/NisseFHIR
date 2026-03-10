@@ -276,3 +276,27 @@ I think we should re-organise the repository slightly: the `server/` folder cont
 stop using sub agents to read files, that's wasteful.
 ---
 Please continue, the session was interrupted.
+---
+## VScode Claude Opus 4.6/autopilot
+The CI fails, can you run the linter checks and perhaps the formatter and make sure everything works as it should?
+
+You can also run `pre-commit run  --all-files` and configure the pre-commit to ignore false positives and fix what's needed too.
+---
+## VScode GPT-5.4/autopilot
+I got an error while running the tests in github, can you confirm / check ? Perhaps the tests are a bit sensitive to time ?
+
+Running tests/conditional_create.rs (target/debug/deps/conditional_create-f42120e23155e8cb)
+running 5 tests
+test conditional_create_empty_header_returns_400 ... ok
+test conditional_create_no_match_creates_resource ... ok
+test conditional_create_multiple_matches_returns_412 ... FAILED
+test conditional_create_without_header_creates_normally ... ok
+test conditional_create_single_match_returns_existing ... ok
+failures:
+---- conditional_create_multiple_matches_returns_412 stdout ----
+thread 'conditional_create_multiple_matches_returns_412' (15795) panicked at tests/conditional_create.rs:140:5:
+assertion `left == right` failed: expected 412 for multiple matches, got: {"id":"969f05b8-4ed6-4285-a183-af5157901146","name":[{"family":"Duplicate-B"}],"resourceType":"Patient"}
+  left: 200
+ right: 412
+---
+Sorry postgresql wasn't running. run the test again takk.

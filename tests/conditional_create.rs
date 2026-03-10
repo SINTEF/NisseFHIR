@@ -8,14 +8,13 @@ use common::{
 };
 use serde_json::json;
 
-const TENANT: &str = "cond-create-tenant";
-
 #[tokio::test]
 async fn conditional_create_no_match_creates_resource() {
+    let tenant = "cond-create-no-match";
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
     let app = common::build_test_app(pool.clone());
-    let token = tenant_token(TENANT);
+    let token = tenant_token(tenant);
 
     // If-None-Exist with no existing match → should create (201)
     let patient = json!({
@@ -40,14 +39,15 @@ async fn conditional_create_no_match_creates_resource() {
     assert_eq!(status, StatusCode::CREATED, "expected 201, got: {body}");
     assert_eq!(body["resourceType"], "Patient");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 #[tokio::test]
 async fn conditional_create_single_match_returns_existing() {
+    let tenant = "cond-create-single-match";
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     // First, create a patient with a known identifier
     let patient = json!({
@@ -101,14 +101,15 @@ async fn conditional_create_single_match_returns_existing() {
         "should return the original resource, not the new payload"
     );
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 #[tokio::test]
 async fn conditional_create_multiple_matches_returns_412() {
+    let tenant = "cond-create-multiple-matches";
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
-    let token = tenant_token(TENANT);
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
 
     // Create two patients with names matching "dupli"
     let p1 = json!({
@@ -144,14 +145,15 @@ async fn conditional_create_multiple_matches_returns_412() {
     );
     assert_eq!(body["resourceType"], "OperationOutcome");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
 
 #[tokio::test]
 async fn conditional_create_empty_header_returns_400() {
+    let tenant = "cond-create-empty-header";
     let pool = setup_test_db().await;
     let app = common::build_test_app(pool.clone());
-    let token = tenant_token(TENANT);
+    let token = tenant_token(tenant);
 
     let patient = minimal_patient();
     let (status, body) = send_request(
@@ -165,10 +167,11 @@ async fn conditional_create_empty_header_returns_400() {
 
 #[tokio::test]
 async fn conditional_create_without_header_creates_normally() {
+    let tenant = "cond-create-without-header";
     let pool = setup_test_db().await;
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
     let app = common::build_test_app(pool.clone());
-    let token = tenant_token(TENANT);
+    let token = tenant_token(tenant);
 
     // Normal POST without If-None-Exist → always creates
     let patient = patient_peter_chalmers();
@@ -176,5 +179,5 @@ async fn conditional_create_without_header_creates_normally() {
         send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(status, StatusCode::CREATED, "got: {body}");
 
-    clean_tenant(&pool, TENANT).await;
+    clean_tenant(&pool, tenant).await;
 }
