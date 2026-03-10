@@ -29,7 +29,8 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
         let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
-        let database_url = env::var("DATABASE_URL").context("missing DATABASE_URL")?;
+        let database_url = load_env_or_file("DATABASE_URL")?
+            .context("missing DATABASE_URL or DATABASE_URL_FILE")?;
         let db_connect_timeout_secs = parse_u64_env_var("DB_CONNECT_TIMEOUT_SECS")?.unwrap_or(5);
         let db_acquire_timeout_secs = parse_u64_env_var("DB_ACQUIRE_TIMEOUT_SECS")?.unwrap_or(5);
         let db_statement_timeout_ms =
@@ -117,8 +118,9 @@ fn load_static_auth(issuer: Option<&str>, audience: Option<&str>) -> Result<Auth
 
     match algorithm {
         Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {
-            let secret = env::var("JWT_SECRET")
-                .with_context(|| format!("missing JWT_SECRET for {algorithm:?} verification"))?;
+            let secret = load_env_or_file("JWT_SECRET")?.with_context(|| {
+                format!("missing JWT_SECRET or JWT_SECRET_FILE for {algorithm:?} verification")
+            })?;
             validate_hmac_secret(&secret)?;
             maybe_warn_on_development_secret(&secret);
             Ok(AuthConfig::Static(StaticKeyConfig {
@@ -190,6 +192,31 @@ fn maybe_warn_on_development_secret(secret: &str) {
         warn!(
             "JWT_SECRET appears to be a development value; do not reuse it outside local testing"
         );
+    }
+}
+
+fn load_env_or_file(name: &str) -> Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) if !value.trim().is_empty() => return Ok(Some(value)),
+        Ok(_) | Err(env::VarError::NotPresent) => {}
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(anyhow!("{name} contains invalid unicode"));
+        }
+    }
+
+    let file_var = format!("{name}_FILE");
+    match env::var(&file_var) {
+        Ok(path) if !path.trim().is_empty() => {
+            let value = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {name} from {path}"))?;
+            let value = value.trim_end_matches(['\r', '\n']).to_owned();
+            if value.is_empty() {
+                bail!("{file_var} points to an empty file");
+            }
+            Ok(Some(value))
+        }
+        Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(anyhow!("{file_var} contains invalid unicode")),
     }
 }
 
@@ -358,6 +385,37 @@ mod tests {
         maybe_warn_on_development_secret("perfect-production-secret-000000");
     }
 
+    #[test]
+    fn load_env_or_file_prefers_env_var() {
+        let tmp = "/tmp/__test_preferred_env_secret.txt";
+        std::fs::write(tmp, "from-file").expect("write tmp file");
+        with_env_vars(
+            &[
+                ("__TEST_SECRET", Some("from-env")),
+                ("__TEST_SECRET_FILE", Some(tmp)),
+            ],
+            || {
+                let value = load_env_or_file("__TEST_SECRET").unwrap();
+                assert_eq!(value.as_deref(), Some("from-env"));
+            },
+        );
+        let _ = std::fs::remove_file(tmp);
+    }
+
+    #[test]
+    fn load_env_or_file_reads_file() {
+        let tmp = "/tmp/__test_secret_from_file.txt";
+        std::fs::write(tmp, "from-file\n").expect("write tmp file");
+        with_env_vars(
+            &[("__TEST_SECRET", None), ("__TEST_SECRET_FILE", Some(tmp))],
+            || {
+                let value = load_env_or_file("__TEST_SECRET").unwrap();
+                assert_eq!(value.as_deref(), Some("from-file"));
+            },
+        );
+        let _ = std::fs::remove_file(tmp);
+    }
+
     // -----------------------------------------------------------------------
     // env_flag
     // -----------------------------------------------------------------------
@@ -462,6 +520,7 @@ mod tests {
                 ("JWT_MODE", Some("static")),
                 ("JWT_ALGORITHM", Some("HS256")),
                 ("JWT_SECRET", None),
+                ("JWT_SECRET_FILE", None),
                 ("JWT_PUBLIC_KEY_PEM", None),
                 ("JWT_PUBLIC_KEY_PATH", None),
             ],
@@ -480,6 +539,7 @@ mod tests {
                 ("JWT_MODE", Some("static")),
                 ("JWT_ALGORITHM", Some("HS256")),
                 ("JWT_SECRET", Some("short")),
+                ("JWT_SECRET_FILE", None),
                 ("JWT_PUBLIC_KEY_PEM", None),
                 ("JWT_PUBLIC_KEY_PATH", None),
             ],
@@ -561,6 +621,7 @@ mod tests {
                 ("JWT_MODE", Some("static")),
                 ("JWT_ALGORITHM", Some("RS256")),
                 ("JWT_SECRET", None),
+                ("JWT_SECRET_FILE", None),
                 ("JWT_PUBLIC_KEY_PEM", None),
                 ("JWT_PUBLIC_KEY_PATH", None),
             ],
@@ -579,6 +640,7 @@ mod tests {
                 ("JWT_MODE", Some("static")),
                 ("JWT_ALGORITHM", Some("ES256")),
                 ("JWT_SECRET", None),
+                ("JWT_SECRET_FILE", None),
                 ("JWT_PUBLIC_KEY_PEM", None),
                 ("JWT_PUBLIC_KEY_PATH", None),
             ],
@@ -603,6 +665,7 @@ mod tests {
                 ("JWT_MODE", Some("static")),
                 ("JWT_ALGORITHM", Some("RS256")),
                 ("JWT_SECRET", None),
+                ("JWT_SECRET_FILE", None),
                 ("JWT_PUBLIC_KEY_PEM", Some(TEST_RSA_PUB_PEM)),
                 ("JWT_PUBLIC_KEY_PATH", None),
                 ("JWT_ISSUER", None),
@@ -622,6 +685,7 @@ mod tests {
                 ("JWT_MODE", Some("static")),
                 ("JWT_ALGORITHM", Some("ES256")),
                 ("JWT_SECRET", None),
+                ("JWT_SECRET_FILE", None),
                 ("JWT_PUBLIC_KEY_PEM", Some(TEST_EC_PUB_PEM)),
                 ("JWT_PUBLIC_KEY_PATH", None),
                 ("JWT_ISSUER", None),
@@ -636,11 +700,60 @@ mod tests {
 
     #[test]
     fn from_env_missing_database_url() {
-        with_env_vars(&[("DATABASE_URL", None)], || {
+        with_env_vars(&[("DATABASE_URL", None), ("DATABASE_URL_FILE", None)], || {
             let result = AppConfig::from_env();
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("DATABASE_URL"));
         });
+    }
+
+    #[test]
+    fn load_static_hmac_from_secret_file() {
+        let tmp = "/tmp/__test_jwt_secret.txt";
+        std::fs::write(tmp, "a-very-long-secret-from-file-at-least-32-chars!!\n")
+            .expect("write tmp file");
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", None),
+                ("JWT_SECRET_FILE", Some(tmp)),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let auth = load_auth_config().unwrap();
+                assert!(matches!(auth, AuthConfig::Static(_)));
+            },
+        );
+        let _ = std::fs::remove_file(tmp);
+    }
+
+    #[test]
+    fn from_env_reads_database_url_from_file() {
+        let tmp = "/tmp/__test_database_url.txt";
+        std::fs::write(tmp, "postgres://localhost/test-from-file\n").expect("write tmp file");
+        with_env_vars(
+            &[
+                ("DATABASE_URL", None),
+                ("DATABASE_URL_FILE", Some(tmp)),
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("a-very-long-secret-at-least-32-chars!!")),
+                ("JWT_SECRET_FILE", None),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let config = AppConfig::from_env().unwrap();
+                assert_eq!(config.database_url, "postgres://localhost/test-from-file");
+            },
+        );
+        let _ = std::fs::remove_file(tmp);
     }
 
     // -----------------------------------------------------------------------

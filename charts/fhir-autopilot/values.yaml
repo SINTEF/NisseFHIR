@@ -57,10 +57,17 @@ config:
 
   # JWT authentication mode: "static" (symmetric HS256), "jwks" (RS256 via JWKS endpoint), or "none"
   jwtMode: "none"
-  # jwtSecret: ""
-  # jwtSecretRef:
-  #   name: my-secret
-  #   key: jwt-secret
+  # JWT secret delivery for JWT_MODE=static.
+  # Prefer existingSecret for production. Set create=true to have the chart create a Secret.
+  jwtSecret:
+    create: false
+    key: jwt-secret
+    # value: ""
+    delivery: env
+    mountPath: /var/run/secrets/fhir-autopilot
+    existingSecret:
+      # name: my-secret
+      key: jwt-secret
   # jwksUrl: ""
 
   # Serve Swagger/OpenAPI docs

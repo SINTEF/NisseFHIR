@@ -76,3 +76,25 @@ Database URL: either from CNPG or external config
 {{- ((.Values.cnpg).externalDatabase).existingSecret | default dict | dig "name" "" }}
 {{- end }}
 {{- end }}
+
+{{/*
+JWT Secret name
+*/}}
+{{- define "fhir-autopilot.jwtSecretName" -}}
+{{- if .Values.config.jwtSecret.create }}
+{{- printf "%s-jwt" (include "fhir-autopilot.fullname" .) }}
+{{- else }}
+{{- .Values.config.jwtSecret.existingSecret.name | default "" }}
+{{- end }}
+{{- end }}
+
+{{/*
+JWT Secret key
+*/}}
+{{- define "fhir-autopilot.jwtSecretKey" -}}
+{{- if .Values.config.jwtSecret.create }}
+{{- .Values.config.jwtSecret.key | default "jwt-secret" }}
+{{- else }}
+{{- .Values.config.jwtSecret.existingSecret.key | default "jwt-secret" }}
+{{- end }}
+{{- end }}

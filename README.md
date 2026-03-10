@@ -8,6 +8,40 @@ This server does not support all FHIR features, but it should be good enough to 
 
 The human author states that NisseFHIR is a pretty good lightweight FHIR 6 server.
 
+## Quick Start
+
+```bash
+# Define a strong JWT secret for local development
+export JWT_SECRET="$(openssl rand -hex 32)"
+
+# Start the server and the database
+docker-compose up -d
+
+# Generate a JWT token for local development
+python3 scripts/generate_static_jwt.py \
+  --tenant my-tenant \
+  --scope 'read write'
+
+# Open the documentation in the browser
+{ command -v xdg-open || command -v open; } >/dev/null && "$_" http://localhost:8080/docs/
+
+# You can also use curl on the FHIR endpoint
+export TOKEN="paste-token-here"
+curl -s http://localhost:8080/fhir/metadata \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## Kubernetes Helm Chart
+
+```bash
+helm repo add nissefhir https://nissefhir.github.io/helm-charts
+helm install my-release nissefhir/nissefhir \
+  --set config.jwtMode=static \
+  --set config.jwtSecret.create=true
+```
+
+For chart-specific configuration, including JWT secret handling and file-based secret delivery, see [charts/fhir-autopilot/README.md](./charts/fhir-autopilot/README.md).
+
 ## Motivation
 
 It comes from the need a good experimental FHIR server to develop advanced features for the [Invest4Health](https://invest4health.eu/) project. Funded by the European Union’s Horizon Europe Research and Innovation programme, under Grant Agreement 101095522.
@@ -49,24 +83,6 @@ The author recommends setting up LUKS, and not relying on a checkbox convenientl
 The server is heavily tested, as vibe-coded projects should be, using thousands of test cases from the HL7 FHIR resources. Moreover, it features a comprehensive end-to-end test suite, a high code coverage with unit and integration tests.
 
 The data is also validated extensively using the official FHIR 6 JSON Schema.
-
-## Quick Start
-
-```bash
-# Define a strong JWT secret for local development
-export JWT_SECRET="$(openssl rand -hex 32)"
-
-# Start the server and the database
-docker-compose up -d
-
-# Generate a JWT token for local development
-python3 scripts/generate_static_jwt.py \
-  --tenant my-tenant \
-  --scope 'read write'
-
-# Open the documentation in the browser
-{ command -v xdg-open || command -v open; } >/dev/null && "$_" http://localhost:8080/docs/
-```
 
 ## License
 

@@ -249,3 +249,16 @@ Please continue as stated in file:fhir-specs.md Thanks.
 I think it's also time to tidy up the current_tasks and ideas folders, as most of them have been implemented by now. can you check what can safely be removed? It's in the git history worst case.
 ---
 I would severely remove a lot of content of the files, or remove the ones that have been implemented and add the ideas or next steps in new ideas in the ideas folder.
+---
+"Decide whether responses should move from `application/json` to `application/fhir+json`." didn't we move to application/fhir+json already?
+---
+## VScode GPT-5.4/autopilot
+I think your Values.config.jwtSecret not using a secret is a bit of an issue in the helm chart. I would use this to create a secret, not hardcode it in the values.yaml file.
+
+Moreover, we should consider whether we use environment variables to set secrets, or whether we should read files instead. Perhaps we should support both. What do you think?
+---
+have you ran the tests sir?
+---
+I think you made the README a bit too complex / verbose now. this is good information, but perhaps keep that for the helm charts folder readme ? that you could create now ?
+---
+disabling jwt in the readme is a bit too far from my taste, keep it as simple as possible, perhaps add a feature to generate a random secret in the helm chart if the secret is not specified, or use openssl like before also in the readme quickstart.

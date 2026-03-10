@@ -4,6 +4,11 @@ metadata:
   name: {{ include "fhir-autopilot.fullname" . }}
   labels:
     {{- include "fhir-autopilot.labels" . | nindent 4 }}
+{{- $jwtSecretName := include "fhir-autopilot.jwtSecretName" . }}
+{{- $jwtSecretKey := include "fhir-autopilot.jwtSecretKey" . }}
+{{- $jwtSecretDelivery := .Values.config.jwtSecret.delivery | default "env" }}
+{{- $jwtSecretMountPath := .Values.config.jwtSecret.mountPath | default "/var/run/secrets/fhir-autopilot" }}
+{{- $useJwtSecretFile := and $jwtSecretName (eq $jwtSecretDelivery "file") }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -69,18 +74,18 @@ spec:
             - name: JWT_MODE
               value: {{ . | quote }}
             {{- end }}
-            {{- if .Values.config.jwtSecret }}
-            - name: JWT_SECRET
-              value: {{ .Values.config.jwtSecret | quote }}
-            {{- else if .Values.config.jwtSecretRef }}
+            {{- if and $jwtSecretName (eq $jwtSecretDelivery "env") }}
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.config.jwtSecretRef.name }}
-                  key: {{ .Values.config.jwtSecretRef.key }}
+                  name: {{ $jwtSecretName }}
+                  key: {{ $jwtSecretKey }}
+            {{- else if $useJwtSecretFile }}
+            - name: JWT_SECRET_FILE
+              value: {{ printf "%s/%s" $jwtSecretMountPath $jwtSecretKey | quote }}
             {{- end }}
             {{- with .Values.config.jwksUrl }}
-            - name: JWKS_URL
+            - name: JWT_JWKS_URI
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.config.fhirBaseUrl }}
@@ -110,13 +115,30 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if .Values.extraVolumeMounts }}
+          {{- if or $useJwtSecretFile .Values.extraVolumeMounts }}
           volumeMounts:
-            {{- toYaml .Values.extraVolumeMounts | nindent 12 }}
+            {{- if $useJwtSecretFile }}
+            - name: jwt-secret
+              mountPath: {{ $jwtSecretMountPath | quote }}
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
-      {{- if .Values.extraVolumes }}
+      {{- if or $useJwtSecretFile .Values.extraVolumes }}
       volumes:
-        {{- toYaml .Values.extraVolumes | nindent 8 }}
+        {{- if $useJwtSecretFile }}
+        - name: jwt-secret
+          secret:
+            secretName: {{ $jwtSecretName }}
+            items:
+              - key: {{ $jwtSecretKey }}
+                path: {{ $jwtSecretKey }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+              {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
