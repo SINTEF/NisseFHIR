@@ -1,4 +1,4 @@
-# fhir-autopilot Helm Chart
+# NisseFHIR Helm Chart
 
 Helm chart for deploying NisseFHIR with either a CloudNativePG-managed PostgreSQL cluster or an external PostgreSQL database.
 
@@ -7,7 +7,7 @@ Helm chart for deploying NisseFHIR with either a CloudNativePG-managed PostgreSQ
 Minimal install:
 
 ```bash
-helm install my-release ./charts/fhir-autopilot \
+helm install my-release ./charts/nissefhir \
   --set config.jwtMode=static \
   --set config.jwtSecret.create=true
 ```
@@ -41,7 +41,7 @@ The server supports both `JWT_SECRET` and `JWT_SECRET_FILE`. It also supports `D
 kubectl create secret generic my-release-jwt \
   --from-literal=jwt-secret="$(openssl rand -hex 32)"
 
-helm install my-release ./charts/fhir-autopilot \
+helm install my-release ./charts/nissefhir \
   --set config.jwtMode=static \
   --set config.jwtSecret.existingSecret.name=my-release-jwt
 ```
@@ -55,7 +55,7 @@ This is the simplest way to get started. For production, an externally managed S
 Auto-generated secret:
 
 ```bash
-helm install my-release ./charts/fhir-autopilot \
+helm install my-release ./charts/nissefhir \
   --set config.jwtMode=static \
   --set config.jwtSecret.create=true
 ```
@@ -63,7 +63,7 @@ helm install my-release ./charts/fhir-autopilot \
 Explicit secret value with `openssl`:
 
 ```bash
-helm install my-release ./charts/fhir-autopilot \
+helm install my-release ./charts/nissefhir \
   --set config.jwtMode=static \
   --set config.jwtSecret.create=true \
   --set-string config.jwtSecret.value="$(openssl rand -hex 32)"
@@ -72,13 +72,13 @@ helm install my-release ./charts/fhir-autopilot \
 ### File Delivery Mode
 
 ```bash
-helm install my-release ./charts/fhir-autopilot \
+helm install my-release ./charts/nissefhir \
   --set config.jwtMode=static \
   --set config.jwtSecret.existingSecret.name=my-release-jwt \
   --set config.jwtSecret.delivery=file
 ```
 
-By default, file delivery mounts the Secret at `/var/run/secrets/fhir-autopilot` and points `JWT_SECRET_FILE` to the selected key inside that directory.
+By default, file delivery mounts the Secret at `/var/run/secrets/nissefhir` and points `JWT_SECRET_FILE` to the selected key inside that directory.
 
 ## Key Values
 
@@ -89,7 +89,7 @@ config:
     create: false
     key: jwt-secret
     delivery: env
-    mountPath: /var/run/secrets/fhir-autopilot
+    mountPath: /var/run/secrets/nissefhir
     existingSecret:
       name: my-secret
       key: jwt-secret

@@ -42,7 +42,7 @@ helm install my-release nissefhir/nissefhir \
   --set config.jwtSecret.create=true
 ```
 
-For chart-specific configuration, including JWT secret handling and file-based secret delivery, see [charts/fhir-autopilot/README.md](./charts/fhir-autopilot/README.md).
+For chart-specific configuration, including JWT secret handling and file-based secret delivery, see [charts/nissefhir/README.md](./charts/nissefhir/README.md).
 
 ## Motivation
 

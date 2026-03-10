@@ -45,11 +45,11 @@ cargo update --workspace
 sed -i "s/org.opencontainers.image.version=\"$OLD\"/org.opencontainers.image.version=\"$NEW\"/" Dockerfile
 
 # 4. docker-compose.yml image tag
-sed -i "s|fhir-autopilot:$OLD|fhir-autopilot:$NEW|" docker-compose.yml
+sed -i "s|nissefhir:$OLD|nissefhir:$NEW|" docker-compose.yml
 
 # 5. Helm Chart.yaml (version + appVersion)
-sed -i "s/^version: $OLD/version: $NEW/" charts/fhir-autopilot/Chart.yaml
-sed -i "s/^appVersion: \"$OLD\"/appVersion: \"$NEW\"/" charts/fhir-autopilot/Chart.yaml
+sed -i "s/^version: $OLD/version: $NEW/" charts/nissefhir/Chart.yaml
+sed -i "s/^appVersion: \"$OLD\"/appVersion: \"$NEW\"/" charts/nissefhir/Chart.yaml
 
 # 6. CapabilityStatement dates in src/capability.rs
 sed -i "s/\"date\": \"[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\"/\"date\": \"$DATE\"/" src/capability.rs

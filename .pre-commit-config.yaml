@@ -9,7 +9,7 @@ repos:
       - id: check-json
         exclude: ^(examples/|fhir\.schema\.json$)
       - id: check-yaml
-        exclude: ^charts/fhir-autopilot/templates/
+        exclude: ^charts/nissefhir/templates/
       - id: check-xml
       - id: end-of-file-fixer
       - id: check-merge-conflict

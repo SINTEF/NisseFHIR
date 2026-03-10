@@ -380,3 +380,10 @@ documentation exposed without authentication: it's a fhir server sir.
 database credentials in compose file: fine for me for tests locally.
 50MB is not excessive.
 get /metadata without auth: fine for me.
+
+---
+## VScode GPT-5.4/autopilot
+We have a few references to fhir-autopilot, but now the project is named NisseFHIR, so perhaps fix the stuff, rename stuff, and so on. like the releases names ? the conatiner names in the docker compose and so on ? I sorry to have missed that earlier…
+---
+## VScode Claude Opus 4.6/autopilot
+Can you reformat the #file:PROMPTS.md file so it looks neat ? I think you can guess the current structure. it's a list of prompts and sessions. my current syntax is kind of a markdown mess where a loto f lines are considered to be titles and so on. I don't like it. make it tidy.

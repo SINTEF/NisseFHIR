@@ -49,6 +49,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - CORS support with configurable allowed origins.
 - Configurable database timeouts and search limits.
 
-[0.1.2]: https://github.com/SINTEF/fhir-autopilot/releases/tag/0.1.2
-[0.1.1]: https://github.com/SINTEF/fhir-autopilot/releases/tag/0.1.1
-[0.1.0]: https://github.com/SINTEF/fhir-autopilot/releases/tag/0.1.0
+[0.1.2]: https://github.com/SINTEF/NisseFHIR/releases/tag/0.1.2
+[0.1.1]: https://github.com/SINTEF/NisseFHIR/releases/tag/0.1.1
+[0.1.0]: https://github.com/SINTEF/NisseFHIR/releases/tag/0.1.0

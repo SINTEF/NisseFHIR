@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/sintef/fhir-autopilot
+  repository: ghcr.io/sintef/nissefhir
   pullPolicy: IfNotPresent
   tag: ""
   # digest: ""
@@ -45,7 +45,7 @@ ingress:
   # className: ""
   annotations: {}
   hosts:
-    - host: fhir-autopilot.local
+    - host: nissefhir.local
       paths:
         - path: /
           pathType: Prefix
@@ -64,7 +64,7 @@ config:
     key: jwt-secret
     # value: ""
     delivery: env
-    mountPath: /var/run/secrets/fhir-autopilot
+    mountPath: /var/run/secrets/nissefhir
     existingSecret:
       # name: my-secret
       key: jwt-secret
