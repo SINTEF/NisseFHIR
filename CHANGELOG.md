@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.3] - 2026-03-10
+
+### Changed
+
+- Rename project from fhir-autopilot to NisseFHIR across all files, Helm chart, Docker images, and documentation.
+- Helm chart moved from `charts/fhir-autopilot/` to `charts/nissefhir/`.
+- Docker image renamed to `ghcr.io/sintef/nissefhir`.
+- Improved README.
+
 ## [0.1.2] - 2026-03-10
 
 ### Fixed
@@ -49,6 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - CORS support with configurable allowed origins.
 - Configurable database timeouts and search limits.
 
+[0.1.3]: https://github.com/SINTEF/NisseFHIR/releases/tag/0.1.3
 [0.1.2]: https://github.com/SINTEF/NisseFHIR/releases/tag/0.1.2
 [0.1.1]: https://github.com/SINTEF/NisseFHIR/releases/tag/0.1.1
 [0.1.0]: https://github.com/SINTEF/NisseFHIR/releases/tag/0.1.0
