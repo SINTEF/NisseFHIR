@@ -80,10 +80,24 @@ pub fn capability_statement(base_url: &str) -> Value {
         }));
     }
 
+    let version = env!("CARGO_PKG_VERSION");
+
     json!({
         "resourceType": "CapabilityStatement",
+        "url": format!("{base_url}/metadata"),
+        "version": version,
+        "name": "NisseFHIR",
+        "title": "NisseFHIR – Lightweight FHIR R6 Server",
         "status": "active",
+        "date": "2026-03-10",
+        "publisher": "SINTEF / Invest4Health",
+        "description": "A lightweight, stateless FHIR R6 server written in Rust. Supports JSON-only with PostgreSQL JSONB storage, JWT-based multi-tenant authentication, and comprehensive FHIR CRUD with search.",
         "kind": "instance",
+        "software": {
+            "name": "NisseFHIR",
+            "version": version,
+            "releaseDate": "2026-03-10"
+        },
         "fhirVersion": "6.0.0-ballot3",
         "format": ["json", "application/fhir+json"],
         "patchFormat": ["application/json-patch+json"],
@@ -228,6 +242,15 @@ mod tests {
             value["implementation"]["description"],
             "Lightweight Rust FHIR server"
         );
+    }
+
+    #[test]
+    fn capability_includes_software_version() {
+        let value = capability_statement("http://localhost:8080/fhir");
+        assert_eq!(value["software"]["name"], "NisseFHIR");
+        assert!(!value["software"]["version"].as_str().unwrap().is_empty());
+        assert_eq!(value["name"], "NisseFHIR");
+        assert!(value["version"].as_str().unwrap().starts_with("0."));
     }
 
     #[test]

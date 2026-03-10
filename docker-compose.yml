@@ -14,9 +14,11 @@ services:
       - fhir-postgres:/var/lib/postgresql/data
 
   fhir-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/sintef/fhir-autopilot:0.1.0
+    # To build locally instead, comment out 'image' above and uncomment:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
     depends_on:
       postgres:
         condition: service_healthy

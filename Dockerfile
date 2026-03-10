@@ -25,6 +25,11 @@ RUN cargo build --release
 
 FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 
+LABEL org.opencontainers.image.source="https://github.com/SINTEF/fhir-autopilot"
+LABEL org.opencontainers.image.description="NisseFHIR – Lightweight FHIR R6 Server"
+LABEL org.opencontainers.image.licenses="WTFPL AND CeCILL-B"
+LABEL org.opencontainers.image.version="0.1.0"
+
 WORKDIR /srv/app
 
 COPY --from=build /srv/app/target/release/fhir_server /usr/local/bin/fhir_server

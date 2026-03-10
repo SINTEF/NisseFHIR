@@ -1,0 +1,31 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [0.1.0] - 2026-03-10
+
+### Added
+
+- Full FHIR R6 (6.0.0-ballot3) REST server written in Rust.
+- JSON-only API with `application/fhir+json` support (no XML/RDF).
+- PostgreSQL JSONB storage with partitioned tables by resource type.
+- Complete CRUD: create, read, update, patch (JSON Patch), delete.
+- Conditional create (`If-None-Exist` header).
+- Resource history (`_history`) with version tracking.
+- Search with cursor-based pagination (`_count`, `_after_id`).
+- Search parameters for 40+ resource types (string, token, reference, date, quantity, number, uri, composite, special).
+- JWT-based multi-tenant authentication (static HS256/RS256 or JWKS).
+- SMART-on-FHIR compatible security with scope-based access control.
+- FHIR JSON Schema validation with OperationOutcome error responses.
+- CapabilityStatement at `/metadata` with software version info.
+- Swagger UI documentation (optional, via `SERVE_DOCS`).
+- Multi-stage Docker build with distroless runtime image.
+- Helm chart for Kubernetes deployment with CloudNativePG support.
+- Comprehensive test suite: 182 unit tests, 164 integration tests, 2410 E2E example resources.
+- Security headers via tower-helmet middleware.
+- CORS support with configurable allowed origins.
+- Configurable database timeouts and search limits.
+
+[0.1.0]: https://github.com/SINTEF/fhir-autopilot/releases/tag/0.1.0
