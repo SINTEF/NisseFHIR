@@ -73,6 +73,7 @@ pub async fn search_resources(
     Query(query): Query<BTreeMap<String, String>>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    validate_path_resource_type(&resource_type)?;
     if !access.can_read || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -116,6 +117,7 @@ pub async fn create_resource(
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    validate_path_resource_type(&resource_type)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -211,6 +213,7 @@ pub async fn read_resource(
     Path((resource_type, id)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    validate_path_resource_type(&resource_type)?;
     if !access.can_read || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -247,6 +250,7 @@ pub async fn read_resource_history(
     Path((resource_type, id)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    validate_path_resource_type(&resource_type)?;
     if !access.can_read || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -283,6 +287,7 @@ pub async fn update_resource(
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    validate_path_resource_type(&resource_type)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -351,6 +356,7 @@ pub async fn delete_resource(
     Path((resource_type, id)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    validate_path_resource_type(&resource_type)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -378,6 +384,7 @@ pub async fn patch_resource(
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    validate_path_resource_type(&resource_type)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -1036,6 +1043,16 @@ fn validate_resource_payload(
     Ok(())
 }
 
+fn validate_path_resource_type(resource_type: &str) -> Result<(), AppError> {
+    if search_params::is_valid_resource_type(resource_type) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!(
+            "unsupported FHIR resource type '{resource_type}'"
+        )))
+    }
+}
+
 fn build_search_bundle(
     base_url: &str,
     resource_type: &str,
@@ -1249,7 +1266,7 @@ mod tests {
 
     use super::{
         SearchPage, build_history_bundle, build_search_bundle, parse_search_params,
-        validate_identifier_value, validate_resource_payload,
+        validate_identifier_value, validate_path_resource_type, validate_resource_payload,
     };
     use crate::{
         AppState, SearchConfig,
@@ -1275,6 +1292,14 @@ mod tests {
         let mut body = json!({"resourceType": "Observation"});
         let err = validate_resource_payload("Patient", &mut body, None).expect_err("must fail");
         assert!(err.to_string().contains("does not match path"));
+    }
+
+    #[test]
+    fn rejects_unsupported_path_resource_type() {
+        let err = validate_path_resource_type("ObviouslyNotAValidType").expect_err("must fail");
+        assert!(err
+            .to_string()
+            .contains("unsupported FHIR resource type 'ObviouslyNotAValidType'"));
     }
 
     #[test]

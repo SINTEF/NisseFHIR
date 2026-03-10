@@ -9,8 +9,9 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{
-    assert_operation_outcome, build_test_app_auth_required, post_resource_with_token, send_request,
-    setup_test_db, tenant_token, test_data,
+    assert_operation_outcome, build_test_app_auth_required, get_resource_with_token,
+    post_resource_with_token, search_resource_with_token, send_request, setup_test_db,
+    tenant_token, test_data,
 };
 use serde_json::json;
 
@@ -389,6 +390,32 @@ async fn rejects_unsupported_resource_type() {
         diagnostics.contains("unsupported FHIR resource type"),
         "Should mention unsupported type, got: {diagnostics}"
     );
+}
+
+#[tokio::test]
+async fn rejects_invalid_resource_type_in_path_only_routes() {
+    let (app, token) = setup("validation-invalid-path-type").await;
+
+    let (status, body) = send_request(
+        app.clone(),
+        search_resource_with_token("ObviouslyNotAValidType", None, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_operation_outcome(&body, "invalid");
+    let diagnostics = body["issue"][0]["diagnostics"].as_str().unwrap();
+    assert!(
+        diagnostics.contains("unsupported FHIR resource type 'ObviouslyNotAValidType'"),
+        "Should mention unsupported type, got: {diagnostics}"
+    );
+
+    let (status, body) = send_request(
+        app,
+        get_resource_with_token("ObviouslyNotAValidType", "example", &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_operation_outcome(&body, "invalid");
 }
 
 // ─── PAYLOAD STRUCTURE VALIDATION ──────────────────────────────────────────

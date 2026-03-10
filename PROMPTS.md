@@ -301,10 +301,6 @@ assertion `left == right` failed: expected 412 for multiple matches, got: {"id":
 ---
 Sorry postgresql wasn't running. run the test again takk.
 ---
-## VScode Claude Opus 4.6/autopilot
-Good work! We can now make the first release. Version 0.1.0!
-Can we have this release information in the source code, perhaps in the capabilities document? I think this document should include some information about the project. Also I think we can make a github tag (0.1.0 without a v), and push it and also update the docker-compose file to use a pre-built docker image with the right version (and comment out the build possibility). We can add a CHANGELOG.md, that is pretty simple. I may forget some important things about a release so please tell me and be proactive in such a situation.
----
 ## VScode GPT-5.4/autopilot
 We got a weird bug in the #file:ci.yml  e2e tests:
 
@@ -354,3 +350,29 @@ fhir-server-1  | 2026-03-10T09:20:51.498572Z  INFO request{method=GET uri=/fhir/
 ```
 
 Is it some concurrency issue ? Are we starting the server in the background correctly ? Isn't this test completely unecessary anyway ??? Are we expecting to get the /fhir/metadata without a right token ? shouldn't we use the health one ? or something ? can you tellme and fix it ?
+---
+## VScode Claude Opus 4.6/autopilot
+Good work! We can now make the first release. Version 0.1.0!
+Can we have this release information in the source code, perhaps in the capabilities document? I think this document should include some information about the project. Also I think we can make a github tag (0.1.0 without a v), and push it and also update the docker-compose file to use a pre-built docker image with the right version (and comment out the build possibility). We can add a CHANGELOG.md, that is pretty simple. I may forget some important things about a release so please tell me and be proactive in such a situation.
+---
+## VScode GPT-5.4/autopilot
+Doesn't look like we have resource type validation whatsoever???
+
+Like /fhir/Canard is the same than /fhir/Patient and /fhir/ObviouslyNotAValidType.
+
+Firstable, is this by design ? If yes, okay. tell me. If not, could we add a test that check that we reject invalid resoruce types, and then fix the code, in a good TDD approach. Thank you.
+---
+## VScode GPT-5.4/autopilot
+Can you check the SECURITY_AUDIT.md file and see what is still relevant, cleanup the old things.
+
+moreover, I think rate limit shouldn't be done at this level.
+same for tls/https, nice to have but well…
+stored xss, skill issue on the client side, this is beyond fhir IMHO.
+put create resources, "bybpassing any future psot specific validation", is it really an issue ?
+no optimistic concurrency control (etag/if-match), do we support that now right?
+resource version history: we should have it right?
+jwt secret strength not validated: yeah beyond the scope.
+documentation exposed without authentication: it's a fhir server sir.
+database credentials in compose file: fine for me for tests locally.
+50MB is not excessive.
+get /metadata without auth: fine for me.

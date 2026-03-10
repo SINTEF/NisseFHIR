@@ -27,7 +27,7 @@ python3 scripts/generate_static_jwt.py \
 
 # You can also use curl on the FHIR endpoint
 export TOKEN="paste-token-here"
-curl -s http://localhost:8080/fhir/metadata \
+curl -s http://localhost:8080/fhir/Patient \
   -H "Authorization: Bearer $TOKEN"
 ```
 
