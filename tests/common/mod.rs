@@ -58,8 +58,8 @@ pub fn build_test_app_with_options(
         auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_JWT_SECRET),
         fhir_base_url: "http://localhost:8080/fhir".to_owned(),
         search: SearchConfig {
-            default_count: 20,
-            max_count: 100,
+            default_count: 50,
+            max_count: 500,
         },
         validator: Arc::clone(&SHARED_VALIDATOR),
         cors_allowed_origins,

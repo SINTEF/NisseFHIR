@@ -214,7 +214,7 @@ async fn search_rejects_count_above_limit() {
     let app = build_test_app_auth_required(pool);
     let (status, body) = send_request(
         app,
-        search_resource_with_token("Patient", Some("_count=101"), &token),
+        search_resource_with_token("Patient", Some("_count=1000000"), &token),
     )
     .await;
 

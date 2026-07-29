@@ -1464,8 +1464,8 @@ mod tests {
                 ),
             ]),
             SearchConfig {
-                default_count: 20,
-                max_count: 100,
+                default_count: 50,
+                max_count: 500,
             },
         )
         .unwrap();
@@ -1482,13 +1482,13 @@ mod tests {
             "Patient",
             BTreeMap::from([("_after_id".to_owned(), "patient-123".to_owned())]),
             SearchConfig {
-                default_count: 20,
-                max_count: 100,
+                default_count: 50,
+                max_count: 500,
             },
         )
         .unwrap();
 
-        assert_eq!(params.count, 20);
+        assert_eq!(params.count, 50);
         assert_eq!(params.after_id.as_deref(), Some("patient-123"));
     }
 
@@ -1498,8 +1498,8 @@ mod tests {
             "Patient",
             BTreeMap::from([("status".to_owned(), "final".to_owned())]),
             SearchConfig {
-                default_count: 20,
-                max_count: 100,
+                default_count: 50,
+                max_count: 500,
             },
         )
         .unwrap_err();
@@ -1533,8 +1533,8 @@ mod tests {
             auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_SECRET),
             fhir_base_url: "http://localhost:8080/fhir".to_owned(),
             search: SearchConfig {
-                default_count: 20,
-                max_count: 100,
+                default_count: 50,
+                max_count: 500,
             },
             validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
             cors_allowed_origins: Vec::new(),
@@ -1591,8 +1591,8 @@ mod tests {
             auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_SECRET),
             fhir_base_url: "http://localhost:8080/fhir".to_owned(),
             search: SearchConfig {
-                default_count: 20,
-                max_count: 100,
+                default_count: 50,
+                max_count: 500,
             },
             validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
             cors_allowed_origins: Vec::new(),

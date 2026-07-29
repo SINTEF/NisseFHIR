@@ -521,3 +521,13 @@ Follow-ups:
 > Can you reformat the `PROMPTS.md` file so it looks neat? I think you can guess the current
 > structure. It's a list of prompts and sessions. My current syntax is kind of a markdown mess
 > where a lot of lines are considered to be titles. Make it tidy.
+
+---
+
+### Session 37 — GPT-5.4 (autopilot)
+
+> I think a limit of 100 items of pagination is way too low. Same as a count of 20 items by default. Can you explain me why you decided to use such low numbers? Shouldn't we support higher counts ?
+> If we decide to go with higher counts, can you implement the changes and run/update the tests ?
+> Moreover, are we supporting compressing the answer using various compression algorithms? It should be a feature in http tower or something like this right? do we support that?
+>
+> thank you

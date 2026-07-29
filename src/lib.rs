@@ -8,8 +8,8 @@ pub mod search_params;
 pub mod store;
 pub mod validation;
 
-pub const DEFAULT_SEARCH_PAGE_COUNT: u32 = 20;
-pub const DEFAULT_MAX_SEARCH_PAGE_COUNT: u32 = 100;
+pub const DEFAULT_SEARCH_PAGE_COUNT: u32 = 128;
+pub const DEFAULT_MAX_SEARCH_PAGE_COUNT: u32 = 2048;
 
 use auth::AuthConfig;
 use axum::{
@@ -21,6 +21,7 @@ use std::sync::Arc;
 use store::PgStore;
 use tower_helmet::HelmetLayer;
 use tower_http::{
+    compression::CompressionLayer,
     cors::CorsLayer,
     limit::RequestBodyLimitLayer,
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
@@ -112,6 +113,7 @@ pub fn build_router(state: AppState) -> Router {
 
     router
         .layer(middleware::from_fn(fhir_content_type))
+        .layer(CompressionLayer::new())
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(HelmetLayer::with_defaults())
         .layer(trace)
