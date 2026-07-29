@@ -7,8 +7,8 @@ use axum::{
 use serde_json::{Value, json};
 
 use common::{
-    build_test_app, clean_tenant, get_resource_with_token, read_only_token, send_request,
-    setup_test_db, tenant_token,
+    build_test_app, clean_tenant, get_resource_with_token, read_only_token, restricted_token,
+    send_request, setup_test_db, tenant_token, write_only_token,
 };
 
 fn bundle_request(body: &Value, token: &str) -> Request<Body> {
@@ -631,6 +631,211 @@ async fn transaction_mixed_operations() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Authorization tests: per-entry resource-type and interaction checks
+// ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn transaction_rolls_back_when_entry_resource_type_forbidden() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-authz";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = restricted_token(tenant, vec!["Patient".to_owned()]);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "tx-authz-pat",
+                    "name": [{"family": "Allowed"}]
+                },
+                "request": { "method": "POST", "url": "Patient" }
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "tx-authz-obs",
+                    "status": "final",
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "1234-5"}]}
+                },
+                "request": { "method": "POST", "url": "Observation" }
+            }
+        ]
+    });
+
+    let (status, body) = send_request(app.clone(), bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["resourceType"], "OperationOutcome");
+
+    // The whole transaction must be rolled back: the allowed Patient must not exist.
+    let full_token = tenant_token(tenant);
+    let (s, _) = send_request(
+        app,
+        get_resource_with_token("Patient", "tx-authz-pat", &full_token),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn transaction_rejects_get_entry_for_write_only_token() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-writeonly";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = write_only_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{
+            "request": { "method": "GET", "url": "Patient/tx-wo-pat" }
+        }]
+    });
+
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["resourceType"], "OperationOutcome");
+}
+
+#[tokio::test]
+async fn batch_returns_403_for_forbidden_entries_and_continues() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-batch-authz";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = restricted_token(tenant, vec!["Patient".to_owned()]);
+
+    let observation = json!({
+        "resourceType": "Observation",
+        "id": "batch-authz-obs",
+        "status": "final",
+        "code": {"coding": [{"system": "http://loinc.org", "code": "1234-5"}]}
+    });
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [
+            // Allowed Patient entries covering all four methods.
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "batch-authz-pat",
+                    "name": [{"family": "Allowed"}]
+                },
+                "request": { "method": "POST", "url": "Patient" }
+            },
+            {
+                "request": { "method": "GET", "url": "Patient/batch-authz-pat" }
+            },
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "batch-authz-pat",
+                    "name": [{"family": "Updated"}]
+                },
+                "request": { "method": "PUT", "url": "Patient/batch-authz-pat" }
+            },
+            // Forbidden Observation entries covering all four methods.
+            {
+                "resource": observation,
+                "request": { "method": "POST", "url": "Observation" }
+            },
+            {
+                "request": { "method": "GET", "url": "Observation/batch-authz-obs" }
+            },
+            {
+                "resource": observation,
+                "request": { "method": "PUT", "url": "Observation/batch-authz-obs" }
+            },
+            {
+                "request": { "method": "DELETE", "url": "Observation/batch-authz-obs" }
+            },
+            // Allowed delete of the Patient created above.
+            {
+                "request": { "method": "DELETE", "url": "Patient/batch-authz-pat" }
+            }
+        ]
+    });
+
+    let (status, body) = send_request(app.clone(), bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let entries = body["entry"].as_array().unwrap();
+    assert_eq!(entries.len(), 8);
+
+    // Allowed Patient entries succeed.
+    assert_eq!(entries[0]["response"]["status"], "201 Created");
+    assert_eq!(entries[1]["response"]["status"], "200 OK");
+    assert_eq!(entries[2]["response"]["status"], "200 OK");
+    assert_eq!(entries[7]["response"]["status"], "204 No Content");
+
+    // Forbidden Observation entries get an inline 403 OperationOutcome.
+    for i in [3, 4, 5, 6] {
+        assert_eq!(
+            entries[i]["response"]["status"], "403 Forbidden",
+            "entry {i} must be forbidden"
+        );
+        assert_eq!(entries[i]["resource"]["resourceType"], "OperationOutcome");
+    }
+
+    let full_token = tenant_token(tenant);
+
+    // The forbidden Observation must never have been persisted.
+    let (s, _) = send_request(
+        app.clone(),
+        get_resource_with_token("Observation", "batch-authz-obs", &full_token),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // The allowed Patient was deleted by the final entry.
+    let (s, _) = send_request(
+        app,
+        get_resource_with_token("Patient", "batch-authz-pat", &full_token),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn batch_get_entry_requires_read_scope() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-batch-writeonly";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = write_only_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "batch-wo-pat",
+                    "name": [{"family": "WriteOnly"}]
+                },
+                "request": { "method": "POST", "url": "Patient" }
+            },
+            {
+                "request": { "method": "GET", "url": "Patient/batch-wo-pat" }
+            }
+        ]
+    });
+
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let entries = body["entry"].as_array().unwrap();
+    assert_eq!(entries[0]["response"]["status"], "201 Created");
+    assert_eq!(entries[1]["response"]["status"], "403 Forbidden");
+    assert_eq!(entries[1]["resource"]["resourceType"], "OperationOutcome");
 }
 
 #[tokio::test]

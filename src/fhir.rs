@@ -12,8 +12,11 @@ use url::form_urlencoded::Serializer;
 use uuid::Uuid;
 
 use crate::{
-    AppState, SearchConfig, auth::extract_access_context, capability::capability_statement,
-    error::AppError, search_params,
+    AppState, SearchConfig,
+    auth::{AccessContext, extract_access_context},
+    capability::capability_statement,
+    error::AppError,
+    search_params,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -538,9 +541,9 @@ pub async fn process_bundle(
         .unwrap_or_default();
 
     if is_transaction {
-        process_transaction(&state, &access.tenant_id, entries).await
+        process_transaction(&state, &access, entries).await
     } else {
-        process_batch(&state, &access.tenant_id, entries).await
+        process_batch(&state, &access, entries).await
     }
 }
 
@@ -624,6 +627,48 @@ fn error_entry(status: &str, diagnostics: &str) -> Value {
     })
 }
 
+/// Error while processing a single Bundle entry.
+///
+/// Authorization failures are distinguished from other failures so that
+/// transactions can roll back with 403 and batches can report an inline
+/// `403 Forbidden` outcome instead of a generic bad request.
+enum EntryError {
+    Forbidden(String),
+    Failed(String),
+}
+
+impl From<String> for EntryError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<&str> for EntryError {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.to_owned())
+    }
+}
+
+/// Apply the same resource-type and interaction authorization used by the
+/// standalone CRUD handlers to a single Bundle entry.
+fn authorize_entry(access: &AccessContext, req: &EntryRequest) -> Result<(), EntryError> {
+    let interaction_allowed = match req.method.as_str() {
+        "GET" => access.can_read,
+        // Unknown methods are rejected later as a bad request, not as an
+        // authorization failure.
+        _ => access.can_write,
+    };
+
+    if !interaction_allowed || !access.can_access_resource_type(&req.resource_type) {
+        return Err(EntryError::Forbidden(format!(
+            "token does not grant {} access to resource type '{}'",
+            req.method, req.resource_type
+        )));
+    }
+
+    Ok(())
+}
+
 /// Process a single Bundle entry against the store.
 /// Returns the response entry Value on success.
 async fn process_single_entry<E>(
@@ -631,11 +676,13 @@ async fn process_single_entry<E>(
     tenant_id: &str,
     entry: &Value,
     validator: &crate::validation::FhirSchemaValidator,
-) -> Result<Value, String>
+    access: &AccessContext,
+) -> Result<Value, EntryError>
 where
     E: BundleExecutor,
 {
     let req = parse_entry_request(entry)?;
+    authorize_entry(access, &req)?;
 
     match req.method.as_str() {
         "POST" => {
@@ -721,7 +768,7 @@ where
                     Some(format!("W/\"{}\"", stored.version_id)),
                     Some(stored.last_updated.to_rfc3339()),
                 )),
-                None => Err("resource not found".to_owned()),
+                None => Err(EntryError::Failed("resource not found".to_owned())),
             }
         }
         "DELETE" => {
@@ -738,10 +785,12 @@ where
             if deleted {
                 Ok(success_entry("204 No Content", None, None, None, None))
             } else {
-                Err("resource not found".to_owned())
+                Err(EntryError::Failed("resource not found".to_owned()))
             }
         }
-        other => Err(format!("unsupported HTTP method '{other}'")),
+        other => Err(EntryError::Failed(format!(
+            "unsupported HTTP method '{other}'"
+        ))),
     }
 }
 
@@ -848,7 +897,7 @@ impl BundleExecutor for PoolBundleExecutor<'_> {
 /// Process a `transaction` Bundle: all entries succeed or all fail.
 async fn process_transaction(
     state: &AppState,
-    tenant_id: &str,
+    access: &AccessContext,
     entries: Vec<Value>,
 ) -> Result<Response, AppError> {
     let mut executor = TxBundleExecutor {
@@ -858,9 +907,21 @@ async fn process_transaction(
     let mut response_entries = Vec::with_capacity(entries.len());
 
     for entry in &entries {
-        match process_single_entry(&mut executor, tenant_id, entry, &state.validator).await {
+        match process_single_entry(
+            &mut executor,
+            &access.tenant_id,
+            entry,
+            &state.validator,
+            access,
+        )
+        .await
+        {
             Ok(resp) => response_entries.push(resp),
-            Err(msg) => {
+            Err(EntryError::Forbidden(_)) => {
+                // Forbidden entry: abort and roll back the whole transaction.
+                return Err(AppError::Forbidden);
+            }
+            Err(EntryError::Failed(msg)) => {
                 // Transaction mode: any failure aborts the whole thing.
                 // The transaction is dropped (rolled back) automatically.
                 return Err(AppError::BadRequest(format!("transaction failed: {msg}")));
@@ -887,7 +948,7 @@ async fn process_transaction(
 /// Process a `batch` Bundle: each entry is independent.
 async fn process_batch(
     state: &AppState,
-    tenant_id: &str,
+    access: &AccessContext,
     entries: Vec<Value>,
 ) -> Result<Response, AppError> {
     let mut executor = PoolBundleExecutor {
@@ -897,9 +958,21 @@ async fn process_batch(
     let mut response_entries = Vec::with_capacity(entries.len());
 
     for entry in &entries {
-        match process_single_entry(&mut executor, tenant_id, entry, &state.validator).await {
+        match process_single_entry(
+            &mut executor,
+            &access.tenant_id,
+            entry,
+            &state.validator,
+            access,
+        )
+        .await
+        {
             Ok(resp) => response_entries.push(resp),
-            Err(msg) => {
+            Err(EntryError::Forbidden(msg)) => {
+                // Forbidden entry: report inline 403 and continue with the rest.
+                response_entries.push(error_entry("403 Forbidden", &msg));
+            }
+            Err(EntryError::Failed(msg)) => {
                 // Batch mode: report the error inline but continue processing.
                 response_entries.push(error_entry("400 Bad Request", &msg));
             }
