@@ -7,18 +7,14 @@ Helm chart for deploying NisseFHIR with either a CloudNativePG-managed PostgreSQ
 Minimal install:
 
 ```bash
-helm install my-release ./charts/nissefhir \
-  --set config.jwtMode=static \
-  --set config.jwtSecret.create=true
+helm install my-release ./charts/nissefhir
 ```
 
 Install from the published repository:
 
 ```bash
 helm repo add nissefhir https://nissefhir.github.io/helm-charts
-helm install my-release nissefhir/nissefhir \
-  --set config.jwtMode=static \
-  --set config.jwtSecret.create=true
+helm install my-release nissefhir/nissefhir
 ```
 
 ## JWT Secret Handling

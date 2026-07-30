@@ -1,0 +1,17 @@
+{{- /* Render-time guard: the server only implements "static" and "jwks" JWT modes. */ -}}
+{{- $mode := .Values.config.jwtMode | default "" -}}
+{{- if not (has $mode (list "static" "jwks")) -}}
+  {{- fail (printf "unsupported config.jwtMode %q; expected \"static\" or \"jwks\" (the server does not implement a \"none\" mode)" $mode) -}}
+{{- end -}}
+{{- if eq $mode "jwks" -}}
+  {{- if not .Values.config.jwksUrl -}}
+    {{- fail "config.jwksUrl is required when config.jwtMode is \"jwks\"" -}}
+  {{- end -}}
+{{- end -}}
+{{- if eq $mode "static" -}}
+  {{- $secret := .Values.config.jwtSecret -}}
+  {{- $hasExisting := (($secret).existingSecret).name | default "" -}}
+  {{- if and (not $secret.create) (empty $hasExisting) -}}
+    {{- fail "config.jwtMode=static requires config.jwtSecret.create=true or config.jwtSecret.existingSecret.name to be set" -}}
+  {{- end -}}
+{{- end -}}
