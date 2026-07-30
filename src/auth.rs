@@ -230,6 +230,7 @@ fn algorithm_for_jwk(jwk: &Jwk) -> Option<Algorithm> {
         },
         AlgorithmParameters::OctetKey(_) => Some(Algorithm::HS256),
         AlgorithmParameters::OctetKeyPair(_) => Some(Algorithm::EdDSA),
+        _ => None,
     }
 }
 

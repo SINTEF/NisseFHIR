@@ -340,7 +340,7 @@ impl PgStore {
         limit: i64,
         after_id: Option<&str>,
     ) -> Result<SearchResults, AppError> {
-        let mut total_query: QueryBuilder<'_, Postgres> =
+        let mut total_query: QueryBuilder<Postgres> =
             QueryBuilder::new("SELECT count(*) FROM fhir_resources WHERE tenant_id = ");
         total_query.push_bind(tenant_id);
         total_query.push(" AND resource_type = ");
@@ -360,7 +360,7 @@ impl PgStore {
             });
         }
 
-        let mut resource_query: QueryBuilder<'_, Postgres> = QueryBuilder::new(
+        let mut resource_query: QueryBuilder<Postgres> = QueryBuilder::new(
             "SELECT id, version_id, last_updated, resource FROM fhir_resources WHERE tenant_id = ",
         );
         resource_query.push_bind(tenant_id);
