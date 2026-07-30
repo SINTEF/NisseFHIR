@@ -13,7 +13,7 @@ services:
       timeout: 5s
       retries: 30
     volumes:
-      - nissefhir-postgres:/var/lib/postgresql/data
+      - nissefhir-postgres:/var/lib/postgresql
 
   fhir-server:
     image: ghcr.io/sintef/nissefhir:0.1.4
