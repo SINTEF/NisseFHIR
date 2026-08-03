@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
-use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
 use crate::error::AppError;
@@ -438,7 +437,7 @@ impl PgStore {
         total_query.push_bind(tenant_id);
         total_query.push(" AND resource_type = ");
         total_query.push_bind(resource_type);
-        crate::search_params::sql::push_search_filters(&mut total_query, filters);
+        crate::search_params::sql::push_search_filters(&mut total_query, filters)?;
 
         let total = total_query
             .build_query_scalar::<i64>()
@@ -459,7 +458,7 @@ impl PgStore {
         resource_query.push_bind(tenant_id);
         resource_query.push(" AND resource_type = ");
         resource_query.push_bind(resource_type);
-        crate::search_params::sql::push_search_filters(&mut resource_query, filters);
+        crate::search_params::sql::push_search_filters(&mut resource_query, filters)?;
 
         if let Some(after_id) = after_id {
             resource_query.push(" AND id > ");
@@ -554,7 +553,7 @@ impl PgStore {
         query.push_bind(tenant_id);
         query.push(" AND resource_type = ");
         query.push_bind(resource_type);
-        crate::search_params::sql::push_search_filters(&mut query, filters);
+        crate::search_params::sql::push_search_filters(&mut query, filters)?;
         query.push(" ORDER BY id ASC LIMIT ");
         query.push_bind(2_i64);
 
@@ -935,9 +934,9 @@ impl PgStore {
 /// create.
 ///
 /// The key is a stable function of the (tenant, resource type, canonical
-/// condition) tuple. The condition is canonicalized by sorting its decoded
-/// search filters by parameter code, so two equivalent `If-None-Exist`
-/// headers carrying parameters in different orders produce the same key.
+/// condition) tuple. The condition is canonicalized by sorting parameter
+/// occurrences and the OR values within them, so equivalent `If-None-Exist`
+/// headers carrying terms in different orders produce the same key.
 ///
 /// The returned `i64` is fed to `pg_advisory_xact_lock(bigint)`. Hash
 /// collisions across unrelated (tenant, type, condition) tuples only cause
@@ -948,23 +947,25 @@ pub fn conditional_create_lock_key(
     resource_type: &str,
     filters: &[SearchFilter],
 ) -> i64 {
-    // Build the canonical condition: (param_code, value) pairs sorted by
-    // parameter code. The last write wins on duplicate codes — current
-    // query parsing already collapses repeated keys.
-    let mut canon: BTreeMap<&'static str, &str> = BTreeMap::new();
+    // Repeated occurrences are AND terms and comma-separated values are OR
+    // terms, so both levels can be sorted without changing their meaning.
+    let mut canon = Vec::new();
     for f in filters {
-        canon.insert(f.param.code, f.value.as_str());
+        let mut values = f.values.clone();
+        values.sort();
+        canon.push((f.param.code, values));
     }
+    canon.sort();
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     tenant_id.hash(&mut hasher);
     0u8.hash(&mut hasher);
     resource_type.hash(&mut hasher);
     0u8.hash(&mut hasher);
-    for (code, value) in canon {
+    for (code, values) in canon {
         code.hash(&mut hasher);
         1u8.hash(&mut hasher);
-        value.hash(&mut hasher);
+        values.hash(&mut hasher);
         2u8.hash(&mut hasher);
     }
     hasher.finish() as i64
@@ -981,7 +982,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no Patient search param for code '{code}'"));
         SearchFilter {
             param,
-            value: value.to_owned(),
+            values: vec![value.to_owned()],
         }
     }
 

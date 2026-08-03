@@ -2,7 +2,7 @@ mod common;
 
 use axum::http::StatusCode;
 use serde_json::Value;
-use url::Url;
+use url::{Url, form_urlencoded::Serializer};
 
 use common::{
     build_test_app_auth_required, clean_tenant, post_resource_with_token, restricted_token,
@@ -264,6 +264,71 @@ async fn patient_search_filters_by_name() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 1);
     assert_eq!(body["entry"][0]["resource"]["id"], peter["id"]);
+}
+
+#[tokio::test]
+async fn search_injection_canary_is_bound_and_cannot_change_the_query() {
+    let pool = setup_test_db().await;
+    clean_tenant(&pool, "search-injection-canary").await;
+    let token = tenant_token("search-injection-canary");
+
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, _) = send_request(
+        app,
+        post_resource_with_token("Patient", &test_data::patient_peter_chalmers(), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let payload = "peter%' OR TRUE; DROP TABLE fhir_resources; --";
+    let mut serializer = Serializer::new(String::new());
+    serializer.append_pair("name", payload);
+    let query = serializer.finish();
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, body) = send_request(
+        app,
+        search_resource_with_token("Patient", Some(&query), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "canary search failed: {body}");
+    assert_eq!(body["total"], 0);
+
+    // A normal search still works, proving the payload neither broadened the
+    // predicate nor executed its attempted statement.
+    let app = build_test_app_auth_required(pool);
+    let (status, body) = send_request(
+        app,
+        search_resource_with_token("Patient", Some("name=peter"), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 1);
+}
+
+#[tokio::test]
+async fn search_rejects_registry_entries_without_an_executable_sql_path() {
+    let pool = setup_test_db().await;
+    let token = tenant_token("search-fail-closed");
+    let app = build_test_app_auth_required(pool);
+
+    let (status, body) = send_request(
+        app,
+        search_resource_with_token(
+            "QuestionnaireResponse",
+            Some("item-subject=Patient/example"),
+            &token,
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["resourceType"], "OperationOutcome");
+    assert!(
+        body["issue"][0]["diagnostics"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported")
+    );
 }
 
 #[tokio::test]

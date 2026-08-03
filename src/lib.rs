@@ -12,6 +12,10 @@ pub mod validation;
 
 pub const DEFAULT_SEARCH_PAGE_COUNT: u32 = 128;
 pub const DEFAULT_MAX_SEARCH_PAGE_COUNT: u32 = 2048;
+pub const MAX_SEARCH_PARAMETER_OCCURRENCES: usize = 128;
+pub const MAX_SEARCH_OR_VALUES_PER_OCCURRENCE: usize = 128;
+pub const MAX_SEARCH_TOTAL_VALUES: usize = 512;
+pub const MAX_SEARCH_QUERY_BYTES: usize = 64 * 1024;
 
 use auth::AuthConfig;
 use axum::{

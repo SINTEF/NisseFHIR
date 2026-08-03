@@ -52,7 +52,10 @@ pub fn capability_statement(base_url: &str) -> Value {
         }
 
         let mut search_params: Vec<Value> = pagination_params.clone();
-        for sp in params {
+        for sp in params
+            .iter()
+            .filter(|sp| crate::search_params::sql::is_executable_search_param(sp))
+        {
             let type_str = match sp.param_type {
                 SearchParamType::String => "string",
                 SearchParamType::Token => "token",
@@ -228,6 +231,32 @@ mod tests {
         assert!(observation_params.contains(&"code"));
         assert!(observation_params.contains(&"status"));
         assert!(observation_params.contains(&"subject"));
+    }
+
+    #[test]
+    fn capability_advertises_only_executable_registry_entries() {
+        let value = capability_statement("http://localhost:8080/fhir");
+        let resources = value["rest"][0]["resource"].as_array().unwrap();
+
+        for resource in resources.iter().filter(|resource| resource["type"] != "*") {
+            let resource_type = resource["type"].as_str().unwrap();
+            let advertised = resource["searchParam"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|param| param["name"].as_str())
+                .filter(|name| !name.starts_with('_'));
+
+            for name in advertised {
+                let executable = crate::search_params::search_params_for(resource_type)
+                    .iter()
+                    .any(|param| {
+                        param.code == name
+                            && crate::search_params::sql::is_executable_search_param(param)
+                    });
+                assert!(executable, "{resource_type}.{name} is not executable");
+            }
+        }
     }
 
     #[test]

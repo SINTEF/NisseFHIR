@@ -1,13 +1,12 @@
 use axum::{
     Json, Router,
-    extract::{Path, Query, State, rejection::JsonRejection},
+    extract::{Path, RawQuery, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
 };
 use json_patch::patch as apply_json_patch;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::{
@@ -55,7 +54,7 @@ pub async fn search_resources(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(resource_type): Path<String>,
-    Query(query): Query<BTreeMap<String, String>>,
+    RawQuery(query): RawQuery,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
     validate_path_resource_type(&resource_type)?;
@@ -63,6 +62,7 @@ pub async fn search_resources(
         return Err(AppError::Forbidden);
     }
 
+    let query = crate::search::parse_query_pairs(query.as_deref().unwrap_or(""));
     let params = crate::search::parse_search_params(&resource_type, query, state.search)?;
     let results = state
         .store

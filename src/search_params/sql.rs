@@ -5,6 +5,8 @@
 
 use sqlx::{Postgres, QueryBuilder};
 
+use crate::error::AppError;
+
 use super::registry::{JsonPath, SearchParam, SearchParamType};
 
 /// A parsed search filter ready to be appended to a SQL query.
@@ -12,8 +14,8 @@ use super::registry::{JsonPath, SearchParam, SearchParamType};
 pub struct SearchFilter {
     /// The search parameter definition this filter applies.
     pub param: &'static SearchParam,
-    /// The raw value supplied by the client.
-    pub value: String,
+    /// Values in one parameter occurrence. Multiple values are FHIR OR terms.
+    pub values: Vec<String>,
 }
 
 /// Append SQL `WHERE` clause fragments for the given filters.
@@ -21,26 +23,111 @@ pub struct SearchFilter {
 /// Each filter produces one or more `AND …` conditions that narrow the result
 /// set. The function handles all supported search parameter types (string,
 /// token, reference, date, uri, number, quantity) and JSON path variants.
-pub fn push_search_filters(query: &mut QueryBuilder<Postgres>, filters: &[SearchFilter]) {
+pub fn push_search_filters(
+    query: &mut QueryBuilder<Postgres>,
+    filters: &[SearchFilter],
+) -> Result<(), AppError> {
     for filter in filters {
-        match filter.param.param_type {
-            SearchParamType::String => push_string_filter(query, &filter.param.path, &filter.value),
-            SearchParamType::Token => push_token_filter(query, &filter.param.path, &filter.value),
-            SearchParamType::Reference => {
-                push_reference_filter(query, &filter.param.path, &filter.value);
+        validate_search_filter(filter.param, &filter.values)?;
+        if filter.values.len() == 1 {
+            push_search_filter_value(query, filter, &filter.values[0]);
+        } else {
+            // Existing filter emitters append `AND <predicate>`. Seeding each
+            // branch with TRUE lets us compose those predicates as an OR group
+            // without duplicating their SQL generation and bind handling.
+            query.push(" AND (FALSE");
+            for value in &filter.values {
+                query.push(" OR (TRUE");
+                push_search_filter_value(query, filter, value);
+                query.push(")");
             }
-            SearchParamType::Date => push_date_filter(query, &filter.param.path, &filter.value),
-            SearchParamType::Uri => push_uri_filter(query, &filter.param.path, &filter.value),
-            SearchParamType::Number => push_number_filter(query, &filter.param.path, &filter.value),
-            SearchParamType::Quantity => {
-                push_quantity_filter(query, &filter.param.path, &filter.value);
-            }
-            SearchParamType::Special => {
-                push_special_filter(query, &filter.param.path, &filter.value);
-            }
-            // Composite is not yet supported as a search filter.
-            SearchParamType::Composite => {}
+            query.push(")");
         }
+    }
+    Ok(())
+}
+
+/// Validate that a registry entry has an implemented SQL path and that its
+/// values cannot take a no-op branch. This is used by both request parsing and
+/// SQL construction so fail-closed behavior does not depend on one caller.
+pub fn validate_search_filter(param: &SearchParam, values: &[String]) -> Result<(), AppError> {
+    let executable_path = match (&param.param_type, &param.path) {
+        (SearchParamType::String, JsonPath::Field(segments)) => !segments.is_empty(),
+        (SearchParamType::String, JsonPath::WhereFilter { .. }) => true,
+        (SearchParamType::Token, JsonPath::Field(segments)) => !segments.is_empty(),
+        (SearchParamType::Token, JsonPath::WhereFilter { .. }) => true,
+        (SearchParamType::Token, JsonPath::Exists(segments)) => !segments.is_empty(),
+        (SearchParamType::Reference, JsonPath::Field(segments)) => !segments.is_empty(),
+        (SearchParamType::Reference, JsonPath::WhereFilter { .. }) => true,
+        (SearchParamType::Date, JsonPath::Field(segments)) => !segments.is_empty(),
+        (SearchParamType::Date, JsonPath::WhereFilter { .. }) => true,
+        (SearchParamType::Uri, JsonPath::Field(segments)) => !segments.is_empty(),
+        (SearchParamType::Number, JsonPath::Field(segments)) => !segments.is_empty(),
+        (SearchParamType::Quantity, JsonPath::Field(segments)) => !segments.is_empty(),
+        (SearchParamType::Special, JsonPath::Position(segments)) => !segments.is_empty(),
+        _ => false,
+    };
+
+    if !executable_path {
+        return Err(AppError::BadRequest(format!(
+            "search parameter '{}' uses an unsupported {:?} registry path",
+            param.code, param.param_type
+        )));
+    }
+
+    if matches!(
+        param.param_type,
+        SearchParamType::Date | SearchParamType::Number | SearchParamType::Quantity
+    ) {
+        for value in values {
+            if has_unsupported_comparator(value) {
+                return Err(AppError::BadRequest(format!(
+                    "search parameter '{}' uses an unsupported comparator",
+                    param.code
+                )));
+            }
+        }
+    }
+
+    if param.param_type == SearchParamType::Special
+        && values.iter().any(|value| parse_near_value(value).is_none())
+    {
+        return Err(AppError::BadRequest(format!(
+            "search parameter '{}' has an invalid near value",
+            param.code
+        )));
+    }
+
+    Ok(())
+}
+
+pub fn is_executable_search_param(param: &SearchParam) -> bool {
+    validate_search_filter(param, &["0|0".to_owned()]).is_ok()
+}
+
+fn has_unsupported_comparator(value: &str) -> bool {
+    matches!(
+        value.get(..2),
+        Some("eq" | "ne" | "gt" | "lt" | "ge" | "le" | "sa" | "eb" | "ap")
+    )
+}
+
+fn push_search_filter_value(
+    query: &mut QueryBuilder<Postgres>,
+    filter: &SearchFilter,
+    value: &str,
+) {
+    match filter.param.param_type {
+        SearchParamType::String => push_string_filter(query, &filter.param.path, value),
+        SearchParamType::Token => push_token_filter(query, &filter.param.path, value),
+        SearchParamType::Reference => push_reference_filter(query, &filter.param.path, value),
+        SearchParamType::Date => push_date_filter(query, &filter.param.path, value),
+        SearchParamType::Uri => push_uri_filter(query, &filter.param.path, value),
+        SearchParamType::Number => push_number_filter(query, &filter.param.path, value),
+        SearchParamType::Quantity => push_quantity_filter(query, &filter.param.path, value),
+        SearchParamType::Special => push_special_filter(query, &filter.param.path, value),
+        // Composite is not yet supported as a search filter.
+        SearchParamType::Composite => {}
     }
 }
 
@@ -49,6 +136,7 @@ pub fn push_search_filters(query: &mut QueryBuilder<Postgres>, filters: &[Search
 // ---------------------------------------------------------------------------
 
 fn push_string_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &str) {
+    let value = crate::search::unescape_fhir_value(value);
     let pattern = format!("%{}%", value.to_lowercase());
 
     match path {
@@ -438,6 +526,7 @@ fn push_exists_filter(query: &mut QueryBuilder<Postgres>, segments: &[&str], val
 // ---------------------------------------------------------------------------
 
 fn push_reference_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &str) {
+    let value = crate::search::unescape_fhir_value(value);
     match path {
         JsonPath::Field(segments) => {
             if segments.len() == 1 {
@@ -446,14 +535,14 @@ fn push_reference_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, va
                 query.push(" AND (resource->'");
                 query.push(field);
                 query.push("'->>'reference' = ");
-                query.push_bind(value.to_owned());
+                query.push_bind(value.clone());
 
                 // Or it's an array of references
                 let arr = safe_array_elements(&format!("resource->'{field}'"));
                 query.push(format!(
                     " OR EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'reference' = "
                 ));
-                query.push_bind(value.to_owned());
+                query.push_bind(value.clone());
                 query.push("))");
             } else {
                 // Nested reference: navigate to the field and check .reference
@@ -464,21 +553,21 @@ fn push_reference_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, va
                     query.push(" AND ");
                     query.push(&jsonb_text);
                     query.push(" = ");
-                    query.push_bind(value.to_owned());
+                    query.push_bind(value.clone());
                 } else {
                     // Navigate to the object and check .reference
                     let jsonb_path = build_jsonb_path("resource", segments);
                     query.push(" AND (");
                     query.push(&jsonb_path);
                     query.push("->>'reference' = ");
-                    query.push_bind(value.to_owned());
+                    query.push_bind(value.clone());
 
                     // Also check array case
                     let arr = safe_array_elements(&jsonb_path);
                     query.push(format!(
                         " OR EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'reference' = "
                     ));
-                    query.push_bind(value.to_owned());
+                    query.push_bind(value.clone());
                     query.push("))");
                 }
             }
@@ -507,7 +596,7 @@ fn push_reference_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, va
                 query.push(&suffix_path);
                 query.push(" = ");
             }
-            query.push_bind(value.to_owned());
+            query.push_bind(value);
             query.push(")");
         }
         JsonPath::Exists(_) | JsonPath::Position(_) => {}
@@ -519,6 +608,7 @@ fn push_reference_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, va
 // ---------------------------------------------------------------------------
 
 fn push_date_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &str) {
+    let value = crate::search::unescape_fhir_value(value);
     match path {
         JsonPath::Field(segments) => {
             let jsonb_text = build_jsonb_text_path("resource", segments);
@@ -577,13 +667,14 @@ fn push_date_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: 
 // ---------------------------------------------------------------------------
 
 fn push_uri_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &str) {
+    let value = crate::search::unescape_fhir_value(value);
     match path {
         JsonPath::Field(segments) => {
             let jsonb_text = build_jsonb_text_path("resource", segments);
             query.push(" AND ");
             query.push(&jsonb_text);
             query.push(" = ");
-            query.push_bind(value.to_owned());
+            query.push_bind(value);
         }
         JsonPath::WhereFilter { .. } | JsonPath::Exists(_) | JsonPath::Position(_) => {}
     }
@@ -594,6 +685,7 @@ fn push_uri_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &
 // ---------------------------------------------------------------------------
 
 fn push_number_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &str) {
+    let value = crate::search::unescape_fhir_value(value);
     match path {
         JsonPath::Field(segments) => {
             let jsonb_path = build_jsonb_path("resource", segments);
@@ -601,7 +693,7 @@ fn push_number_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value
             query.push(" AND (");
             query.push(&jsonb_path);
             query.push(")::text::numeric = ");
-            query.push_bind(value.to_owned());
+            query.push_bind(value);
             query.push("::numeric");
         }
         JsonPath::WhereFilter { .. } | JsonPath::Exists(_) | JsonPath::Position(_) => {}
@@ -800,10 +892,15 @@ fn build_jsonb_text_path(root: &str, segments: &[&str]) -> String {
 /// - `system|code` → (Some(system), code)
 /// - `|code` → (Some(""), code)  treated as "no system"
 fn parse_token_value(value: &str) -> (Option<String>, String) {
-    if let Some((system, code)) = value.split_once('|') {
-        (Some(system.to_owned()), code.to_owned())
+    let parts = crate::search::split_fhir_delimiter(value, '|')
+        .expect("search values are escape-validated before SQL generation");
+    if parts.len() >= 2 {
+        (
+            Some(crate::search::unescape_fhir_value(&parts[0])),
+            crate::search::unescape_fhir_value(&parts[1..].join("|")),
+        )
     } else {
-        (None, value.to_owned())
+        (None, crate::search::unescape_fhir_value(&parts[0]))
     }
 }
 
@@ -829,6 +926,13 @@ mod tests {
     fn parse_token_value_empty_system() {
         let (system, code) = parse_token_value("|ABC");
         assert_eq!(system.as_deref(), Some(""));
+        assert_eq!(code, "ABC");
+    }
+
+    #[test]
+    fn parse_token_value_honors_escaped_pipe() {
+        let (system, code) = parse_token_value(r"http://example.org/a\|b|ABC");
+        assert_eq!(system.as_deref(), Some("http://example.org/a|b"));
         assert_eq!(code, "ABC");
     }
 
@@ -1547,16 +1651,16 @@ mod tests {
         let filters = vec![
             SearchFilter {
                 param: &PARAMS[0],
-                value: "active".to_owned(),
+                values: vec!["active".to_owned()],
             },
             SearchFilter {
                 param: &PARAMS[1],
-                value: "Patient/123".to_owned(),
+                values: vec!["Patient/123".to_owned()],
             },
         ];
 
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_search_filters(&mut query, &filters);
+        push_search_filters(&mut query, &filters).unwrap();
         let sql = query.into_sql().as_str().to_owned();
         assert!(
             sql.contains("resource->>'status'"),
@@ -1569,7 +1673,29 @@ mod tests {
     }
 
     #[test]
-    fn push_search_filters_composite_is_noop() {
+    fn push_search_filters_ors_values_within_one_occurrence() {
+        use super::super::registry::SearchParam;
+
+        static PARAM: SearchParam = SearchParam {
+            code: "status",
+            param_type: SearchParamType::Token,
+            path: JsonPath::Field(&["status"]),
+        };
+        let filters = vec![SearchFilter {
+            param: &PARAM,
+            values: vec!["active".to_owned(), "draft".to_owned()],
+        }];
+
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_search_filters(&mut query, &filters).unwrap();
+        let sql = query.into_sql().as_str().to_owned();
+
+        assert!(sql.contains("AND (FALSE OR (TRUE AND"), "{sql}");
+        assert!(sql.matches("resource->>'status'").count() >= 2, "{sql}");
+    }
+
+    #[test]
+    fn push_search_filters_rejects_composite_instead_of_ignoring_it() {
         use super::super::registry::SearchParam;
 
         static PARAMS: [SearchParam; 1] = [SearchParam {
@@ -1580,16 +1706,79 @@ mod tests {
 
         let filters = vec![SearchFilter {
             param: &PARAMS[0],
-            value: "value".to_owned(),
+            values: vec!["value".to_owned()],
         }];
 
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_search_filters(&mut query, &filters);
+        let error = push_search_filters(&mut query, &filters).unwrap_err();
         let sql = query.into_sql().as_str().to_owned();
+        assert!(matches!(error, AppError::BadRequest(_)));
         assert_eq!(
             sql, "SELECT 1 FROM t WHERE 1=1",
-            "Composite should be no-op"
+            "unsupported filters must be rejected before changing the query"
         );
+    }
+
+    #[test]
+    fn push_search_filters_rejects_unsupported_registry_path() {
+        static PARAM: SearchParam = SearchParam {
+            code: "unsafe-string-path",
+            param_type: SearchParamType::String,
+            path: JsonPath::Exists(&["field"]),
+        };
+        let filters = vec![SearchFilter {
+            param: &PARAM,
+            values: vec!["value".to_owned()],
+        }];
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 WHERE TRUE");
+
+        assert!(push_search_filters(&mut query, &filters).is_err());
+        assert_eq!(query.into_sql().as_str(), "SELECT 1 WHERE TRUE");
+    }
+
+    #[test]
+    fn injection_canaries_are_always_bind_parameters() {
+        static PARAMS: [SearchParam; 4] = [
+            SearchParam {
+                code: "name",
+                param_type: SearchParamType::String,
+                path: JsonPath::Field(&["name"]),
+            },
+            SearchParam {
+                code: "status",
+                param_type: SearchParamType::Token,
+                path: JsonPath::Field(&["status"]),
+            },
+            SearchParam {
+                code: "subject",
+                param_type: SearchParamType::Reference,
+                path: JsonPath::Field(&["subject"]),
+            },
+            SearchParam {
+                code: "date",
+                param_type: SearchParamType::Date,
+                path: JsonPath::Field(&["date"]),
+            },
+        ];
+        let payload = "x' OR TRUE; DROP TABLE fhir_resources; --";
+        let filters = PARAMS
+            .iter()
+            .map(|param| SearchFilter {
+                param,
+                values: vec![payload.to_owned()],
+            })
+            .collect::<Vec<_>>();
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 WHERE TRUE");
+
+        push_search_filters(&mut query, &filters).unwrap();
+        let sql = query.into_sql().as_str().to_owned();
+
+        assert!(
+            !sql.contains(payload),
+            "client payload leaked into SQL: {sql}"
+        );
+        assert!(sql.contains("$1"), "expected bind placeholders: {sql}");
+        assert!(!sql.contains("DROP TABLE"), "{sql}");
     }
 
     // -----------------------------------------------------------------------
