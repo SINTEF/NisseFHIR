@@ -5,6 +5,7 @@ pub mod config;
 pub mod error;
 pub mod fhir;
 pub mod jwks;
+pub mod media_type;
 pub mod search;
 pub mod search_params;
 pub mod store;
@@ -22,6 +23,7 @@ use axum::{
     Router,
     http::{Method, header},
     middleware::{self, Next},
+    response::IntoResponse,
 };
 use std::sync::Arc;
 use store::PgStore;
@@ -157,17 +159,31 @@ fn build_cors_layer(allowed_origins: &[header::HeaderValue]) -> CorsLayer {
     }
 }
 
-/// Middleware that sets `Content-Type: application/fhir+json` on JSON responses
-/// from FHIR endpoints.
+/// Middleware that negotiates the `Accept` header and sets
+/// `Content-Type: application/fhir+json` on JSON responses from FHIR
+/// endpoints.
 async fn fhir_content_type(
     request: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
     let is_fhir_path =
         request.uri().path().starts_with("/fhir") || request.uri().path() == "/metadata";
+    if is_fhir_path && let Err(err) = crate::media_type::validate_accept(request.headers()) {
+        let mut response = err.into_response();
+        set_fhir_content_type(&mut response);
+        return response;
+    }
     let mut response = next.run(request).await;
-    if is_fhir_path
-        && let Some(ct) = response.headers().get(header::CONTENT_TYPE)
+    if is_fhir_path {
+        set_fhir_content_type(&mut response);
+    }
+    response
+}
+
+/// Set `Content-Type: application/fhir+json` on JSON responses containing a
+/// FHIR resource.
+fn set_fhir_content_type(response: &mut axum::response::Response) {
+    if let Some(ct) = response.headers().get(header::CONTENT_TYPE)
         && ct.as_bytes().starts_with(b"application/json")
     {
         response.headers_mut().insert(
@@ -175,5 +191,4 @@ async fn fhir_content_type(
             header::HeaderValue::from_static("application/fhir+json; charset=utf-8"),
         );
     }
-    response
 }

@@ -140,6 +140,9 @@ impl EntryError {
             AppError::PayloadTooLarge => EntryError::BadRequest(
                 "request payload exceeds the maximum allowed size".to_owned(),
             ),
+            AppError::UnsupportedMediaType(msg) | AppError::NotAcceptable(msg) => {
+                EntryError::BadRequest(msg)
+            }
             AppError::Forbidden => EntryError::Forbidden(
                 "token does not grant access to this resource or interaction".to_owned(),
             ),

@@ -38,6 +38,10 @@ pub enum AppError {
     Conflict(String),
     #[error("payload too large")]
     PayloadTooLarge,
+    #[error("unsupported media type: {0}")]
+    UnsupportedMediaType(String),
+    #[error("not acceptable: {0}")]
+    NotAcceptable(String),
     #[error("validation failed")]
     Validation(Vec<OperationIssue>),
     #[error("database error")]
@@ -95,6 +99,14 @@ impl IntoResponse for AppError {
                     "too-costly",
                     "request payload exceeds the maximum allowed size",
                 )],
+            ),
+            AppError::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                vec![OperationIssue::error("not-supported", message)],
+            ),
+            AppError::NotAcceptable(message) => (
+                StatusCode::NOT_ACCEPTABLE,
+                vec![OperationIssue::error("not-supported", message)],
             ),
             AppError::Validation(issues) => (StatusCode::BAD_REQUEST, issues),
             AppError::Database(_) | AppError::Internal(_) => (
@@ -156,6 +168,18 @@ mod tests {
     fn payload_too_large_maps_to_413() {
         let (status, _) = error_response(AppError::PayloadTooLarge);
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn unsupported_media_type_maps_to_415() {
+        let (status, _) = error_response(AppError::UnsupportedMediaType("x".to_owned()));
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[test]
+    fn not_acceptable_maps_to_406() {
+        let (status, _) = error_response(AppError::NotAcceptable("x".to_owned()));
+        assert_eq!(status, StatusCode::NOT_ACCEPTABLE);
     }
 
     #[test]

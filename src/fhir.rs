@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState, auth::extract_access_context, capability::capability_statement, error::AppError,
-    search_params,
+    media_type::BodyKind, search_params,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -112,6 +112,8 @@ pub async fn create_resource(
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
+
+    crate::media_type::validate_request_content_type(&headers, BodyKind::FhirResource)?;
 
     // Parse the `If-None-Exist` header up front so that an empty or malformed
     // header fails fast with 400 before we touch the request body.
@@ -345,6 +347,8 @@ pub async fn update_resource(
     }
     let expected_version = parse_if_match_version(&headers)?;
 
+    crate::media_type::validate_request_content_type(&headers, BodyKind::FhirResource)?;
+
     let Json(mut body) = parse_json_payload(payload)?;
     validate_resource_payload(&resource_type, &body, Some(&id))?;
     assign_resource_id(&mut body, Some(&id))?;
@@ -485,6 +489,8 @@ pub async fn patch_resource(
     }
     let expected_version = parse_if_match_version(&headers)?;
 
+    crate::media_type::validate_request_content_type(&headers, BodyKind::JsonPatch)?;
+
     let Json(patch_body) = parse_json_payload(payload)?;
     let patch_ops: json_patch::Patch = serde_json::from_value(patch_body)
         .map_err(|e| AppError::BadRequest(format!("invalid JSON Patch document: {e}")))?;
@@ -602,6 +608,8 @@ pub async fn process_bundle(
     if !access.can_write {
         return Err(AppError::Forbidden);
     }
+
+    crate::media_type::validate_request_content_type(&headers, BodyKind::FhirResource)?;
 
     let Json(body) = parse_json_payload(payload)?;
 
