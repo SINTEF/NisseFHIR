@@ -13,10 +13,6 @@ pub fn capability_statement(base_url: &str) -> Value {
         {"code": "search-type"}
     ]);
 
-    let conditional_features = json!({
-        "conditionalCreate": true
-    });
-
     let pagination_params = vec![
         json!({
             "name": "_count",
@@ -37,7 +33,8 @@ pub fn capability_statement(base_url: &str) -> Value {
     resource_entries.push(json!({
         "type": "*",
         "interaction": generic_interactions,
-        "conditionalCreate": conditional_features["conditionalCreate"],
+        "conditionalCreate": true,
+        "updateCreate": true,
         "searchParam": pagination_params,
     }));
 
@@ -48,7 +45,8 @@ pub fn capability_statement(base_url: &str) -> Value {
             resource_entries.push(json!({
                 "type": rt,
                 "interaction": generic_interactions,
-                "conditionalCreate": conditional_features["conditionalCreate"],
+                "conditionalCreate": true,
+                "updateCreate": true,
             }));
             continue;
         }
@@ -75,7 +73,8 @@ pub fn capability_statement(base_url: &str) -> Value {
         resource_entries.push(json!({
             "type": rt,
             "interaction": generic_interactions,
-            "conditionalCreate": conditional_features["conditionalCreate"],
+            "conditionalCreate": true,
+            "updateCreate": true,
             "searchParam": search_params,
         }));
     }
@@ -271,5 +270,14 @@ mod tests {
         // A specific resource type
         let patient = resources.iter().find(|r| r["type"] == "Patient").unwrap();
         assert_eq!(patient["conditionalCreate"], true);
+    }
+
+    #[test]
+    fn capability_advertises_update_create() {
+        let value = capability_statement("http://localhost:8080/fhir");
+        let resources = value["rest"][0]["resource"].as_array().unwrap();
+        assert_eq!(resources[0]["updateCreate"], true);
+        let patient = resources.iter().find(|r| r["type"] == "Patient").unwrap();
+        assert_eq!(patient["updateCreate"], true);
     }
 }

@@ -177,10 +177,9 @@ pub async fn create_resource(
     assign_resource_id(&mut body, None)?;
     state.validator.validate_resource(&resource_type, &body)?;
 
-    let id = body
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AppError::Internal("resource is missing its id after assignment".to_owned()))?;
+    let id = body.get("id").and_then(Value::as_str).ok_or_else(|| {
+        AppError::Internal("resource is missing its id after assignment".to_owned())
+    })?;
     let stored = state
         .store
         .create(&access.tenant_id, &resource_type, id, body.clone())
@@ -285,7 +284,7 @@ pub async fn read_resource_history(
 
 #[utoipa::path(put, path = "/fhir/{resource_type}/{id}",
     params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
-    responses((status = 200, description = "Resource updated"), (status = 400, description = "Validation error"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 404, description = "Not found"), (status = 412, description = "If-Match missing or stale"), (status = 413, description = "Payload too large")),
+    responses((status = 200, description = "Resource updated"), (status = 201, description = "Resource created"), (status = 400, description = "Validation error"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 412, description = "If-Match missing or stale"), (status = 413, description = "Payload too large")),
     security(("bearer_auth" = [])))]
 pub async fn update_resource(
     State(state): State<AppState>,
@@ -305,37 +304,38 @@ pub async fn update_resource(
     assign_resource_id(&mut body, Some(&id))?;
     state.validator.validate_resource(&resource_type, &body)?;
 
-    let updated = match expected_version {
+    let (stored, created) = match expected_version {
         Some(version) => {
-            state
+            let updated = state
                 .store
                 .update_if_version_matches(&access.tenant_id, &resource_type, &id, version, body)
-                .await?
-        }
-        None => {
-            state
-                .store
-                .update_existing(&access.tenant_id, &resource_type, &id, body)
-                .await?
-        }
-    };
-
-    let stored = match updated {
-        Some(stored) => stored,
-        None => {
-            let current = state
-                .store
-                .read(&access.tenant_id, &resource_type, &id)
                 .await?;
-            match current {
-                None => return Err(AppError::NotFound),
-                Some(current) => {
-                    return Err(AppError::PreconditionFailed(format!(
-                        "If-Match version mismatch: current version is {}",
-                        current.version_id
-                    )));
+
+            let stored = match updated {
+                Some(stored) => stored,
+                None => {
+                    let current = state
+                        .store
+                        .read(&access.tenant_id, &resource_type, &id)
+                        .await?;
+                    let message = match current {
+                        Some(current) => format!(
+                            "If-Match version mismatch: current version is {}",
+                            current.version_id
+                        ),
+                        None => "If-Match cannot update a missing resource".to_owned(),
+                    };
+                    return Err(AppError::PreconditionFailed(message));
                 }
-            }
+            };
+            (stored, false)
+        }
+        None => {
+            let result = state
+                .store
+                .upsert(&access.tenant_id, &resource_type, &id, body)
+                .await?;
+            (result.stored, result.created)
         }
     };
 
@@ -350,8 +350,21 @@ pub async fn update_resource(
         HeaderValue::from_str(&stored.last_updated.to_rfc3339())
             .map_err(|e| AppError::Internal(format!("invalid Last-Modified header: {e}")))?,
     );
+    response_headers.insert(
+        "Location",
+        HeaderValue::from_str(&format!(
+            "/fhir/{}/{}/_history/{}",
+            resource_type, id, stored.version_id
+        ))
+        .map_err(|e| AppError::Internal(format!("invalid Location header: {e}")))?,
+    );
 
-    Ok((StatusCode::OK, response_headers, Json(stored.resource)).into_response())
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, response_headers, Json(stored.resource)).into_response())
 }
 
 #[utoipa::path(delete, path = "/fhir/{resource_type}/{id}",
@@ -557,6 +570,7 @@ struct EntryRequest {
     method: String,
     resource_type: String,
     id: Option<String>,
+    if_match: Option<i64>,
 }
 
 fn parse_entry_request(entry: &Value) -> Result<EntryRequest, String> {
@@ -582,11 +596,21 @@ fn parse_entry_request(entry: &Value) -> Result<EntryRequest, String> {
         .ok_or("entry.request.url must contain a resource type")?
         .to_owned();
     let id = parts.next().map(|s| s.to_owned());
+    let if_match = request
+        .get("ifMatch")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| "entry.request.ifMatch must be a string".to_owned())
+                .and_then(parse_if_match_value)
+        })
+        .transpose()?;
 
     Ok(EntryRequest {
         method,
         resource_type,
         id,
+        if_match,
     })
 }
 
@@ -639,6 +663,7 @@ fn error_entry(status: &str, diagnostics: &str) -> Value {
 /// `403 Forbidden` outcome instead of a generic bad request.
 enum EntryError {
     Forbidden(String),
+    PreconditionFailed(String),
     Failed(String),
 }
 
@@ -714,9 +739,7 @@ where
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| {
-                    EntryError::Failed(
-                        "a resource with the generated id already exists".to_owned(),
-                    )
+                    EntryError::Failed("a resource with the generated id already exists".to_owned())
                 })?;
             let id = &stored.id;
 
@@ -747,15 +770,39 @@ where
                 .validate_resource(&req.resource_type, &resource)
                 .map_err(|e| e.to_string())?;
 
-            let stored = executor
-                .exec_upsert(tenant_id, &req.resource_type, id, resource)
-                .await
-                .map_err(|e| e.to_string())?;
+            let (stored, created) = if let Some(expected_version) = req.if_match {
+                let stored = executor
+                    .exec_update_if_version_matches(
+                        tenant_id,
+                        &req.resource_type,
+                        id,
+                        expected_version,
+                        resource,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        EntryError::PreconditionFailed(
+                            "If-Match version does not match an existing resource".to_owned(),
+                        )
+                    })?;
+                (stored, false)
+            } else {
+                let result = executor
+                    .exec_upsert(tenant_id, &req.resource_type, id, resource)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                (result.stored, result.created)
+            };
+            let status = if created { "201 Created" } else { "200 OK" };
 
             Ok(success_entry(
-                "200 OK",
+                status,
                 Some(&stored.resource),
-                Some(format!("{}/{}", req.resource_type, id)),
+                Some(format!(
+                    "{}/{}/_history/{}",
+                    req.resource_type, id, stored.version_id
+                )),
                 Some(format!("W/\"{}\"", stored.version_id)),
                 Some(stored.last_updated.to_rfc3339()),
             ))
@@ -824,7 +871,16 @@ trait BundleExecutor {
         resource_type: &str,
         id: &str,
         resource: Value,
-    ) -> Result<crate::store::StoredResource, AppError>;
+    ) -> Result<crate::store::UpsertResult, AppError>;
+
+    async fn exec_update_if_version_matches(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: i64,
+        resource: Value,
+    ) -> Result<Option<crate::store::StoredResource>, AppError>;
 
     async fn exec_read(
         &mut self,
@@ -864,9 +920,28 @@ impl BundleExecutor for TxBundleExecutor<'_> {
         resource_type: &str,
         id: &str,
         resource: Value,
-    ) -> Result<crate::store::StoredResource, AppError> {
+    ) -> Result<crate::store::UpsertResult, AppError> {
         crate::store::PgStore::upsert_in_tx(&mut self.tx, tenant_id, resource_type, id, resource)
             .await
+    }
+
+    async fn exec_update_if_version_matches(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: i64,
+        resource: Value,
+    ) -> Result<Option<crate::store::StoredResource>, AppError> {
+        crate::store::PgStore::update_if_version_matches_in_tx(
+            &mut self.tx,
+            tenant_id,
+            resource_type,
+            id,
+            expected_version,
+            resource,
+        )
+        .await
     }
 
     async fn exec_read(
@@ -912,9 +987,22 @@ impl BundleExecutor for PoolBundleExecutor<'_> {
         resource_type: &str,
         id: &str,
         resource: Value,
-    ) -> Result<crate::store::StoredResource, AppError> {
+    ) -> Result<crate::store::UpsertResult, AppError> {
         self.store
             .upsert(tenant_id, resource_type, id, resource)
+            .await
+    }
+
+    async fn exec_update_if_version_matches(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: i64,
+        resource: Value,
+    ) -> Result<Option<crate::store::StoredResource>, AppError> {
+        self.store
+            .update_if_version_matches(tenant_id, resource_type, id, expected_version, resource)
             .await
     }
 
@@ -963,6 +1051,9 @@ async fn process_transaction(
             Err(EntryError::Forbidden(_)) => {
                 // Forbidden entry: abort and roll back the whole transaction.
                 return Err(AppError::Forbidden);
+            }
+            Err(EntryError::PreconditionFailed(msg)) => {
+                return Err(AppError::PreconditionFailed(msg));
             }
             Err(EntryError::Failed(msg)) => {
                 // Transaction mode: any failure aborts the whole thing.
@@ -1014,6 +1105,9 @@ async fn process_batch(
             Err(EntryError::Forbidden(msg)) => {
                 // Forbidden entry: report inline 403 and continue with the rest.
                 response_entries.push(error_entry("403 Forbidden", &msg));
+            }
+            Err(EntryError::PreconditionFailed(msg)) => {
+                response_entries.push(error_entry("412 Precondition Failed", &msg));
             }
             Err(EntryError::Failed(msg)) => {
                 // Batch mode: report the error inline but continue processing.
@@ -1096,10 +1190,17 @@ fn parse_if_match_version(headers: &HeaderMap) -> Result<Option<i64>, AppError> 
         .map_err(|e| AppError::BadRequest(format!("invalid If-Match header: {e}")))?
         .trim();
 
+    parse_if_match_value(raw)
+        .map(Some)
+        .map_err(AppError::BadRequest)
+}
+
+fn parse_if_match_value(raw: &str) -> Result<i64, String> {
+    let raw = raw.trim();
     if raw == "*" {
-        return Err(AppError::BadRequest(
+        return Err(
             "If-Match wildcard '*' is not supported; use a concrete version ETag".to_owned(),
-        ));
+        );
     }
 
     let version_text = if raw.starts_with("W/\"") && raw.ends_with('"') {
@@ -1110,17 +1211,15 @@ fn parse_if_match_version(headers: &HeaderMap) -> Result<Option<i64>, AppError> 
         raw
     };
 
-    let version = version_text.parse::<i64>().map_err(|_| {
-        AppError::BadRequest("If-Match must be an integer version ETag like W/\"3\"".to_owned())
-    })?;
+    let version = version_text
+        .parse::<i64>()
+        .map_err(|_| "If-Match must be an integer version ETag like W/\"3\"".to_owned())?;
 
     if version < 1 {
-        return Err(AppError::BadRequest(
-            "If-Match version must be >= 1".to_owned(),
-        ));
+        return Err("If-Match version must be >= 1".to_owned());
     }
 
-    Ok(Some(version))
+    Ok(version)
 }
 
 /// Validate that `body` is a JSON object whose `resourceType` matches

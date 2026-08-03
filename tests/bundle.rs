@@ -191,11 +191,116 @@ async fn transaction_with_put_updates_existing() {
     let (status, body) = send_request(app.clone(), bundle_request(&update_bundle, &token)).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["entry"][0]["response"]["status"], "200 OK");
+    assert_eq!(body["entry"][0]["response"]["etag"], "W/\"2\"");
+    assert_eq!(
+        body["entry"][0]["response"]["location"],
+        format!("Patient/{id}/_history/2")
+    );
 
     // Read back to verify update
     let (s, patient) = send_request(app, get_resource_with_token("Patient", &id, &token)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(patient["name"][0]["family"], "Updated");
+}
+
+#[tokio::test]
+async fn transaction_put_creates_missing_resource() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-put-create";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{
+            "resource": {
+                "resourceType": "Patient",
+                "id": "tx-client-id",
+                "active": true
+            },
+            "request": {"method": "PUT", "url": "Patient/tx-client-id"}
+        }]
+    });
+
+    let (status, body) = send_request(app.clone(), bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["entry"][0]["response"]["status"], "201 Created");
+    assert_eq!(body["entry"][0]["response"]["etag"], "W/\"1\"");
+    assert_eq!(
+        body["entry"][0]["response"]["location"],
+        "Patient/tx-client-id/_history/1"
+    );
+
+    let (status, patient) = send_request(
+        app,
+        get_resource_with_token("Patient", "tx-client-id", &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(patient["active"], true);
+}
+
+#[tokio::test]
+async fn transaction_put_with_if_match_does_not_create_missing_resource() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-put-if-match-missing";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{
+            "resource": {"resourceType": "Patient", "id": "tx-if-match-missing"},
+            "request": {
+                "method": "PUT",
+                "url": "Patient/tx-if-match-missing",
+                "ifMatch": "W/\"1\""
+            }
+        }]
+    });
+
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "body: {body}");
+    assert_eq!(body["resourceType"], "OperationOutcome");
+    assert_eq!(count_resources(&pool, tenant).await, 0);
+}
+
+#[tokio::test]
+async fn transaction_rolls_back_put_create_when_later_entry_fails() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-put-create-rollback";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [
+            {
+                "resource": {"resourceType": "Patient", "id": "rolled-back-put"},
+                "request": {"method": "PUT", "url": "Patient/rolled-back-put"}
+            },
+            {
+                "request": {"method": "PUT", "url": "Observation/missing-body"}
+            }
+        ]
+    });
+
+    let (status, _) = send_request(app.clone(), bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(count_resources(&pool, tenant).await, 0);
+
+    let (status, _) = send_request(
+        app,
+        get_resource_with_token("Patient", "rolled-back-put", &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -404,6 +509,78 @@ async fn batch_continues_on_individual_failure() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn batch_put_creates_missing_resource_and_isolates_failure() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-batch-put-create";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [
+            {
+                "resource": {"resourceType": "Patient", "id": "batch-client-id"},
+                "request": {"method": "PUT", "url": "Patient/batch-client-id"}
+            },
+            {
+                "request": {"method": "PUT", "url": "Observation/missing-body"}
+            }
+        ]
+    });
+
+    let (status, body) = send_request(app.clone(), bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["entry"][0]["response"]["status"], "201 Created");
+    assert_eq!(body["entry"][0]["response"]["etag"], "W/\"1\"");
+    assert_eq!(body["entry"][1]["response"]["status"], "400 Bad Request");
+    assert_eq!(count_resources(&pool, tenant).await, 1);
+
+    let (status, patient) = send_request(
+        app,
+        get_resource_with_token("Patient", "batch-client-id", &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(patient["id"], "batch-client-id");
+}
+
+#[tokio::test]
+async fn batch_put_with_if_match_does_not_create_missing_resource() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-batch-put-if-match-missing";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [{
+            "resource": {"resourceType": "Patient", "id": "batch-if-match-missing"},
+            "request": {
+                "method": "PUT",
+                "url": "Patient/batch-if-match-missing",
+                "ifMatch": "W/\"1\""
+            }
+        }]
+    });
+
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["entry"][0]["response"]["status"],
+        "412 Precondition Failed"
+    );
+    assert_eq!(
+        body["entry"][0]["resource"]["resourceType"],
+        "OperationOutcome"
+    );
+    assert_eq!(count_resources(&pool, tenant).await, 0);
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -802,6 +979,10 @@ async fn batch_returns_403_for_forbidden_entries_and_continues() {
     assert_eq!(entries[0]["response"]["status"], "201 Created");
     assert_eq!(entries[1]["response"]["status"], "200 OK");
     assert_eq!(entries[2]["response"]["status"], "200 OK");
+    assert_eq!(
+        entries[2]["response"]["location"],
+        format!("Patient/{patient_id}/_history/2")
+    );
     assert_eq!(entries[7]["response"]["status"], "204 No Content");
 
     // Forbidden Observation entries get an inline 403 OperationOutcome.

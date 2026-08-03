@@ -21,6 +21,11 @@ pub struct StoredResource {
     pub resource: Value,
 }
 
+pub struct UpsertResult {
+    pub stored: StoredResource,
+    pub created: bool,
+}
+
 pub struct SearchResults {
     pub total: i64,
     pub resources: Vec<StoredResource>,
@@ -77,10 +82,17 @@ impl PgStore {
         resource_type: &str,
         id: &str,
         resource: Value,
-    ) -> Result<StoredResource, AppError> {
+    ) -> Result<UpsertResult, AppError> {
         let row = sqlx::query(
             r#"
-            WITH next_version AS (
+            WITH existing AS (
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM fhir_resources
+                    WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+                ) AS existed
+            ),
+            next_version AS (
                 SELECT COALESCE(
                     (
                         SELECT version_id + 1
@@ -117,7 +129,8 @@ impl PgStore {
             )
             SELECT $1, $2, $3, version_id, last_updated, FALSE, resource
             FROM upserted
-            RETURNING version_id, last_updated, resource
+            RETURNING version_id, last_updated, resource,
+                NOT (SELECT existed FROM existing) AS created
             "#,
         )
         .bind(tenant_id)
@@ -127,11 +140,14 @@ impl PgStore {
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(StoredResource {
-            id: id.to_owned(),
-            version_id: row.get::<i64, _>("version_id"),
-            last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
-            resource: row.get::<Value, _>("resource"),
+        Ok(UpsertResult {
+            stored: StoredResource {
+                id: id.to_owned(),
+                version_id: row.get::<i64, _>("version_id"),
+                last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
+                resource: row.get::<Value, _>("resource"),
+            },
+            created: row.get::<bool, _>("created"),
         })
     }
 
@@ -516,10 +532,17 @@ impl PgStore {
         resource_type: &str,
         id: &str,
         resource: Value,
-    ) -> Result<StoredResource, AppError> {
+    ) -> Result<UpsertResult, AppError> {
         let row = sqlx::query(
             r#"
-            WITH next_version AS (
+            WITH existing AS (
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM fhir_resources
+                    WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+                ) AS existed
+            ),
+            next_version AS (
                 SELECT COALESCE(
                     (
                         SELECT version_id + 1
@@ -550,7 +573,8 @@ impl PgStore {
             )
             SELECT $1, $2, $3, version_id, last_updated, FALSE, resource
             FROM upserted
-            RETURNING version_id, last_updated, resource
+            RETURNING version_id, last_updated, resource,
+                NOT (SELECT existed FROM existing) AS created
             "#,
         )
         .bind(tenant_id)
@@ -560,11 +584,14 @@ impl PgStore {
         .fetch_one(&mut **tx)
         .await?;
 
-        Ok(StoredResource {
-            id: id.to_owned(),
-            version_id: row.get::<i64, _>("version_id"),
-            last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
-            resource: row.get::<Value, _>("resource"),
+        Ok(UpsertResult {
+            stored: StoredResource {
+                id: id.to_owned(),
+                version_id: row.get::<i64, _>("version_id"),
+                last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
+                resource: row.get::<Value, _>("resource"),
+            },
+            created: row.get::<bool, _>("created"),
         })
     }
 
@@ -618,6 +645,69 @@ impl PgStore {
         .bind(resource_type)
         .bind(id)
         .bind(&resource)
+        .fetch_optional(&mut **tx)
+        .await?;
+
+        let Some(updated_row) = updated else {
+            return Ok(None);
+        };
+
+        let new_version_id = updated_row.get::<i64, _>("version_id");
+        let last_updated = updated_row.get::<DateTime<Utc>, _>("last_updated");
+        let updated_resource = updated_row.get::<Value, _>("resource");
+
+        sqlx::query(
+            r#"
+            INSERT INTO fhir_resource_history (
+                tenant_id, resource_type, id, version_id, last_updated, deleted, resource
+            )
+            VALUES ($1, $2, $3, $4, $5, FALSE, $6)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(new_version_id)
+        .bind(last_updated)
+        .bind(&updated_resource)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(Some(StoredResource {
+            id: id.to_owned(),
+            version_id: new_version_id,
+            last_updated,
+            resource: updated_resource,
+        }))
+    }
+
+    /// Conditionally update an existing resource inside a transaction.
+    pub async fn update_if_version_matches_in_tx(
+        tx: &mut TxExecutor<'_>,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: i64,
+        resource: Value,
+    ) -> Result<Option<StoredResource>, AppError> {
+        let updated = sqlx::query(
+            r#"
+            UPDATE fhir_resources
+            SET resource = $4,
+                version_id = version_id + 1,
+                last_updated = now()
+            WHERE tenant_id = $1
+              AND resource_type = $2
+              AND id = $3
+              AND version_id = $5
+            RETURNING version_id, last_updated, resource
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(&resource)
+        .bind(expected_version)
         .fetch_optional(&mut **tx)
         .await?;
 

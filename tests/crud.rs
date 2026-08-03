@@ -223,6 +223,77 @@ async fn update_resource_returns_200() {
 }
 
 #[tokio::test]
+async fn update_creates_missing_resource_with_client_id() {
+    let (pool, token) = setup("crud-update-create").await;
+    let app = build_test_app_auth_required(pool.clone());
+    let patient = serde_json::json!({
+        "resourceType": "Patient",
+        "id": "client-defined-id",
+        "active": true
+    });
+
+    let request = axum::http::Request::builder()
+        .method("PUT")
+        .uri("/fhir/Patient/client-defined-id")
+        .header("content-type", "application/json")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(axum::body::Body::from(
+            serde_json::to_string(&patient).unwrap(),
+        ))
+        .unwrap();
+    let response = app
+        .oneshot(request)
+        .await
+        .expect("update-create should complete");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers()["ETag"], "W/\"1\"");
+    assert_eq!(
+        response.headers()["Location"],
+        "/fhir/Patient/client-defined-id/_history/1"
+    );
+    assert_eq!(count_history_entries(&pool, "crud-update-create").await, 1);
+
+    let app = build_test_app_auth_required(pool);
+    let (status, stored) = send_request(
+        app,
+        get_resource_with_token("Patient", "client-defined-id", &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored, patient);
+}
+
+#[tokio::test]
+async fn update_with_if_match_does_not_create_missing_resource() {
+    let (pool, token) = setup("crud-update-if-match-missing").await;
+    let app = build_test_app_auth_required(pool.clone());
+    let patient = serde_json::json!({
+        "resourceType": "Patient",
+        "id": "missing-client-id"
+    });
+
+    let (status, body) = send_request(
+        app,
+        put_resource_with_token_if_match(
+            "Patient",
+            "missing-client-id",
+            &patient,
+            &token,
+            "W/\"1\"",
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body["resourceType"], "OperationOutcome");
+    assert_eq!(
+        count_resources(&pool, "crud-update-if-match-missing").await,
+        0
+    );
+}
+
+#[tokio::test]
 async fn update_increments_version() {
     let (pool, token) = setup("crud-update-version").await;
     let patient = test_data::minimal_patient();
@@ -600,6 +671,13 @@ async fn metadata_returns_capability_statement() {
     let rest = &body["rest"][0];
     assert_eq!(rest["mode"], "server");
     assert!(rest["resource"].is_array());
+    assert!(
+        rest["resource"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|resource| resource["updateCreate"] == true)
+    );
 }
 
 // ─── SERVER-ASSIGNED CREATE IDS ─────────────────────────────────────────────
