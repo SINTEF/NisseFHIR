@@ -6,9 +6,9 @@ A FHIR server securely stores healthcare data and provides standard APIs to shar
 
 This server does not support all FHIR features, but it should be good enough to support most common use cases. If you need XML, RDF or some exotic FHIR features, this is not the right server.
 
-⚠️ **This has been developed using AI agents. Use at your own risks.**
+⚠️ **This has been developed using AI agents.**
 
-The human author states that NisseFHIR is a pretty good lightweight FHIR 6 server.
+The human software engineer supervising the development states that NisseFHIR is a *pretty good* lightweight FHIR 6 server.
 
 ## Quick Start
 
@@ -46,13 +46,15 @@ For chart-specific configuration, including JWT secret handling and file-based s
 
 ## Motivation
 
-It comes from the need a good experimental FHIR server to develop advanced features for the [Invest4Health](https://invest4health.eu/) project. Funded by the European Union’s Horizon Europe Research and Innovation programme, under Grant Agreement 101095522.
+It comes from the need a good experimental FHIR server to develop advanced features for the [Invest4Health](https://invest4health.eu/) project, and the [WAGE](https://wagehealth.eu/) project. Both funded by the European Union’s Horizon Europe Research and Innovation programme, under Grant Agreement 101095522 and 101137207.
 
 Existing FHIR servers are [Not Invented Here](https://en.wikipedia.org/wiki/Not_invented_here) and using software stacks that are not appreciated by the author.
 
-Software development has changed dramastically in the last years with the arrival of AI agents. It is now possible to develop complex software in a matter of hours, which can be tailored to very specific needs. This is a dramatic change to software engineering, as before one would almost never reinvent a wheel and rather spend time adapting to existing software.
+Software development has changed dramastically in the last years with the arrival of AI agents. It is now possible to develop complex software at low cost in limited time. Moreover, such software can be tailored to very specific needs.
 
-While intimidating at first, a FHIR server is also not a huge piece of software if you restrict yourself to the most common and useful features.
+This is a dramatic change to software engineering, as before one would almost never reinvent a wheel and rather spend time adapting to existing software.
+
+While intimidating at first, a FHIR server is also not an impossible piece of software if you restrict yourself to the most common and useful features.
 
 ## AI Agents cannot write good enough FHIR servers on their own
 
@@ -64,9 +66,11 @@ Perhaps bruteforcing the problem with infinite money could make it work eventual
 
 The author did develop a FHIR 5 server in Golang for a healthcare company years ago, and had experience with the FHIR specifications. The previous server implementation was used in production for years, and it eventually got replaced by something arguably better. Learning from this experience, it was easy to guide the AI agents, to not repeat the same mistakes but also quickly implement the important features.
 
-You can read the [PROMPTS.md](./PROMPTS.md) file for the list of prompts used during the development. This is somewhat more involved than a "create a FHIR 6 server" prompt.
+You can read the [PROMPTS.md](./PROMPTS.md) file for the list of prompts used during the first phase of the development. This is somewhat more involved than a "create a FHIR 6 server" prompt.
 
-The time gain with this method of development is huge, but it still requires a lot of human guidance and expertise. I think that compared to the C compiler experiment, what should be done next is perhaps less obvious for an AI agent. However, as NisseFHIR reached a good state, with good testing and a good base of features, the AI agents were able to find improvements on their own with minimal guidance.
+The time gain with this method of development is huge, but it still requires a lot of human guidance and expertise. NisseFHIR reached an acceptable state after a few days, with good testing and a good base of features. The AI agents were able to find improvements on their own with minimal guidance.
+
+A few months later, newer agents found shortcomings, a security issue, and important missing features.
 
 ## Software Stack and Architecture
 
@@ -92,4 +96,4 @@ This project is open-source, dual licensed under the WTFPL and CeCILL-B licenses
 
 ## Acknowledgements
 
-This project has been developed for the [Invest4Health](https://invest4health.eu/) project, funded by the European Union’s Horizon Europe Research and Innovation programme, under Grant Agreement 101095522.
+This project has been developed for the [Invest4Health](https://invest4health.eu/) and the [WAGE](https://wagehealth.eu/) projects, funded by the European Union’s Horizon Europe Research and Innovation programme, under Grant Agreement 101095522 and 101137207.
