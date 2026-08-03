@@ -407,9 +407,17 @@ pub async fn update_resource(
     Ok((status, response_headers, Json(stored.resource)).into_response())
 }
 
+/// Delete a resource.
+///
+/// When an `If-Match` header carrying a concrete version ETag (e.g. `W/"3"`)
+/// is supplied, the resource is deleted only if its current version matches;
+/// otherwise `412 Precondition Failed` is returned and nothing is deleted.
+/// Without `If-Match` the delete is unconditional: the current version is
+/// removed regardless of how many times it has been rewritten since the
+/// client last read it.
 #[utoipa::path(delete, path = "/fhir/{resource_type}/{id}",
     params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
-    responses((status = 204, description = "Resource deleted"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 404, description = "Not found")),
+    responses((status = 204, description = "Resource deleted"), (status = 400, description = "Malformed If-Match header"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 404, description = "Not found"), (status = 412, description = "If-Match version does not match the current resource version")),
     security(("bearer_auth" = [])))]
 pub async fn delete_resource(
     State(state): State<AppState>,
@@ -421,17 +429,37 @@ pub async fn delete_resource(
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
+    let expected_version = parse_if_match_version(&headers)?;
 
-    let deleted = state
-        .store
-        .delete(&access.tenant_id, &resource_type, &id)
-        .await?;
+    let outcome = match expected_version {
+        Some(version) => {
+            state
+                .store
+                .delete_if_version_matches(&access.tenant_id, &resource_type, &id, version)
+                .await?
+        }
+        None => {
+            // No If-Match header: unconditional delete (removes the current version).
+            let deleted = state
+                .store
+                .delete(&access.tenant_id, &resource_type, &id)
+                .await?;
+            if !deleted {
+                return Err(AppError::NotFound);
+            }
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+    };
 
-    if !deleted {
-        return Err(AppError::NotFound);
+    match outcome {
+        crate::store::DeleteIfMatchOutcome::Deleted { .. } => {
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+        crate::store::DeleteIfMatchOutcome::VersionMismatch => Err(AppError::PreconditionFailed(
+            "If-Match version mismatch: resource was updated by another writer".to_owned(),
+        )),
+        crate::store::DeleteIfMatchOutcome::NotFound => Err(AppError::NotFound),
     }
-
-    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[utoipa::path(patch, path = "/fhir/{resource_type}/{id}",

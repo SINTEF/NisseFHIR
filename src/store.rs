@@ -46,6 +46,23 @@ pub struct UpsertResult {
     pub created: bool,
 }
 
+/// Outcome of an atomic version-aware delete (`If-Match`).
+///
+/// The delete-and-version-check is serialized inside a single PostgreSQL
+/// transaction, so a stale client cannot delete a resource that another
+/// writer has already updated.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeleteIfMatchOutcome {
+    /// The resource matched the expected version and was deleted. Carries the
+    /// next history version recorded as the tombstone.
+    Deleted { new_version_id: i64 },
+    /// The resource exists but its current version differs from the expected
+    /// version.
+    VersionMismatch,
+    /// No such resource exists.
+    NotFound,
+}
+
 pub struct SearchResults {
     pub total: i64,
     pub resources: Vec<StoredResource>,
@@ -375,6 +392,37 @@ impl PgStore {
             last_updated,
             resource: updated_resource,
         }))
+    }
+
+    /// Delete a resource only if its current version matches `expected_version`.
+    ///
+    /// Returns [`DeleteIfMatchOutcome::Deleted`] (with the new history version)
+    /// on a match, [`DeleteIfMatchOutcome::VersionMismatch`] when the resource
+    /// exists at a different version, and [`DeleteIfMatchOutcome::NotFound`]
+    /// when there is no such resource. Nothing is modified unless the version
+    /// matches.
+    pub async fn delete_if_version_matches(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: i64,
+    ) -> Result<DeleteIfMatchOutcome, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let outcome = PgStore::delete_if_version_matches_in_tx(
+            &mut tx,
+            tenant_id,
+            resource_type,
+            id,
+            expected_version,
+        )
+        .await?;
+        if matches!(outcome, DeleteIfMatchOutcome::Deleted { .. }) {
+            tx.commit().await?;
+        } else {
+            tx.rollback().await?;
+        }
+        Ok(outcome)
     }
 
     pub async fn delete(
@@ -856,6 +904,70 @@ impl PgStore {
             last_updated,
             resource: updated_resource,
         }))
+    }
+
+    /// Delete a resource inside a transaction, only if its current version
+    /// matches `expected_version`. See [`PgStore::delete_if_version_matches`].
+    pub async fn delete_if_version_matches_in_tx(
+        tx: &mut TxExecutor<'_>,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: i64,
+    ) -> Result<DeleteIfMatchOutcome, AppError> {
+        let deleted = sqlx::query(
+            r#"
+            DELETE FROM fhir_resources
+            WHERE tenant_id = $1 AND resource_type = $2 AND id = $3 AND version_id = $4
+            RETURNING version_id, resource
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(expected_version)
+        .fetch_optional(&mut **tx)
+        .await?;
+
+        let Some(row) = deleted else {
+            // The version predicate did not match. Distinguish a version
+            // mismatch from a missing resource by checking existence.
+            let exists = sqlx::query_scalar::<_, i64>(
+                "SELECT version_id FROM fhir_resources WHERE tenant_id = $1 AND resource_type = $2 AND id = $3",
+            )
+            .bind(tenant_id)
+            .bind(resource_type)
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            return Ok(match exists {
+                Some(_) => DeleteIfMatchOutcome::VersionMismatch,
+                None => DeleteIfMatchOutcome::NotFound,
+            });
+        };
+
+        let version_id = row.get::<i64, _>("version_id") + 1;
+        let resource = row.get::<Value, _>("resource");
+
+        sqlx::query(
+            r#"
+            INSERT INTO fhir_resource_history (
+                tenant_id, resource_type, id, version_id, last_updated, deleted, resource
+            )
+            VALUES ($1, $2, $3, $4, now(), TRUE, $5)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(version_id)
+        .bind(resource)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(DeleteIfMatchOutcome::Deleted {
+            new_version_id: version_id,
+        })
     }
 
     /// Delete a resource inside a transaction.

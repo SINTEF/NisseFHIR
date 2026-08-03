@@ -206,3 +206,40 @@ observe zero matches and create duplicate logical resources.
   and insert still run inside the transaction and rely on the database's own
   consistency guarantees. True semantic collisions are impossible because
   identical inputs hash identically.
+
+## Version-aware writes (`If-Match`)
+
+`PUT`, `PATCH`, and `DELETE` support the FHIR optimistic-concurrency
+interaction via the `If-Match` header, carrying a concrete version ETag such
+as `W/"3"`. A wildcard (`*`) is rejected.
+
+- `PUT` with a matching version updates the resource and records the next
+  history version; a stale version returns `412 Precondition Failed` and does
+  not modify anything.
+- `PATCH` behaves like `PUT`: the patch is applied and committed only when the
+  version predicate matches, otherwise `412`.
+- `DELETE` with a matching version removes the resource and records the next
+  history version as a tombstone; a stale version returns `412` without
+  deleting anything.
+
+### Behavior without `If-Match`
+
+When no `If-Match` header is supplied, the interaction is **unconditional**:
+
+- `PUT` performs an upsert (creates the resource if it is missing, otherwise
+  updates the current version).
+- `PATCH` and `DELETE` operate on the current version regardless of how many
+  times it has been rewritten since the client last read it. This means a
+  stale client can overwrite or remove a resource updated by another writer.
+  Clients that need to avoid clobbering concurrent writes should always send
+  the `If-Match` ETag they observed on their most recent read.
+
+### Atomicity
+
+The version predicate and the write are executed inside a single PostgreSQL
+transaction, so the check-and-write decision is atomic. For `DELETE`, the
+predicate is expressed directly in the `DELETE` statement's `WHERE` clause
+(`version_id = expected`), and a subsequent existence probe distinguishes a
+version mismatch from a missing resource. The same semantics apply to
+standalone endpoints and to Bundle `transaction`/`batch` entries, so both
+paths behave consistently.

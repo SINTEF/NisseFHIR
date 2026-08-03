@@ -364,6 +364,22 @@ pub fn delete_resource_with_token(resource_type: &str, id: &str, token: &str) ->
         .expect("request should build")
 }
 
+/// Build an authenticated DELETE request with an explicit If-Match precondition.
+pub fn delete_resource_with_token_if_match(
+    resource_type: &str,
+    id: &str,
+    token: &str,
+    if_match: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(format!("/fhir/{resource_type}/{id}"))
+        .header(header::IF_MATCH, if_match)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request should build")
+}
+
 /// Build an authenticated POST request with an If-None-Exist header for conditional create.
 pub fn post_resource_conditional(
     resource_type: &str,

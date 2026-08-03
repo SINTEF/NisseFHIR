@@ -566,15 +566,40 @@ where
                 .as_deref()
                 .ok_or("DELETE requires a resource id in the URL")?;
 
-            let deleted = executor
-                .exec_delete(tenant_id, &req.resource_type, id)
-                .await
-                .map_err(EntryError::from_app)?;
-
-            if deleted {
-                Ok(success_entry("204 No Content", None, None, None, None))
+            if let Some(expected_version) = req.if_match {
+                match executor
+                    .exec_delete_if_version_matches(
+                        tenant_id,
+                        &req.resource_type,
+                        id,
+                        expected_version,
+                    )
+                    .await
+                    .map_err(EntryError::from_app)?
+                {
+                    crate::store::DeleteIfMatchOutcome::Deleted { .. } => {
+                        Ok(success_entry("204 No Content", None, None, None, None))
+                    }
+                    crate::store::DeleteIfMatchOutcome::VersionMismatch => {
+                        Err(EntryError::PreconditionFailed(
+                            "If-Match version does not match an existing resource".to_owned(),
+                        ))
+                    }
+                    crate::store::DeleteIfMatchOutcome::NotFound => {
+                        Err(EntryError::NotFound("resource not found".to_owned()))
+                    }
+                }
             } else {
-                Err(EntryError::NotFound("resource not found".to_owned()))
+                let deleted = executor
+                    .exec_delete(tenant_id, &req.resource_type, id)
+                    .await
+                    .map_err(EntryError::from_app)?;
+
+                if deleted {
+                    Ok(success_entry("204 No Content", None, None, None, None))
+                } else {
+                    Err(EntryError::NotFound("resource not found".to_owned()))
+                }
             }
         }
         other => Err(EntryError::BadRequest(format!(
@@ -625,6 +650,14 @@ trait BundleExecutor {
         resource_type: &str,
         id: &str,
     ) -> Result<bool, AppError>;
+
+    async fn exec_delete_if_version_matches(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: i64,
+    ) -> Result<crate::store::DeleteIfMatchOutcome, AppError>;
 }
 
 /// Executor that operates inside an existing database transaction.
@@ -691,6 +724,23 @@ impl BundleExecutor for TxBundleExecutor<'_> {
     ) -> Result<bool, AppError> {
         crate::store::PgStore::delete_in_tx(&mut self.tx, tenant_id, resource_type, id).await
     }
+
+    async fn exec_delete_if_version_matches(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: i64,
+    ) -> Result<crate::store::DeleteIfMatchOutcome, AppError> {
+        crate::store::PgStore::delete_if_version_matches_in_tx(
+            &mut self.tx,
+            tenant_id,
+            resource_type,
+            id,
+            expected_version,
+        )
+        .await
+    }
 }
 
 /// Executor that uses independent pool connections (for batch mode).
@@ -752,6 +802,18 @@ impl BundleExecutor for PoolBundleExecutor<'_> {
         id: &str,
     ) -> Result<bool, AppError> {
         self.store.delete(tenant_id, resource_type, id).await
+    }
+
+    async fn exec_delete_if_version_matches(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: i64,
+    ) -> Result<crate::store::DeleteIfMatchOutcome, AppError> {
+        self.store
+            .delete_if_version_matches(tenant_id, resource_type, id, expected_version)
+            .await
     }
 }
 

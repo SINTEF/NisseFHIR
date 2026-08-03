@@ -355,6 +355,176 @@ async fn transaction_with_delete_removes_resource() {
 }
 
 #[tokio::test]
+async fn transaction_delete_with_matching_if_match_succeeds() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-del-ifmatch-ok";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let create_bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{
+            "resource": {"resourceType": "Patient", "id": "tx-del-ifmatch-pat"},
+            "request": {"method": "POST", "url": "Patient"}
+        }]
+    });
+    let (status, created) = send_request(app.clone(), bundle_request(&create_bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = created["entry"][0]["resource"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Delete via transaction with a matching If-Match.
+    let delete_bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{
+            "request": {
+                "method": "DELETE",
+                "url": format!("Patient/{id}"),
+                "ifMatch": "W/\"1\""
+            }
+        }]
+    });
+    let (status, body) = send_request(app.clone(), bundle_request(&delete_bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["entry"][0]["response"]["status"], "204 No Content");
+
+    let (s, _) = send_request(app, get_resource_with_token("Patient", &id, &token)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn transaction_delete_with_stale_if_match_returns_412_without_deleting() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-del-ifmatch-stale";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let create_bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{
+            "resource": {"resourceType": "Patient", "id": "tx-del-ifmatch-stale-pat"},
+            "request": {"method": "POST", "url": "Patient"}
+        }]
+    });
+    let (status, created) = send_request(app.clone(), bundle_request(&create_bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = created["entry"][0]["resource"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Bump the version to 2 via PUT with If-Match.
+    let update_bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{
+            "resource": {"resourceType": "Patient", "id": id},
+            "request": {"method": "PUT", "url": format!("Patient/{id}"), "ifMatch": "W/\"1\""}
+        }]
+    });
+    let (status, body) = send_request(app.clone(), bundle_request(&update_bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["entry"][0]["response"]["status"], "200 OK");
+
+    // Delete with the stale ETag.
+    let delete_bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{
+            "request": {
+                "method": "DELETE",
+                "url": format!("Patient/{id}"),
+                "ifMatch": "W/\"1\""
+            }
+        }]
+    });
+    // A stale If-Match delete in a transaction fails and rolls back.
+    let (status, body) = send_request(app.clone(), bundle_request(&delete_bundle, &token)).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "body: {body}");
+    assert_eq!(body["resourceType"], "OperationOutcome");
+
+    // Resource was not deleted (transaction rolled back).
+    assert_eq!(count_resources(&pool, tenant).await, 1);
+    let (s, _) = send_request(app, get_resource_with_token("Patient", &id, &token)).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn batch_delete_with_if_match_is_consistent_with_transaction() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-batch-del-ifmatch";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    // Seed two resources so we can exercise both a matching and a stale delete
+    // independently (a successful delete removes the resource entirely).
+    let create_bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [
+            {"resource": {"resourceType": "Patient", "id": "batch-del-ifmatch-ok"}, "request": {"method": "POST", "url": "Patient"}},
+            {"resource": {"resourceType": "Patient", "id": "batch-del-ifmatch-stale"}, "request": {"method": "POST", "url": "Patient"}}
+        ]
+    });
+    let (status, created) = send_request(app.clone(), bundle_request(&create_bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let ok_id = created["entry"][0]["resource"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let stale_id = created["entry"][1]["resource"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // A matching If-Match delete in batch mode succeeds.
+    let ok_bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [{
+            "request": {
+                "method": "DELETE",
+                "url": format!("Patient/{ok_id}"),
+                "ifMatch": "W/\"1\""
+            }
+        }]
+    });
+    let (status, body) = send_request(app.clone(), bundle_request(&ok_bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["entry"][0]["response"]["status"], "204 No Content");
+
+    // A stale If-Match delete in batch mode reports 412 and does not delete.
+    let stale_bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [{
+            "request": {
+                "method": "DELETE",
+                "url": format!("Patient/{stale_id}"),
+                "ifMatch": "W/\"2\""
+            }
+        }]
+    });
+    let (status, body) = send_request(app.clone(), bundle_request(&stale_bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["entry"][0]["response"]["status"],
+        "412 Precondition Failed"
+    );
+    assert_eq!(count_resources(&pool, tenant).await, 1);
+    let (s, _) = send_request(app, get_resource_with_token("Patient", &stale_id, &token)).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn transaction_with_get_reads_resource() {
     let pool = setup_test_db().await;
     let tenant = "bundle-tx-get";
