@@ -15,7 +15,7 @@ use crate::{
     AppState, SearchConfig,
     auth::{AccessContext, extract_access_context},
     capability::capability_statement,
-    error::AppError,
+    error::{AppError, OperationIssue},
     search_params,
 };
 
@@ -111,7 +111,7 @@ pub async fn search_resources(
 
 #[utoipa::path(post, path = "/fhir/{resource_type}",
     params(("resource_type" = String, Path, description = "FHIR resource type")),
-    responses((status = 201, description = "Resource created"), (status = 200, description = "Existing resource returned (If-None-Exist match)"), (status = 400, description = "Validation error"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 409, description = "Multiple matches for If-None-Exist"), (status = 413, description = "Payload too large")),
+    responses((status = 201, description = "Resource created"), (status = 200, description = "Existing resource returned (If-None-Exist match)"), (status = 400, description = "Validation error"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 412, description = "If-None-Exist matched multiple resources"), (status = 413, description = "Payload too large")),
     security(("bearer_auth" = [])))]
 pub async fn create_resource(
     State(state): State<AppState>,
@@ -125,25 +125,54 @@ pub async fn create_resource(
         return Err(AppError::Forbidden);
     }
 
-    // Handle If-None-Exist conditional create
-    if let Some(if_none_exist) = parse_if_none_exist(&headers)? {
-        let query_params = parse_if_none_exist_query(&resource_type, &if_none_exist, state.search)?;
-        let results = state
+    // Parse the `If-None-Exist` header up front so that an empty or malformed
+    // header fails fast with 400 before we touch the request body.
+    let if_none_exist_params = match parse_if_none_exist(&headers)? {
+        Some(raw) => Some(parse_if_none_exist_query(
+            &resource_type,
+            &raw,
+            state.search,
+        )?),
+        None => None,
+    };
+
+    // Validate the payload and assign a server-side id before entering the
+    // critical section. Doing this work outside the advisory lock keeps the
+    // serialized window short.
+    let Json(mut body) = parse_json_payload(payload)?;
+    validate_resource_payload(&resource_type, &body, None)?;
+    assign_resource_id(&mut body, None)?;
+    state.validator.validate_resource(&resource_type, &body)?;
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            AppError::Internal("resource is missing its id after assignment".to_owned())
+        })?;
+
+    // Atomic conditional create path: search + create run inside one
+    // PostgreSQL transaction guarded by a tenant+type+condition advisory lock.
+    if let Some(params) = if_none_exist_params {
+        let lock_key = crate::store::conditional_create_lock_key(
+            &access.tenant_id,
+            &resource_type,
+            &params.filters,
+        );
+        let outcome = state
             .store
-            .search(
+            .conditional_create_atomic(
                 &access.tenant_id,
                 &resource_type,
-                &query_params.filters,
-                2, // only need to know if 0, 1, or >1 matches
-                None,
+                &params.filters,
+                lock_key,
+                &id,
+                body,
             )
             .await?;
 
-        match results.total {
-            0 => { /* no match — proceed with create below */ }
-            1 => {
-                // Exactly one match: return existing resource (200 OK)
-                let existing = &results.resources[0];
+        match outcome {
+            crate::store::ConditionalCreateOutcome::Existing(existing) => {
                 let mut response_headers = HeaderMap::new();
                 response_headers.insert(
                     "ETag",
@@ -159,30 +188,43 @@ pub async fn create_resource(
                 return Ok((
                     StatusCode::OK,
                     response_headers,
-                    Json(existing.resource.clone()),
+                    Json(existing.resource),
                 )
                     .into_response());
             }
-            _ => {
-                // Multiple matches: return 412 Precondition Failed per FHIR spec
+            crate::store::ConditionalCreateOutcome::MultipleMatches => {
                 return Err(AppError::PreconditionFailed(
                     "If-None-Exist matched multiple resources".to_owned(),
                 ));
             }
+            crate::store::ConditionalCreateOutcome::Created(stored) => {
+                let stored_id = stored.id.clone();
+                let mut response_headers = HeaderMap::new();
+                response_headers.insert(
+                    "ETag",
+                    HeaderValue::from_str(&format!("W/\"{}\"", stored.version_id))
+                        .map_err(|e| AppError::Internal(format!("invalid ETag header: {e}")))?,
+                );
+                response_headers.insert(
+                    "Last-Modified",
+                    HeaderValue::from_str(&stored.last_updated.to_rfc3339())
+                        .map_err(|e| AppError::Internal(format!("invalid Last-Modified header: {e}")))?,
+                );
+                response_headers.insert(
+                    "Location",
+                    HeaderValue::from_str(&format!("/fhir/{resource_type}/{stored_id}"))
+                        .map_err(|e| AppError::Internal(format!("invalid Location header: {e}")))?,
+                );
+                return Ok((StatusCode::CREATED, response_headers, Json(stored.resource))
+                    .into_response());
+            }
         }
     }
 
-    let Json(mut body) = parse_json_payload(payload)?;
-    validate_resource_payload(&resource_type, &body, None)?;
-    assign_resource_id(&mut body, None)?;
-    state.validator.validate_resource(&resource_type, &body)?;
-
-    let id = body.get("id").and_then(Value::as_str).ok_or_else(|| {
-        AppError::Internal("resource is missing its id after assignment".to_owned())
-    })?;
+    // Non-conditional create path.
     let stored = state
         .store
-        .create(&access.tenant_id, &resource_type, id, body.clone())
+        .create(&access.tenant_id, &resource_type, &id, body)
         .await?
         .ok_or_else(|| {
             AppError::Conflict("a resource with the generated id already exists".to_owned())

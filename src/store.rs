@@ -1,9 +1,29 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
 use crate::error::AppError;
 use crate::search_params::sql::SearchFilter;
+
+/// Outcome of an atomic conditional create (`If-None-Exist`).
+///
+/// The match-and-create decision is serialized inside a single PostgreSQL
+/// transaction guarded by a transaction-scoped advisory lock, so two
+/// concurrent identical conditional creates cannot both observe zero matches
+/// and produce duplicate logical resources. See
+/// [`PgStore::conditional_create_atomic`].
+#[derive(Debug)]
+pub enum ConditionalCreateOutcome {
+    /// A new resource was created.
+    Created(StoredResource),
+    /// Exactly one existing resource matched the condition and is returned
+    /// unchanged.
+    Existing(StoredResource),
+    /// More than one existing resource matched the condition.
+    MultipleMatches,
+}
 
 /// A database executor that can be either a pool or an active transaction.
 /// Used by the Bundle transaction/batch handler to share store logic.
@@ -14,6 +34,7 @@ pub struct PgStore {
     pool: PgPool,
 }
 
+#[derive(Debug)]
 pub struct StoredResource {
     pub id: String,
     pub version_id: i64,
@@ -479,6 +500,93 @@ impl PgStore {
         Ok(self.pool.begin().await?)
     }
 
+    /// Atomically evaluate a conditional create (`If-None-Exist`).
+    ///
+    /// # Locking strategy
+    ///
+    /// The whole match-and-create decision runs inside one PostgreSQL
+    /// transaction guarded by a transaction-scoped advisory lock
+    /// (`pg_advisory_xact_lock`) keyed on `lock_key`. The lock key MUST be a
+    /// deterministic function of the tenant, resource type, and the canonical
+    /// form of the decoded search condition (see
+    /// [`conditional_create_lock_key`]).
+    ///
+    /// Two concurrent requests carrying equivalent `If-None-Exist` headers
+    /// therefore acquire the same lock and are serialized: the first one
+    /// observes zero matches and creates the resource; the second one — once
+    /// it acquires the lock — observes the freshly inserted row and returns
+    /// the existing resource (HTTP 200).
+    ///
+    /// Unrelated tenants, unrelated resource types, and unrelated conditions
+    /// hash to different lock keys, so they do not serialize against each
+    /// other. False key collisions only cause extra serialization (no
+    /// correctness impact); true collisions are impossible because identical
+    /// keys are hashed deterministically.
+    ///
+    /// # Multiple matches
+    ///
+    /// If the condition matches more than one existing resource, no resource
+    /// is created and the transaction rolls back. The caller surfaces `412
+    /// Precondition Failed` per the FHIR specification.
+    pub async fn conditional_create_atomic(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        filters: &[SearchFilter],
+        lock_key: i64,
+        id: &str,
+        resource: Value,
+    ) -> Result<ConditionalCreateOutcome, AppError> {
+        let mut tx = self.pool.begin().await?;
+
+        // Transaction-scoped advisory lock: released automatically on
+        // commit/rollback. Serializes concurrent identical conditional creates.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        // Search for existing matches under the lock. LIMIT 2 is enough to
+        // distinguish zero, one, and more-than-one matches.
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new(
+            "SELECT id, version_id, last_updated, resource FROM fhir_resources WHERE tenant_id = ",
+        );
+        query.push_bind(tenant_id);
+        query.push(" AND resource_type = ");
+        query.push_bind(resource_type);
+        crate::search_params::sql::push_search_filters(&mut query, filters);
+        query.push(" ORDER BY id ASC LIMIT ");
+        query.push_bind(2_i64);
+
+        let rows = query.build().fetch_all(&mut *tx).await?;
+
+        if rows.len() > 1 {
+            tx.rollback().await?;
+            return Ok(ConditionalCreateOutcome::MultipleMatches);
+        }
+
+        if let Some(row) = rows.into_iter().next() {
+            tx.rollback().await?;
+            return Ok(ConditionalCreateOutcome::Existing(StoredResource {
+                id: row.get::<String, _>("id"),
+                version_id: row.get::<i64, _>("version_id"),
+                last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
+                resource: row.get::<Value, _>("resource"),
+            }));
+        }
+
+        // Zero matches: create the new resource within the same transaction.
+        let created = Self::create_in_tx(&mut tx, tenant_id, resource_type, id, resource)
+            .await?
+            .ok_or_else(|| {
+                AppError::Conflict("a resource with the generated id already exists".to_owned())
+            })?;
+
+        tx.commit().await?;
+
+        Ok(ConditionalCreateOutcome::Created(created))
+    }
+
     /// Create a resource inside an existing transaction without overwriting.
     pub async fn create_in_tx(
         tx: &mut TxExecutor<'_>,
@@ -820,5 +928,158 @@ impl PgStore {
                 resource: row.get::<Value, _>("resource"),
             })
             .collect())
+    }
+}
+
+/// Derive a deterministic PostgreSQL advisory lock key for a conditional
+/// create.
+///
+/// The key is a stable function of the (tenant, resource type, canonical
+/// condition) tuple. The condition is canonicalized by sorting its decoded
+/// search filters by parameter code, so two equivalent `If-None-Exist`
+/// headers carrying parameters in different orders produce the same key.
+///
+/// The returned `i64` is fed to `pg_advisory_xact_lock(bigint)`. Hash
+/// collisions across unrelated (tenant, type, condition) tuples only cause
+/// extra serialization — never incorrect results — because identical
+/// conditions hash to identical keys.
+pub fn conditional_create_lock_key(
+    tenant_id: &str,
+    resource_type: &str,
+    filters: &[SearchFilter],
+) -> i64 {
+    // Build the canonical condition: (param_code, value) pairs sorted by
+    // parameter code. The last write wins on duplicate codes — current
+    // query parsing already collapses repeated keys.
+    let mut canon: BTreeMap<&'static str, &str> = BTreeMap::new();
+    for f in filters {
+        canon.insert(f.param.code, f.value.as_str());
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tenant_id.hash(&mut hasher);
+    0u8.hash(&mut hasher);
+    resource_type.hash(&mut hasher);
+    0u8.hash(&mut hasher);
+    for (code, value) in canon {
+        code.hash(&mut hasher);
+        1u8.hash(&mut hasher);
+        value.hash(&mut hasher);
+        2u8.hash(&mut hasher);
+    }
+    hasher.finish() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn patient_filter(code: &str, value: &str) -> SearchFilter {
+        let param = crate::search_params::search_params_for("Patient")
+            .iter()
+            .find(|p| p.code == code)
+            .unwrap_or_else(|| panic!("no Patient search param for code '{code}'"));
+        SearchFilter {
+            param,
+            value: value.to_owned(),
+        }
+    }
+
+    #[test]
+    fn lock_key_is_stable_for_same_inputs() {
+        let a = conditional_create_lock_key(
+            "tenant-a",
+            "Patient",
+            &[
+                patient_filter("identifier", "http://example.org|abc"),
+                patient_filter("name", "smith"),
+            ],
+        );
+        let b = conditional_create_lock_key(
+            "tenant-a",
+            "Patient",
+            &[
+                patient_filter("identifier", "http://example.org|abc"),
+                patient_filter("name", "smith"),
+            ],
+        );
+        assert_eq!(a, b, "equivalent input should hash to the same key");
+    }
+
+    #[test]
+    fn lock_key_ignores_filter_order() {
+        let a = conditional_create_lock_key(
+            "tenant-a",
+            "Patient",
+            &[
+                patient_filter("identifier", "http://example.org|abc"),
+                patient_filter("name", "smith"),
+            ],
+        );
+        let b = conditional_create_lock_key(
+            "tenant-a",
+            "Patient",
+            &[
+                patient_filter("name", "smith"),
+                patient_filter("identifier", "http://example.org|abc"),
+            ],
+        );
+        assert_eq!(
+            a, b,
+            "reordered equivalent conditions must share the same lock key"
+        );
+    }
+
+    #[test]
+    fn lock_key_differs_for_unrelated_tenants() {
+        let a = conditional_create_lock_key(
+            "tenant-a",
+            "Patient",
+            &[patient_filter("identifier", "x")],
+        );
+        let b = conditional_create_lock_key(
+            "tenant-b",
+            "Patient",
+            &[patient_filter("identifier", "x")],
+        );
+        assert_ne!(
+            a, b,
+            "different tenants must produce different lock keys"
+        );
+    }
+
+    #[test]
+    fn lock_key_differs_for_unrelated_conditions() {
+        let a = conditional_create_lock_key(
+            "tenant-a",
+            "Patient",
+            &[patient_filter("identifier", "x")],
+        );
+        let b =
+            conditional_create_lock_key("tenant-a", "Patient", &[patient_filter("name", "smith")]);
+        assert_ne!(
+            a, b,
+            "different conditions must produce different lock keys"
+        );
+    }
+
+    #[test]
+    fn lock_key_differs_for_unrelated_resource_types() {
+        let a = conditional_create_lock_key(
+            "tenant-a",
+            "Patient",
+            &[patient_filter("identifier", "x")],
+        );
+        let b = conditional_create_lock_key(
+            "tenant-a",
+            "Observation",
+            &[patient_filter("identifier", "x")],
+        );
+        // If Observation happens not to define an `identifier` param the
+        // lookup in the helper would panic, but Observation DOES define one.
+        assert_ne!(
+            a, b,
+            "different resource types must produce different lock keys"
+        );
     }
 }

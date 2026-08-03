@@ -170,3 +170,39 @@ What it does:
 - Create and update requests validate both the FHIR envelope (`resourceType`, `id`) and the resource-specific JSON Schema definition.
 - Invalid JSON, schema failures, auth failures, and missing resources return FHIR-shaped `OperationOutcome` bodies.
 - TLS is expected to be terminated by a reverse proxy or ingress layer; the server itself only listens on HTTP.
+
+## Conditional create (`If-None-Exist`) atomicity
+
+`POST /fhir/{type}` with an `If-None-Exist` header implements the FHIR
+conditional create interaction. The match-and-create decision is serialized
+inside one PostgreSQL transaction per (tenant, resource type, canonical
+condition) so that two concurrent identical conditional creates cannot both
+observe zero matches and create duplicate logical resources.
+
+### Locking mechanism
+
+- The `If-None-Exist` query is parsed with the same search parameter parser
+  used by `GET /fhir/{type}`. The decoded filters are canonicalized by sorting
+  on the parameter code, so equivalent conditions with reordered parameters
+  produce the same canonical key (see `conditional_create_lock_key`).
+- The canonical key is hashed to an `i64` and acquired with
+  `pg_advisory_xact_lock(bigint)` inside a PostgreSQL transaction. The lock
+  is transaction-scoped: it is released automatically on commit or rollback.
+- The transaction then runs the parametrized search (`LIMIT 2`) under the
+  lock and either returns the existing match, returns `412 Precondition
+  Failed` for multiple matches, or inserts the new resource via the same
+  `create_in_tx` insert-only path used by unconditional POST.
+
+### Collision behavior
+
+- Identical `(tenant, type, condition)` triples always hash to the same
+  lock key, so concurrent duplicates serialize: one request creates the
+  resource and the other observes it and returns `200 OK` with the
+  existing resource.
+- Unrelated tenants, resource types, or conditions hash to different
+  lock keys and are **not** serialized against each other.
+- A hash collision between two unrelated keys only causes extra
+  serialization — it cannot produce incorrect results, because the search
+  and insert still run inside the transaction and rely on the database's own
+  consistency guarantees. True semantic collisions are impossible because
+  identical inputs hash identically.
