@@ -682,42 +682,147 @@ fn success_entry(
 }
 
 /// Build a single response entry for a failed operation.
-fn error_entry(status: &str, diagnostics: &str) -> Value {
+///
+/// Per the FHIR Bundle spec, the `OperationOutcome` is placed in
+/// `entry.response.outcome`, never in `entry.resource`.
+fn error_entry(err: &EntryError) -> Value {
     json!({
         "response": {
-            "status": status,
-        },
-        "resource": {
-            "resourceType": "OperationOutcome",
-            "issue": [{
-                "severity": "error",
-                "code": "exception",
-                "diagnostics": diagnostics,
-            }]
+            "status": err.status_line(),
+            "outcome": err.outcome(),
         }
     })
 }
 
 /// Error while processing a single Bundle entry.
 ///
-/// Authorization failures are distinguished from other failures so that
-/// transactions can roll back with 403 and batches can report an inline
-/// `403 Forbidden` outcome instead of a generic bad request.
+/// Carries a structured HTTP classification so batch responses can report
+/// accurate statuses (`400`, `403`, `404`, `409`, `412`, `5xx`) instead of
+/// collapsing every failure to `400 Bad Request`, and so a failed
+/// transaction can roll back with the appropriate top-level status.
 enum EntryError {
+    /// 400 Bad Request — malformed entry or payload.
+    BadRequest(String),
+    /// 403 Forbidden — token lacks access to this resource type/interaction.
     Forbidden(String),
+    /// 404 Not Found — targeted resource does not exist.
+    NotFound(String),
+    /// 409 Conflict — id collision or duplicate.
+    Conflict(String),
+    /// 412 Precondition Failed — If-Match did not match.
     PreconditionFailed(String),
-    Failed(String),
+    /// 400 Bad Request with structured OperationOutcome issues.
+    Validation(Vec<OperationIssue>),
+    /// 500 Internal Server Error — internal/DB failure. No message is exposed.
+    Internal,
+}
+
+impl EntryError {
+    /// Map an [`AppError`] returned by the store or validator to an
+    /// [`EntryError`], preserving the HTTP classification and never exposing
+    /// internal database messages or SQL details.
+    fn from_app(err: AppError) -> Self {
+        match err {
+            AppError::Conflict(msg) => EntryError::Conflict(msg),
+            AppError::PreconditionFailed(msg) => EntryError::PreconditionFailed(msg),
+            AppError::Validation(issues) => EntryError::Validation(issues),
+            AppError::BadRequest(msg) => EntryError::BadRequest(msg),
+            AppError::PayloadTooLarge => {
+                EntryError::BadRequest("request payload exceeds the maximum allowed size".to_owned())
+            }
+            AppError::Forbidden => EntryError::Forbidden(
+                "token does not grant access to this resource or interaction".to_owned(),
+            ),
+            AppError::Unauthorized => {
+                EntryError::Forbidden("missing or invalid bearer token".to_owned())
+            }
+            AppError::NotFound => EntryError::NotFound("requested resource was not found".to_owned()),
+            // Database errors and internal errors never expose their message.
+            AppError::Database(_) | AppError::Internal(_) => EntryError::Internal,
+        }
+    }
+
+    /// HTTP status line ("400 Bad Request") used in batch response entries.
+    fn status_line(&self) -> &'static str {
+        match self {
+            EntryError::BadRequest(_) | EntryError::Validation(_) => "400 Bad Request",
+            EntryError::Forbidden(_) => "403 Forbidden",
+            EntryError::NotFound(_) => "404 Not Found",
+            EntryError::Conflict(_) => "409 Conflict",
+            EntryError::PreconditionFailed(_) => "412 Precondition Failed",
+            EntryError::Internal => "500 Internal Server Error",
+        }
+    }
+
+    /// Build the `OperationOutcome` body for this entry failure.
+    fn outcome(&self) -> Value {
+        match self {
+            EntryError::Validation(issues) => {
+                let issue_values: Vec<Value> = issues
+                    .iter()
+                    .map(|issue| serde_json::to_value(issue).unwrap_or_else(|_| {
+                        json!({
+                            "severity": "error",
+                            "code": "invalid",
+                            "diagnostics": "validation failed",
+                        })
+                    }))
+                    .collect();
+                json!({
+                    "resourceType": "OperationOutcome",
+                    "issue": issue_values,
+                })
+            }
+            EntryError::Internal => json!({
+                "resourceType": "OperationOutcome",
+                "issue": [{
+                    "severity": "error",
+                    "code": "exception",
+                    "diagnostics": "internal server error",
+                }],
+            }),
+            EntryError::BadRequest(msg) => issue_outcome("invalid", msg),
+            EntryError::Forbidden(msg) => issue_outcome("forbidden", msg),
+            EntryError::NotFound(msg) => issue_outcome("not-found", msg),
+            EntryError::Conflict(msg) => issue_outcome("conflict", msg),
+            EntryError::PreconditionFailed(msg) => issue_outcome("conflict", msg),
+        }
+    }
+
+    /// Convert back to a top-level [`AppError`] for transaction rollback.
+    fn into_app_error(self) -> AppError {
+        match self {
+            EntryError::BadRequest(msg) => AppError::BadRequest(msg),
+            EntryError::Forbidden(_) => AppError::Forbidden,
+            EntryError::NotFound(_) => AppError::NotFound,
+            EntryError::Conflict(msg) => AppError::Conflict(msg),
+            EntryError::PreconditionFailed(msg) => AppError::PreconditionFailed(msg),
+            EntryError::Validation(issues) => AppError::Validation(issues),
+            EntryError::Internal => AppError::Internal("bundle entry processing failed".to_owned()),
+        }
+    }
+}
+
+fn issue_outcome(code: &str, diagnostics: &str) -> Value {
+    json!({
+        "resourceType": "OperationOutcome",
+        "issue": [{
+            "severity": "error",
+            "code": code,
+            "diagnostics": diagnostics,
+        }],
+    })
 }
 
 impl From<String> for EntryError {
     fn from(message: String) -> Self {
-        Self::Failed(message)
+        Self::BadRequest(message)
     }
 }
 
 impl From<&str> for EntryError {
     fn from(message: &str) -> Self {
-        Self::Failed(message.to_owned())
+        Self::BadRequest(message.to_owned())
     }
 }
 
@@ -764,12 +869,11 @@ where
                 .cloned()
                 .ok_or("POST entry must include a resource")?;
 
-            validate_resource_payload(&req.resource_type, &resource, None)
-                .map_err(|e| e.to_string())?;
-            assign_resource_id(&mut resource, None).map_err(|e| e.to_string())?;
+            validate_resource_payload(&req.resource_type, &resource, None).map_err(EntryError::from_app)?;
+            assign_resource_id(&mut resource, None).map_err(EntryError::from_app)?;
             validator
                 .validate_resource(&req.resource_type, &resource)
-                .map_err(|e| e.to_string())?;
+                .map_err(EntryError::from_app)?;
 
             let id = resource
                 .get("id")
@@ -779,9 +883,9 @@ where
             let stored = executor
                 .exec_create(tenant_id, &req.resource_type, &id, resource)
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(EntryError::from_app)?
                 .ok_or_else(|| {
-                    EntryError::Failed("a resource with the generated id already exists".to_owned())
+                    EntryError::Conflict("a resource with the generated id already exists".to_owned())
                 })?;
             let id = &stored.id;
 
@@ -804,13 +908,12 @@ where
                 .cloned()
                 .ok_or("PUT entry must include a resource")?;
 
-            validate_resource_payload(&req.resource_type, &resource, Some(id))
-                .map_err(|e| e.to_string())?;
-            assign_resource_id(&mut resource, Some(id)).map_err(|e| e.to_string())?;
+            validate_resource_payload(&req.resource_type, &resource, Some(id)).map_err(EntryError::from_app)?;
+            assign_resource_id(&mut resource, Some(id)).map_err(EntryError::from_app)?;
 
             validator
                 .validate_resource(&req.resource_type, &resource)
-                .map_err(|e| e.to_string())?;
+                .map_err(EntryError::from_app)?;
 
             let (stored, created) = if let Some(expected_version) = req.if_match {
                 let stored = executor
@@ -822,7 +925,7 @@ where
                         resource,
                     )
                     .await
-                    .map_err(|e| e.to_string())?
+                    .map_err(EntryError::from_app)?
                     .ok_or_else(|| {
                         EntryError::PreconditionFailed(
                             "If-Match version does not match an existing resource".to_owned(),
@@ -833,7 +936,7 @@ where
                 let result = executor
                     .exec_upsert(tenant_id, &req.resource_type, id, resource)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(EntryError::from_app)?;
                 (result.stored, result.created)
             };
             let status = if created { "201 Created" } else { "200 OK" };
@@ -859,7 +962,7 @@ where
             let found = executor
                 .exec_read(tenant_id, &req.resource_type, id)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(EntryError::from_app)?;
 
             match found {
                 Some(stored) => Ok(success_entry(
@@ -869,7 +972,9 @@ where
                     Some(format!("W/\"{}\"", stored.version_id)),
                     Some(stored.last_updated.to_rfc3339()),
                 )),
-                None => Err(EntryError::Failed("resource not found".to_owned())),
+                None => Err(EntryError::NotFound(
+                    "resource not found".to_owned(),
+                )),
             }
         }
         "DELETE" => {
@@ -881,15 +986,15 @@ where
             let deleted = executor
                 .exec_delete(tenant_id, &req.resource_type, id)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(EntryError::from_app)?;
 
             if deleted {
                 Ok(success_entry("204 No Content", None, None, None, None))
             } else {
-                Err(EntryError::Failed("resource not found".to_owned()))
+                Err(EntryError::NotFound("resource not found".to_owned()))
             }
         }
-        other => Err(EntryError::Failed(format!(
+        other => Err(EntryError::BadRequest(format!(
             "unsupported HTTP method '{other}'"
         ))),
     }
@@ -1090,17 +1195,12 @@ async fn process_transaction(
         .await
         {
             Ok(resp) => response_entries.push(resp),
-            Err(EntryError::Forbidden(_)) => {
-                // Forbidden entry: abort and roll back the whole transaction.
-                return Err(AppError::Forbidden);
-            }
-            Err(EntryError::PreconditionFailed(msg)) => {
-                return Err(AppError::PreconditionFailed(msg));
-            }
-            Err(EntryError::Failed(msg)) => {
+            Err(entry_err) => {
                 // Transaction mode: any failure aborts the whole thing.
-                // The transaction is dropped (rolled back) automatically.
-                return Err(AppError::BadRequest(format!("transaction failed: {msg}")));
+                // The transaction is dropped (rolled back) automatically, and
+                // we return a top-level OperationOutcome with the entry's
+                // appropriate HTTP status.
+                return Err(entry_err.into_app_error());
             }
         }
     }
@@ -1144,17 +1244,9 @@ async fn process_batch(
         .await
         {
             Ok(resp) => response_entries.push(resp),
-            Err(EntryError::Forbidden(msg)) => {
-                // Forbidden entry: report inline 403 and continue with the rest.
-                response_entries.push(error_entry("403 Forbidden", &msg));
-            }
-            Err(EntryError::PreconditionFailed(msg)) => {
-                response_entries.push(error_entry("412 Precondition Failed", &msg));
-            }
-            Err(EntryError::Failed(msg)) => {
-                // Batch mode: report the error inline but continue processing.
-                response_entries.push(error_entry("400 Bad Request", &msg));
-            }
+            // Batch mode: report the structured error inline and continue. The
+            // OperationOutcome is placed in entry.response.outcome.
+            Err(entry_err) => response_entries.push(error_entry(&entry_err)),
         }
     }
 
@@ -1537,8 +1629,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        SearchPage, assign_resource_id, build_history_bundle, build_search_bundle,
-        parse_search_params, validate_identifier_value, validate_path_resource_type,
+        EntryError, SearchPage, assign_resource_id, build_history_bundle, build_search_bundle,
+        error_entry, parse_search_params, validate_identifier_value, validate_path_resource_type,
         validate_resource_payload,
     };
     use crate::{
@@ -1850,5 +1942,113 @@ mod tests {
                 .expect("diagnostics should be present")
                 .contains("invalid JSON payload")
         );
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // EntryError classification / outcome mapping
+    // ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn entry_error_from_app_preserves_classification() {
+        use crate::error::OperationIssue;
+
+        assert!(matches!(
+            EntryError::from_app(AppError::BadRequest("bad".to_owned())),
+            EntryError::BadRequest(_)
+        ));
+        assert!(matches!(
+            EntryError::from_app(AppError::Forbidden),
+            EntryError::Forbidden(_)
+        ));
+        assert!(matches!(
+            EntryError::from_app(AppError::NotFound),
+            EntryError::NotFound(_)
+        ));
+        assert!(matches!(
+            EntryError::from_app(AppError::Conflict("dup".to_owned())),
+            EntryError::Conflict(_)
+        ));
+        assert!(matches!(
+            EntryError::from_app(AppError::PreconditionFailed("stale".to_owned())),
+            EntryError::PreconditionFailed(_)
+        ));
+        assert!(matches!(
+            EntryError::from_app(AppError::Validation(vec![OperationIssue::error(
+                "invalid",
+                "x"
+            )])),
+            EntryError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn entry_error_internal_never_exposes_db_message() {
+        let db_err = AppError::Database(sqlx::Error::Configuration("sql secrets".into()));
+        let entry_err = EntryError::from_app(db_err);
+        let outcome = entry_err.outcome();
+        let diagnostics = outcome["issue"][0]["diagnostics"]
+            .as_str()
+            .expect("diagnostics present");
+        assert!(!diagnostics.contains("sql secrets"));
+        assert_eq!(entry_err.status_line(), "500 Internal Server Error");
+        assert_eq!(outcome["issue"][0]["code"], "exception");
+
+        let internal = EntryError::from_app(AppError::Internal("boom detail".to_owned()));
+        let outcome = internal.outcome();
+        assert!(!outcome.to_string().contains("boom detail"));
+    }
+
+    #[test]
+    fn entry_error_status_lines_match_http_classes() {
+        assert_eq!(EntryError::BadRequest("x".to_owned()).status_line(), "400 Bad Request");
+        assert_eq!(EntryError::Forbidden("x".to_owned()).status_line(), "403 Forbidden");
+        assert_eq!(EntryError::NotFound("x".to_owned()).status_line(), "404 Not Found");
+        assert_eq!(EntryError::Conflict("x".to_owned()).status_line(), "409 Conflict");
+        assert_eq!(
+            EntryError::PreconditionFailed("x".to_owned()).status_line(),
+            "412 Precondition Failed"
+        );
+        assert_eq!(EntryError::Internal.status_line(), "500 Internal Server Error");
+        assert_eq!(
+            EntryError::Validation(vec![crate::error::OperationIssue::error("invalid", "x")])
+                .status_line(),
+            "400 Bad Request"
+        );
+    }
+
+    #[test]
+    fn error_entry_places_outcome_in_response_not_resource() {
+        let entry = error_entry(&EntryError::NotFound("missing".to_owned()));
+        assert_eq!(entry["response"]["status"], "404 Not Found");
+        assert_eq!(entry["response"]["outcome"]["resourceType"], "OperationOutcome");
+        assert_eq!(entry["response"]["outcome"]["issue"][0]["code"], "not-found");
+        // The outcome must never be placed in entry.resource.
+        assert!(entry.get("resource").is_none());
+    }
+
+    #[test]
+    fn entry_error_into_app_preserves_status_for_transaction_rollback() {
+        assert!(matches!(
+            EntryError::Forbidden("x".to_owned()).into_app_error(),
+            AppError::Forbidden
+        ));
+        assert!(matches!(
+            EntryError::NotFound("x".to_owned()).into_app_error(),
+            AppError::NotFound
+        ));
+        assert!(matches!(
+            EntryError::Conflict("dup".to_owned()).into_app_error(),
+            AppError::Conflict(_)
+        ));
+        assert!(matches!(
+            EntryError::PreconditionFailed("stale".to_owned()).into_app_error(),
+            AppError::PreconditionFailed(_)
+        ));
+        assert!(matches!(
+            EntryError::Validation(vec![crate::error::OperationIssue::error("invalid", "x")])
+                .into_app_error(),
+            AppError::Validation(_)
+        ));
+        assert!(matches!(EntryError::Internal.into_app_error(), AppError::Internal(_)));
     }
 }

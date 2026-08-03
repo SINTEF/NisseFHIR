@@ -496,7 +496,10 @@ async fn batch_continues_on_individual_failure() {
     assert_eq!(entries[2]["response"]["status"], "201 Created");
     // Second failed with OperationOutcome inline
     assert_eq!(entries[1]["response"]["status"], "400 Bad Request");
-    assert_eq!(entries[1]["resource"]["resourceType"], "OperationOutcome");
+    assert_eq!(
+        entries[1]["response"]["outcome"]["resourceType"],
+        "OperationOutcome"
+    );
 
     // Good patient should exist despite the middle failure
     let (s, _) = send_request(
@@ -577,7 +580,7 @@ async fn batch_put_with_if_match_does_not_create_missing_resource() {
         "412 Precondition Failed"
     );
     assert_eq!(
-        body["entry"][0]["resource"]["resourceType"],
+        body["entry"][0]["response"]["outcome"]["resourceType"],
         "OperationOutcome"
     );
     assert_eq!(count_resources(&pool, tenant).await, 0);
@@ -991,7 +994,10 @@ async fn batch_returns_403_for_forbidden_entries_and_continues() {
             entries[i]["response"]["status"], "403 Forbidden",
             "entry {i} must be forbidden"
         );
-        assert_eq!(entries[i]["resource"]["resourceType"], "OperationOutcome");
+        assert_eq!(
+            entries[i]["response"]["outcome"]["resourceType"],
+            "OperationOutcome"
+        );
     }
 
     let full_token = tenant_token(tenant);
@@ -1044,7 +1050,180 @@ async fn batch_get_entry_requires_read_scope() {
     let entries = body["entry"].as_array().unwrap();
     assert_eq!(entries[0]["response"]["status"], "201 Created");
     assert_eq!(entries[1]["response"]["status"], "403 Forbidden");
-    assert_eq!(entries[1]["resource"]["resourceType"], "OperationOutcome");
+    assert_eq!(
+        entries[1]["response"]["outcome"]["resourceType"],
+        "OperationOutcome"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Accurate entry status coverage (400/403/404/412) in batch & transaction
+// ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn batch_get_missing_resource_returns_inline_404() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-batch-404";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [{
+            "request": { "method": "GET", "url": "Patient/does-not-exist" }
+        }]
+    });
+
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let entry = &body["entry"][0];
+    assert_eq!(entry["response"]["status"], "404 Not Found");
+    assert_eq!(entry["response"]["outcome"]["resourceType"], "OperationOutcome");
+    assert_eq!(entry["response"]["outcome"]["issue"][0]["code"], "not-found");
+    assert!(entry.get("resource").is_none());
+}
+
+#[tokio::test]
+async fn batch_delete_missing_resource_returns_inline_404() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-batch-delete-404";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool);
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [{
+            "request": { "method": "DELETE", "url": "Patient/never-existed" }
+        }]
+    });
+
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let entry = &body["entry"][0];
+    assert_eq!(entry["response"]["status"], "404 Not Found");
+    assert_eq!(entry["response"]["outcome"]["issue"][0]["code"], "not-found");
+}
+
+#[tokio::test]
+async fn transaction_rolls_back_with_404_when_entry_resource_missing() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-404";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "tx-404-pat",
+                    "name": [{"family": "ShouldRollBack"}]
+                },
+                "request": { "method": "POST", "url": "Patient" }
+            },
+            {
+                "request": { "method": "GET", "url": "Patient/no-such-resource" }
+            }
+        ]
+    });
+
+    let (status, body) = send_request(app.clone(), bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    assert_eq!(body["resourceType"], "OperationOutcome");
+    assert_eq!(body["issue"][0]["code"], "not-found");
+    // Whole transaction rolled back: the Patient must not exist.
+    let (s, _) = send_request(
+        app,
+        get_resource_with_token("Patient", "tx-404-pat", &token),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn batch_validates_resource_schema_per_entry() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-batch-validation";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "batch-valid-ok",
+                    "name": [{"family": "Good"}]
+                },
+                "request": { "method": "POST", "url": "Patient" }
+            },
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "batch-valid-bad",
+                    "birthDate": "not-a-date"
+                },
+                "request": { "method": "POST", "url": "Patient" }
+            }
+        ]
+    });
+
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let entries = body["entry"].as_array().unwrap();
+    assert_eq!(entries[0]["response"]["status"], "201 Created");
+    assert_eq!(entries[1]["response"]["status"], "400 Bad Request");
+    assert_eq!(
+        entries[1]["response"]["outcome"]["resourceType"],
+        "OperationOutcome"
+    );
+    assert!(
+        !entries[1]["response"]["outcome"]["issue"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(entries[1].get("resource").is_none());
+}
+
+#[tokio::test]
+async fn batch_put_ifmatch_missing_returns_inline_412_outcome() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-batch-412";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool);
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [{
+            "resource": {"resourceType": "Patient", "id": "batch-412-missing"},
+            "request": {
+                "method": "PUT",
+                "url": "Patient/batch-412-missing",
+                "ifMatch": "W/\"1\""
+            }
+        }]
+    });
+
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let entry = &body["entry"][0];
+    assert_eq!(entry["response"]["status"], "412 Precondition Failed");
+    assert_eq!(entry["response"]["outcome"]["resourceType"], "OperationOutcome");
+    assert_eq!(entry["response"]["outcome"]["issue"][0]["code"], "conflict");
+    assert!(entry.get("resource").is_none());
 }
 
 #[tokio::test]
