@@ -73,6 +73,7 @@ pub struct AppState {
     modifiers(&SecurityAddon),
     paths(
         fhir::healthz,
+        fhir::readyz,
         fhir::get_metadata,
         fhir::process_bundle,
         fhir::search_resources,

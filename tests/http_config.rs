@@ -94,6 +94,10 @@ async fn openapi_docs_advertise_bearer_auth_for_protected_routes() {
         document["paths"]["/fhir/{resource_type}"]["get"]["security"][0]["bearer_auth"],
         serde_json::json!([])
     );
+    assert!(
+        document["paths"]["/readyz"]["get"].is_object(),
+        "OpenAPI document should advertise the readiness endpoint"
+    );
 }
 
 #[tokio::test]

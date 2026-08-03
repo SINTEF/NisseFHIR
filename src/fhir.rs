@@ -17,6 +17,7 @@ use crate::{
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/fhir/metadata", get(get_metadata))
         // Temporary backwards-compatible alias. The standard endpoint is
         // `[base]/metadata`, which is `/fhir/metadata` for the built-in base.
@@ -42,6 +43,18 @@ pub fn routes() -> Router<AppState> {
 #[utoipa::path(get, path = "/healthz", responses((status = 200, description = "Server is healthy")))]
 pub async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "ok"})))
+}
+
+#[utoipa::path(get, path = "/readyz", responses((status = 200, description = "Server is ready"), (status = 503, description = "Server is not ready (database unavailable)")))]
+pub async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    if state.store.is_ready().await {
+        (StatusCode::OK, Json(json!({"status": "ready"})))
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "unavailable"})),
+        )
+    }
 }
 
 #[utoipa::path(get, path = "/fhir/metadata", responses((status = 200, description = "FHIR CapabilityStatement")))]
@@ -960,5 +973,61 @@ mod tests {
                 .expect("diagnostics should be present")
                 .contains("invalid JSON payload")
         );
+    }
+
+    fn test_app(database_url: &str) -> AppState {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy(database_url)
+            .expect("lazy pool should build");
+        AppState {
+            store: PgStore::new(pool),
+            auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_SECRET),
+            fhir_base_url: "http://localhost:8080/fhir".to_owned(),
+            search: SearchConfig {
+                default_count: 50,
+                max_count: 500,
+            },
+            validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
+            cors_allowed_origins: Vec::new(),
+            serve_docs: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_200_when_database_reachable() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let app = build_router(test_app(&url));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_503_when_database_unreachable() {
+        let app = build_router(test_app(
+            "postgres://postgres:postgres@127.0.0.1:1/postgres",
+        ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

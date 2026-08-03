@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
 
 use crate::error::AppError;
 use crate::search_params::sql::SearchFilter;
@@ -91,6 +92,17 @@ impl PgStore {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Cheap database-aware readiness check: run `SELECT 1` with a short
+    /// bounded timeout. Returns `false` on any failure or timeout so that
+    /// unready pods are taken out of service without a restart loop.
+    pub async fn is_ready(&self) -> bool {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            sqlx::query("SELECT 1").execute(&self.pool).await
+        })
+        .await
+        .is_ok_and(|result| result.is_ok())
     }
 
     pub async fn read(
@@ -1213,6 +1225,53 @@ mod tests {
         assert_eq!(
             a, b,
             "reordered equivalent conditions must share the same lock key"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_ready_true_when_database_reachable() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy(&database_url)
+            .expect("lazy pool should build");
+        let store = PgStore::new(pool);
+        assert!(store.is_ready().await, "reachable database must be ready");
+    }
+
+    #[tokio::test]
+    async fn is_ready_false_when_database_unreachable() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/postgres")
+            .expect("lazy pool should build");
+        let store = PgStore::new(pool);
+        assert!(
+            !store.is_ready().await,
+            "unreachable database must not be ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_ready_times_out_and_reports_unready() {
+        // A non-routable address that drops packets forces the connection to
+        // hang until the bounded timeout fires; either way the check must
+        // return false without exceeding the bound.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://postgres:postgres@10.255.255.1:5432/postgres")
+            .expect("lazy pool should build");
+        let store = PgStore::new(pool);
+        let start = std::time::Instant::now();
+        assert!(
+            !store.is_ready().await,
+            "unresponsive database must not be ready"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "readiness check must be bounded by its timeout"
         );
     }
 

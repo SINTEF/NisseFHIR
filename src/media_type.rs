@@ -262,10 +262,7 @@ mod tests {
 
     #[test]
     fn rejects_conflicting_fhir_version() {
-        let h = headers(&[(
-            "content-type",
-            "application/fhir+json; fhirVersion=4.0",
-        )]);
+        let h = headers(&[("content-type", "application/fhir+json; fhirVersion=4.0")]);
         let err = validate_request_content_type(&h, BodyKind::FhirResource).expect_err("reject");
         assert!(err.to_string().contains("fhirVersion"));
     }
