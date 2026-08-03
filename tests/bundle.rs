@@ -1080,8 +1080,14 @@ async fn batch_get_missing_resource_returns_inline_404() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let entry = &body["entry"][0];
     assert_eq!(entry["response"]["status"], "404 Not Found");
-    assert_eq!(entry["response"]["outcome"]["resourceType"], "OperationOutcome");
-    assert_eq!(entry["response"]["outcome"]["issue"][0]["code"], "not-found");
+    assert_eq!(
+        entry["response"]["outcome"]["resourceType"],
+        "OperationOutcome"
+    );
+    assert_eq!(
+        entry["response"]["outcome"]["issue"][0]["code"],
+        "not-found"
+    );
     assert!(entry.get("resource").is_none());
 }
 
@@ -1105,7 +1111,10 @@ async fn batch_delete_missing_resource_returns_inline_404() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let entry = &body["entry"][0];
     assert_eq!(entry["response"]["status"], "404 Not Found");
-    assert_eq!(entry["response"]["outcome"]["issue"][0]["code"], "not-found");
+    assert_eq!(
+        entry["response"]["outcome"]["issue"][0]["code"],
+        "not-found"
+    );
 }
 
 #[tokio::test]
@@ -1221,7 +1230,10 @@ async fn batch_put_ifmatch_missing_returns_inline_412_outcome() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let entry = &body["entry"][0];
     assert_eq!(entry["response"]["status"], "412 Precondition Failed");
-    assert_eq!(entry["response"]["outcome"]["resourceType"], "OperationOutcome");
+    assert_eq!(
+        entry["response"]["outcome"]["resourceType"],
+        "OperationOutcome"
+    );
     assert_eq!(entry["response"]["outcome"]["issue"][0]["code"], "conflict");
     assert!(entry.get("resource").is_none());
 }

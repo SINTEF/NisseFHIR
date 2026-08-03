@@ -8,14 +8,10 @@ use axum::{
 use json_patch::patch as apply_json_patch;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use url::form_urlencoded::Serializer;
 use uuid::Uuid;
 
 use crate::{
-    AppState, SearchConfig,
-    auth::{AccessContext, extract_access_context},
-    capability::capability_statement,
-    error::{AppError, OperationIssue},
+    AppState, auth::extract_access_context, capability::capability_statement, error::AppError,
     search_params,
 };
 
@@ -39,20 +35,6 @@ pub fn routes() -> Router<AppState> {
             "/fhir/{resource_type}/{id}/_history",
             get(read_resource_history),
         )
-}
-
-#[derive(Debug)]
-pub struct ParsedSearchParams {
-    count: u32,
-    after_id: Option<String>,
-    filters: Vec<search_params::SearchFilter>,
-    canonical_filters: Vec<(String, String)>,
-}
-
-struct SearchPage<'a> {
-    count: u32,
-    after_id: Option<&'a str>,
-    next_after_id: Option<&'a str>,
 }
 
 #[utoipa::path(get, path = "/healthz", responses((status = 200, description = "Server is healthy")))]
@@ -81,7 +63,7 @@ pub async fn search_resources(
         return Err(AppError::Forbidden);
     }
 
-    let params = parse_search_params(&resource_type, query, state.search)?;
+    let params = crate::search::parse_search_params(&resource_type, query, state.search)?;
     let results = state
         .store
         .search(
@@ -93,10 +75,10 @@ pub async fn search_resources(
         )
         .await?;
 
-    let response = Json(build_search_bundle(
+    let response = Json(crate::search::build_search_bundle(
         &state.fhir_base_url,
         &resource_type,
-        SearchPage {
+        crate::search::SearchPage {
             count: params.count,
             after_id: params.after_id.as_deref(),
             next_after_id: results.next_after_id.as_deref(),
@@ -128,7 +110,7 @@ pub async fn create_resource(
     // Parse the `If-None-Exist` header up front so that an empty or malformed
     // header fails fast with 400 before we touch the request body.
     let if_none_exist_params = match parse_if_none_exist(&headers)? {
-        Some(raw) => Some(parse_if_none_exist_query(
+        Some(raw) => Some(crate::search::parse_if_none_exist_query(
             &resource_type,
             &raw,
             state.search,
@@ -185,12 +167,9 @@ pub async fn create_resource(
                         AppError::Internal(format!("invalid Last-Modified header: {e}"))
                     })?,
                 );
-                return Ok((
-                    StatusCode::OK,
-                    response_headers,
-                    Json(existing.resource),
-                )
-                    .into_response());
+                return Ok(
+                    (StatusCode::OK, response_headers, Json(existing.resource)).into_response()
+                );
             }
             crate::store::ConditionalCreateOutcome::MultipleMatches => {
                 return Err(AppError::PreconditionFailed(
@@ -207,16 +186,18 @@ pub async fn create_resource(
                 );
                 response_headers.insert(
                     "Last-Modified",
-                    HeaderValue::from_str(&stored.last_updated.to_rfc3339())
-                        .map_err(|e| AppError::Internal(format!("invalid Last-Modified header: {e}")))?,
+                    HeaderValue::from_str(&stored.last_updated.to_rfc3339()).map_err(|e| {
+                        AppError::Internal(format!("invalid Last-Modified header: {e}"))
+                    })?,
                 );
                 response_headers.insert(
                     "Location",
                     HeaderValue::from_str(&format!("/fhir/{resource_type}/{stored_id}"))
                         .map_err(|e| AppError::Internal(format!("invalid Location header: {e}")))?,
                 );
-                return Ok((StatusCode::CREATED, response_headers, Json(stored.resource))
-                    .into_response());
+                return Ok(
+                    (StatusCode::CREATED, response_headers, Json(stored.resource)).into_response(),
+                );
             }
         }
     }
@@ -314,7 +295,7 @@ pub async fn read_resource_history(
 
     Ok((
         StatusCode::OK,
-        Json(build_history_bundle(
+        Json(crate::search::build_history_bundle(
             &state.fhir_base_url,
             &resource_type,
             &id,
@@ -601,662 +582,10 @@ pub async fn process_bundle(
         .unwrap_or_default();
 
     if is_transaction {
-        process_transaction(&state, &access, entries).await
+        crate::bundle::process_transaction(&state, &access, entries).await
     } else {
-        process_batch(&state, &access, entries).await
+        crate::bundle::process_batch(&state, &access, entries).await
     }
-}
-
-/// Parse a Bundle entry's `request` into method + url parts.
-struct EntryRequest {
-    method: String,
-    resource_type: String,
-    id: Option<String>,
-    if_match: Option<i64>,
-}
-
-fn parse_entry_request(entry: &Value) -> Result<EntryRequest, String> {
-    let request = entry.get("request").ok_or("entry is missing 'request'")?;
-
-    let method = request
-        .get("method")
-        .and_then(Value::as_str)
-        .ok_or("entry.request.method is required")?
-        .to_uppercase();
-
-    let url = request
-        .get("url")
-        .and_then(Value::as_str)
-        .ok_or("entry.request.url is required")?;
-
-    // URL is relative, e.g. "Patient", "Patient/123", "Observation/abc"
-    let url = url.trim_start_matches('/');
-    let mut parts = url.splitn(2, '/');
-    let resource_type = parts
-        .next()
-        .filter(|s| !s.is_empty())
-        .ok_or("entry.request.url must contain a resource type")?
-        .to_owned();
-    let id = parts.next().map(|s| s.to_owned());
-    let if_match = request
-        .get("ifMatch")
-        .map(|value| {
-            value
-                .as_str()
-                .ok_or_else(|| "entry.request.ifMatch must be a string".to_owned())
-                .and_then(parse_if_match_value)
-        })
-        .transpose()?;
-
-    Ok(EntryRequest {
-        method,
-        resource_type,
-        id,
-        if_match,
-    })
-}
-
-/// Build a single response entry for a successful operation.
-fn success_entry(
-    status: &str,
-    resource: Option<&Value>,
-    location: Option<String>,
-    etag: Option<String>,
-    last_modified: Option<String>,
-) -> Value {
-    let mut response = json!({ "status": status });
-    if let Some(loc) = location {
-        response["location"] = Value::String(loc);
-    }
-    if let Some(etag) = etag {
-        response["etag"] = Value::String(etag);
-    }
-    if let Some(lm) = last_modified {
-        response["lastModified"] = Value::String(lm);
-    }
-    let mut entry = json!({ "response": response });
-    if let Some(res) = resource {
-        entry["resource"] = res.clone();
-    }
-    entry
-}
-
-/// Build a single response entry for a failed operation.
-///
-/// Per the FHIR Bundle spec, the `OperationOutcome` is placed in
-/// `entry.response.outcome`, never in `entry.resource`.
-fn error_entry(err: &EntryError) -> Value {
-    json!({
-        "response": {
-            "status": err.status_line(),
-            "outcome": err.outcome(),
-        }
-    })
-}
-
-/// Error while processing a single Bundle entry.
-///
-/// Carries a structured HTTP classification so batch responses can report
-/// accurate statuses (`400`, `403`, `404`, `409`, `412`, `5xx`) instead of
-/// collapsing every failure to `400 Bad Request`, and so a failed
-/// transaction can roll back with the appropriate top-level status.
-enum EntryError {
-    /// 400 Bad Request — malformed entry or payload.
-    BadRequest(String),
-    /// 403 Forbidden — token lacks access to this resource type/interaction.
-    Forbidden(String),
-    /// 404 Not Found — targeted resource does not exist.
-    NotFound(String),
-    /// 409 Conflict — id collision or duplicate.
-    Conflict(String),
-    /// 412 Precondition Failed — If-Match did not match.
-    PreconditionFailed(String),
-    /// 400 Bad Request with structured OperationOutcome issues.
-    Validation(Vec<OperationIssue>),
-    /// 500 Internal Server Error — internal/DB failure. No message is exposed.
-    Internal,
-}
-
-impl EntryError {
-    /// Map an [`AppError`] returned by the store or validator to an
-    /// [`EntryError`], preserving the HTTP classification and never exposing
-    /// internal database messages or SQL details.
-    fn from_app(err: AppError) -> Self {
-        match err {
-            AppError::Conflict(msg) => EntryError::Conflict(msg),
-            AppError::PreconditionFailed(msg) => EntryError::PreconditionFailed(msg),
-            AppError::Validation(issues) => EntryError::Validation(issues),
-            AppError::BadRequest(msg) => EntryError::BadRequest(msg),
-            AppError::PayloadTooLarge => {
-                EntryError::BadRequest("request payload exceeds the maximum allowed size".to_owned())
-            }
-            AppError::Forbidden => EntryError::Forbidden(
-                "token does not grant access to this resource or interaction".to_owned(),
-            ),
-            AppError::Unauthorized => {
-                EntryError::Forbidden("missing or invalid bearer token".to_owned())
-            }
-            AppError::NotFound => EntryError::NotFound("requested resource was not found".to_owned()),
-            // Database errors and internal errors never expose their message.
-            AppError::Database(_) | AppError::Internal(_) => EntryError::Internal,
-        }
-    }
-
-    /// HTTP status line ("400 Bad Request") used in batch response entries.
-    fn status_line(&self) -> &'static str {
-        match self {
-            EntryError::BadRequest(_) | EntryError::Validation(_) => "400 Bad Request",
-            EntryError::Forbidden(_) => "403 Forbidden",
-            EntryError::NotFound(_) => "404 Not Found",
-            EntryError::Conflict(_) => "409 Conflict",
-            EntryError::PreconditionFailed(_) => "412 Precondition Failed",
-            EntryError::Internal => "500 Internal Server Error",
-        }
-    }
-
-    /// Build the `OperationOutcome` body for this entry failure.
-    fn outcome(&self) -> Value {
-        match self {
-            EntryError::Validation(issues) => {
-                let issue_values: Vec<Value> = issues
-                    .iter()
-                    .map(|issue| serde_json::to_value(issue).unwrap_or_else(|_| {
-                        json!({
-                            "severity": "error",
-                            "code": "invalid",
-                            "diagnostics": "validation failed",
-                        })
-                    }))
-                    .collect();
-                json!({
-                    "resourceType": "OperationOutcome",
-                    "issue": issue_values,
-                })
-            }
-            EntryError::Internal => json!({
-                "resourceType": "OperationOutcome",
-                "issue": [{
-                    "severity": "error",
-                    "code": "exception",
-                    "diagnostics": "internal server error",
-                }],
-            }),
-            EntryError::BadRequest(msg) => issue_outcome("invalid", msg),
-            EntryError::Forbidden(msg) => issue_outcome("forbidden", msg),
-            EntryError::NotFound(msg) => issue_outcome("not-found", msg),
-            EntryError::Conflict(msg) => issue_outcome("conflict", msg),
-            EntryError::PreconditionFailed(msg) => issue_outcome("conflict", msg),
-        }
-    }
-
-    /// Convert back to a top-level [`AppError`] for transaction rollback.
-    fn into_app_error(self) -> AppError {
-        match self {
-            EntryError::BadRequest(msg) => AppError::BadRequest(msg),
-            EntryError::Forbidden(_) => AppError::Forbidden,
-            EntryError::NotFound(_) => AppError::NotFound,
-            EntryError::Conflict(msg) => AppError::Conflict(msg),
-            EntryError::PreconditionFailed(msg) => AppError::PreconditionFailed(msg),
-            EntryError::Validation(issues) => AppError::Validation(issues),
-            EntryError::Internal => AppError::Internal("bundle entry processing failed".to_owned()),
-        }
-    }
-}
-
-fn issue_outcome(code: &str, diagnostics: &str) -> Value {
-    json!({
-        "resourceType": "OperationOutcome",
-        "issue": [{
-            "severity": "error",
-            "code": code,
-            "diagnostics": diagnostics,
-        }],
-    })
-}
-
-impl From<String> for EntryError {
-    fn from(message: String) -> Self {
-        Self::BadRequest(message)
-    }
-}
-
-impl From<&str> for EntryError {
-    fn from(message: &str) -> Self {
-        Self::BadRequest(message.to_owned())
-    }
-}
-
-/// Apply the same resource-type and interaction authorization used by the
-/// standalone CRUD handlers to a single Bundle entry.
-fn authorize_entry(access: &AccessContext, req: &EntryRequest) -> Result<(), EntryError> {
-    let interaction_allowed = match req.method.as_str() {
-        "GET" => access.can_read,
-        // Unknown methods are rejected later as a bad request, not as an
-        // authorization failure.
-        _ => access.can_write,
-    };
-
-    if !interaction_allowed || !access.can_access_resource_type(&req.resource_type) {
-        return Err(EntryError::Forbidden(format!(
-            "token does not grant {} access to resource type '{}'",
-            req.method, req.resource_type
-        )));
-    }
-
-    Ok(())
-}
-
-/// Process a single Bundle entry against the store.
-/// Returns the response entry Value on success.
-async fn process_single_entry<E>(
-    executor: &mut E,
-    tenant_id: &str,
-    entry: &Value,
-    validator: &crate::validation::FhirSchemaValidator,
-    access: &AccessContext,
-) -> Result<Value, EntryError>
-where
-    E: BundleExecutor,
-{
-    let req = parse_entry_request(entry)?;
-    authorize_entry(access, &req)?;
-
-    match req.method.as_str() {
-        "POST" => {
-            // Create
-            let mut resource = entry
-                .get("resource")
-                .cloned()
-                .ok_or("POST entry must include a resource")?;
-
-            validate_resource_payload(&req.resource_type, &resource, None).map_err(EntryError::from_app)?;
-            assign_resource_id(&mut resource, None).map_err(EntryError::from_app)?;
-            validator
-                .validate_resource(&req.resource_type, &resource)
-                .map_err(EntryError::from_app)?;
-
-            let id = resource
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or("resource is missing its id after assignment")?
-                .to_owned();
-            let stored = executor
-                .exec_create(tenant_id, &req.resource_type, &id, resource)
-                .await
-                .map_err(EntryError::from_app)?
-                .ok_or_else(|| {
-                    EntryError::Conflict("a resource with the generated id already exists".to_owned())
-                })?;
-            let id = &stored.id;
-
-            Ok(success_entry(
-                "201 Created",
-                Some(&stored.resource),
-                Some(format!("{}/{}", req.resource_type, id)),
-                Some(format!("W/\"{}\"", stored.version_id)),
-                Some(stored.last_updated.to_rfc3339()),
-            ))
-        }
-        "PUT" => {
-            // Update
-            let id = req
-                .id
-                .as_deref()
-                .ok_or("PUT requires a resource id in the URL")?;
-            let mut resource = entry
-                .get("resource")
-                .cloned()
-                .ok_or("PUT entry must include a resource")?;
-
-            validate_resource_payload(&req.resource_type, &resource, Some(id)).map_err(EntryError::from_app)?;
-            assign_resource_id(&mut resource, Some(id)).map_err(EntryError::from_app)?;
-
-            validator
-                .validate_resource(&req.resource_type, &resource)
-                .map_err(EntryError::from_app)?;
-
-            let (stored, created) = if let Some(expected_version) = req.if_match {
-                let stored = executor
-                    .exec_update_if_version_matches(
-                        tenant_id,
-                        &req.resource_type,
-                        id,
-                        expected_version,
-                        resource,
-                    )
-                    .await
-                    .map_err(EntryError::from_app)?
-                    .ok_or_else(|| {
-                        EntryError::PreconditionFailed(
-                            "If-Match version does not match an existing resource".to_owned(),
-                        )
-                    })?;
-                (stored, false)
-            } else {
-                let result = executor
-                    .exec_upsert(tenant_id, &req.resource_type, id, resource)
-                    .await
-                    .map_err(EntryError::from_app)?;
-                (result.stored, result.created)
-            };
-            let status = if created { "201 Created" } else { "200 OK" };
-
-            Ok(success_entry(
-                status,
-                Some(&stored.resource),
-                Some(format!(
-                    "{}/{}/_history/{}",
-                    req.resource_type, id, stored.version_id
-                )),
-                Some(format!("W/\"{}\"", stored.version_id)),
-                Some(stored.last_updated.to_rfc3339()),
-            ))
-        }
-        "GET" => {
-            // Read
-            let id = req
-                .id
-                .as_deref()
-                .ok_or("GET requires a resource id in the URL")?;
-
-            let found = executor
-                .exec_read(tenant_id, &req.resource_type, id)
-                .await
-                .map_err(EntryError::from_app)?;
-
-            match found {
-                Some(stored) => Ok(success_entry(
-                    "200 OK",
-                    Some(&stored.resource),
-                    None,
-                    Some(format!("W/\"{}\"", stored.version_id)),
-                    Some(stored.last_updated.to_rfc3339()),
-                )),
-                None => Err(EntryError::NotFound(
-                    "resource not found".to_owned(),
-                )),
-            }
-        }
-        "DELETE" => {
-            let id = req
-                .id
-                .as_deref()
-                .ok_or("DELETE requires a resource id in the URL")?;
-
-            let deleted = executor
-                .exec_delete(tenant_id, &req.resource_type, id)
-                .await
-                .map_err(EntryError::from_app)?;
-
-            if deleted {
-                Ok(success_entry("204 No Content", None, None, None, None))
-            } else {
-                Err(EntryError::NotFound("resource not found".to_owned()))
-            }
-        }
-        other => Err(EntryError::BadRequest(format!(
-            "unsupported HTTP method '{other}'"
-        ))),
-    }
-}
-
-/// Trait abstracting database execution for Bundle entries so both
-/// transaction (single TX) and batch (per-entry) modes share the same logic.
-#[allow(async_fn_in_trait)]
-trait BundleExecutor {
-    async fn exec_create(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-        resource: Value,
-    ) -> Result<Option<crate::store::StoredResource>, AppError>;
-
-    async fn exec_upsert(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-        resource: Value,
-    ) -> Result<crate::store::UpsertResult, AppError>;
-
-    async fn exec_update_if_version_matches(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-        expected_version: i64,
-        resource: Value,
-    ) -> Result<Option<crate::store::StoredResource>, AppError>;
-
-    async fn exec_read(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-    ) -> Result<Option<crate::store::StoredResource>, AppError>;
-
-    async fn exec_delete(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-    ) -> Result<bool, AppError>;
-}
-
-/// Executor that operates inside an existing database transaction.
-struct TxBundleExecutor<'a> {
-    tx: crate::store::TxExecutor<'a>,
-}
-
-impl BundleExecutor for TxBundleExecutor<'_> {
-    async fn exec_create(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-        resource: Value,
-    ) -> Result<Option<crate::store::StoredResource>, AppError> {
-        crate::store::PgStore::create_in_tx(&mut self.tx, tenant_id, resource_type, id, resource)
-            .await
-    }
-
-    async fn exec_upsert(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-        resource: Value,
-    ) -> Result<crate::store::UpsertResult, AppError> {
-        crate::store::PgStore::upsert_in_tx(&mut self.tx, tenant_id, resource_type, id, resource)
-            .await
-    }
-
-    async fn exec_update_if_version_matches(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-        expected_version: i64,
-        resource: Value,
-    ) -> Result<Option<crate::store::StoredResource>, AppError> {
-        crate::store::PgStore::update_if_version_matches_in_tx(
-            &mut self.tx,
-            tenant_id,
-            resource_type,
-            id,
-            expected_version,
-            resource,
-        )
-        .await
-    }
-
-    async fn exec_read(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-    ) -> Result<Option<crate::store::StoredResource>, AppError> {
-        crate::store::PgStore::read_in_tx(&mut self.tx, tenant_id, resource_type, id).await
-    }
-
-    async fn exec_delete(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-    ) -> Result<bool, AppError> {
-        crate::store::PgStore::delete_in_tx(&mut self.tx, tenant_id, resource_type, id).await
-    }
-}
-
-/// Executor that uses independent pool connections (for batch mode).
-struct PoolBundleExecutor<'a> {
-    store: &'a crate::store::PgStore,
-}
-
-impl BundleExecutor for PoolBundleExecutor<'_> {
-    async fn exec_create(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-        resource: Value,
-    ) -> Result<Option<crate::store::StoredResource>, AppError> {
-        self.store
-            .create(tenant_id, resource_type, id, resource)
-            .await
-    }
-
-    async fn exec_upsert(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-        resource: Value,
-    ) -> Result<crate::store::UpsertResult, AppError> {
-        self.store
-            .upsert(tenant_id, resource_type, id, resource)
-            .await
-    }
-
-    async fn exec_update_if_version_matches(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-        expected_version: i64,
-        resource: Value,
-    ) -> Result<Option<crate::store::StoredResource>, AppError> {
-        self.store
-            .update_if_version_matches(tenant_id, resource_type, id, expected_version, resource)
-            .await
-    }
-
-    async fn exec_read(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-    ) -> Result<Option<crate::store::StoredResource>, AppError> {
-        self.store.read(tenant_id, resource_type, id).await
-    }
-
-    async fn exec_delete(
-        &mut self,
-        tenant_id: &str,
-        resource_type: &str,
-        id: &str,
-    ) -> Result<bool, AppError> {
-        self.store.delete(tenant_id, resource_type, id).await
-    }
-}
-
-/// Process a `transaction` Bundle: all entries succeed or all fail.
-async fn process_transaction(
-    state: &AppState,
-    access: &AccessContext,
-    entries: Vec<Value>,
-) -> Result<Response, AppError> {
-    let mut executor = TxBundleExecutor {
-        tx: state.store.begin_tx().await?,
-    };
-
-    let mut response_entries = Vec::with_capacity(entries.len());
-
-    for entry in &entries {
-        match process_single_entry(
-            &mut executor,
-            &access.tenant_id,
-            entry,
-            &state.validator,
-            access,
-        )
-        .await
-        {
-            Ok(resp) => response_entries.push(resp),
-            Err(entry_err) => {
-                // Transaction mode: any failure aborts the whole thing.
-                // The transaction is dropped (rolled back) automatically, and
-                // we return a top-level OperationOutcome with the entry's
-                // appropriate HTTP status.
-                return Err(entry_err.into_app_error());
-            }
-        }
-    }
-
-    // All entries succeeded — commit.
-    executor
-        .tx
-        .commit()
-        .await
-        .map_err(|e| AppError::Internal(format!("transaction commit failed: {e}")))?;
-
-    let bundle = json!({
-        "resourceType": "Bundle",
-        "type": "transaction-response",
-        "entry": response_entries,
-    });
-
-    Ok((StatusCode::OK, Json(bundle)).into_response())
-}
-
-/// Process a `batch` Bundle: each entry is independent.
-async fn process_batch(
-    state: &AppState,
-    access: &AccessContext,
-    entries: Vec<Value>,
-) -> Result<Response, AppError> {
-    let mut executor = PoolBundleExecutor {
-        store: &state.store,
-    };
-
-    let mut response_entries = Vec::with_capacity(entries.len());
-
-    for entry in &entries {
-        match process_single_entry(
-            &mut executor,
-            &access.tenant_id,
-            entry,
-            &state.validator,
-            access,
-        )
-        .await
-        {
-            Ok(resp) => response_entries.push(resp),
-            // Batch mode: report the structured error inline and continue. The
-            // OperationOutcome is placed in entry.response.outcome.
-            Err(entry_err) => response_entries.push(error_entry(&entry_err)),
-        }
-    }
-
-    let bundle = json!({
-        "resourceType": "Bundle",
-        "type": "batch-response",
-        "entry": response_entries,
-    });
-
-    Ok((StatusCode::OK, Json(bundle)).into_response())
 }
 
 fn parse_json_payload(
@@ -1295,25 +624,6 @@ fn parse_if_none_exist(headers: &HeaderMap) -> Result<Option<String>, AppError> 
     Ok(Some(raw.to_owned()))
 }
 
-/// Parse the If-None-Exist query string into search filters.
-fn parse_if_none_exist_query(
-    resource_type: &str,
-    query_string: &str,
-    search: SearchConfig,
-) -> Result<ParsedSearchParams, AppError> {
-    let query: BTreeMap<String, String> = url::form_urlencoded::parse(query_string.as_bytes())
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-
-    if query.is_empty() {
-        return Err(AppError::BadRequest(
-            "If-None-Exist must contain at least one search parameter".to_owned(),
-        ));
-    }
-
-    parse_search_params(resource_type, query, search)
-}
-
 fn parse_if_match_version(headers: &HeaderMap) -> Result<Option<i64>, AppError> {
     let Some(header_value) = headers.get("If-Match") else {
         return Ok(None);
@@ -1329,7 +639,7 @@ fn parse_if_match_version(headers: &HeaderMap) -> Result<Option<i64>, AppError> 
         .map_err(AppError::BadRequest)
 }
 
-fn parse_if_match_value(raw: &str) -> Result<i64, String> {
+pub(crate) fn parse_if_match_value(raw: &str) -> Result<i64, String> {
     let raw = raw.trim();
     if raw == "*" {
         return Err(
@@ -1360,7 +670,7 @@ fn parse_if_match_value(raw: &str) -> Result<i64, String> {
 /// `path_resource_type`, and that, when `expected_id` is provided, any `id`
 /// present in the payload matches it. This function is pure: it does not
 /// mutate `body`.
-fn validate_resource_payload(
+pub(crate) fn validate_resource_payload(
     path_resource_type: &str,
     body: &Value,
     expected_id: Option<&str>,
@@ -1396,7 +706,10 @@ fn validate_resource_payload(
 /// payload `id` is rewritten with the URL id. Otherwise (POST/create), a
 /// fresh server-assigned UUIDv4 is generated; a logical id supplied in a POST
 /// representation is source-system metadata and SHALL be ignored.
-fn assign_resource_id(body: &mut Value, expected_id: Option<&str>) -> Result<(), AppError> {
+pub(crate) fn assign_resource_id(
+    body: &mut Value,
+    expected_id: Option<&str>,
+) -> Result<(), AppError> {
     let object = body
         .as_object_mut()
         .ok_or_else(|| AppError::BadRequest("resource payload must be a JSON object".to_owned()))?;
@@ -1417,208 +730,8 @@ fn validate_path_resource_type(resource_type: &str) -> Result<(), AppError> {
     }
 }
 
-fn build_search_bundle(
-    base_url: &str,
-    resource_type: &str,
-    page: SearchPage<'_>,
-    total: i64,
-    resources: Vec<crate::store::StoredResource>,
-    filters: &[(String, String)],
-) -> Value {
-    let base_url = base_url.trim_end_matches('/');
-    let search_url = build_search_url(base_url, resource_type, page.count, page.after_id, filters);
-
-    let mut links = vec![json!({
-        "relation": "self",
-        "url": search_url,
-    })];
-
-    if let Some(next_after_id) = page.next_after_id {
-        links.push(json!({
-            "relation": "next",
-            "url": build_search_url(base_url, resource_type, page.count, Some(next_after_id), filters),
-        }));
-    }
-
-    let entry = resources
-        .into_iter()
-        .map(|stored| {
-            json!({
-                "fullUrl": format!("{base_url}/{resource_type}/{}", stored.id),
-                "resource": stored.resource,
-                "search": {
-                    "mode": "match"
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({
-        "resourceType": "Bundle",
-        "type": "searchset",
-        "total": total,
-        "link": links,
-        "entry": entry,
-    })
-}
-
-fn build_history_bundle(
-    base_url: &str,
-    resource_type: &str,
-    id: &str,
-    history: Vec<crate::store::HistoricalResource>,
-) -> Value {
-    let base_url = base_url.trim_end_matches('/');
-    let self_url = format!("{base_url}/{resource_type}/{id}/_history");
-    let total = history.len() as i64;
-
-    let entry = history
-        .into_iter()
-        .map(|version| {
-            json!({
-                "fullUrl": format!("{base_url}/{resource_type}/{}/_history/{}", version.id, version.version_id),
-                "resource": version.resource,
-                "request": {
-                    "method": if version.deleted { "DELETE" } else { "PUT" },
-                    "url": format!("{resource_type}/{}", version.id),
-                },
-                "response": {
-                    "status": if version.deleted { "410 Gone" } else { "200 OK" },
-                    "etag": format!("W/\"{}\"", version.version_id),
-                    "lastModified": version.last_updated.to_rfc3339(),
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({
-        "resourceType": "Bundle",
-        "type": "history",
-        "total": total,
-        "link": [{
-            "relation": "self",
-            "url": self_url,
-        }],
-        "entry": entry,
-    })
-}
-
-fn parse_search_params(
-    resource_type: &str,
-    query: BTreeMap<String, String>,
-    search: SearchConfig,
-) -> Result<ParsedSearchParams, AppError> {
-    let mut count = search.default_count;
-    let mut after_id = None;
-    let mut filters = Vec::new();
-    let mut canonical_filters = Vec::new();
-
-    // Look up the search parameters supported for this resource type
-    let supported_params = search_params::search_params_for(resource_type);
-
-    for (key, value) in query {
-        match key.as_str() {
-            "_count" => {
-                count = parse_u32_query_param("_count", &value)?;
-                if count > search.max_count {
-                    return Err(AppError::BadRequest(format!(
-                        "_count must be less than or equal to {}",
-                        search.max_count
-                    )));
-                }
-            }
-            "_after_id" => {
-                if value.is_empty() {
-                    return Err(AppError::BadRequest(
-                        "_after_id must not be empty".to_owned(),
-                    ));
-                }
-                after_id = Some(value);
-            }
-            "_offset" => {
-                return Err(AppError::BadRequest(
-                    "_offset is no longer supported; use _after_id cursor pagination".to_owned(),
-                ));
-            }
-            param_code => {
-                // Look up the parameter in the registry
-                if let Some(param) = supported_params.iter().find(|p| p.code == param_code) {
-                    // Validate token-type parameters with pipe syntax
-                    if param.param_type == search_params::SearchParamType::Token
-                        && param_code == "identifier"
-                    {
-                        // Special validation for identifier tokens
-                        validate_identifier_value(&value)?;
-                    }
-
-                    filters.push(search_params::SearchFilter {
-                        param,
-                        value: value.clone(),
-                    });
-                    canonical_filters.push((key, value));
-                } else {
-                    return Err(AppError::BadRequest(format!(
-                        "unsupported search parameter '{param_code}' for resource type '{resource_type}'"
-                    )));
-                }
-            }
-        }
-    }
-
-    Ok(ParsedSearchParams {
-        count,
-        after_id,
-        filters,
-        canonical_filters,
-    })
-}
-
-fn validate_identifier_value(value: &str) -> Result<(), AppError> {
-    if value.is_empty() {
-        return Err(AppError::BadRequest(
-            "identifier must be 'value' or 'system|value'".to_owned(),
-        ));
-    }
-    if let Some((system, id_value)) = value.split_once('|')
-        && (system.is_empty() || id_value.is_empty())
-    {
-        return Err(AppError::BadRequest(
-            "identifier must be 'value' or 'system|value'".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn parse_u32_query_param(name: &str, value: &str) -> Result<u32, AppError> {
-    value
-        .parse::<u32>()
-        .map_err(|_| AppError::BadRequest(format!("{name} must be an unsigned integer")))
-}
-
-fn build_search_url(
-    base_url: &str,
-    resource_type: &str,
-    count: u32,
-    after_id: Option<&str>,
-    filters: &[(String, String)],
-) -> String {
-    let mut serializer = Serializer::new(String::new());
-    serializer.append_pair("_count", &count.to_string());
-
-    if let Some(after_id) = after_id {
-        serializer.append_pair("_after_id", after_id);
-    }
-
-    for (key, value) in filters {
-        serializer.append_pair(key, value);
-    }
-
-    format!("{base_url}/{resource_type}?{}", serializer.finish())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use axum::{
@@ -1628,20 +741,11 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
-    use super::{
-        EntryError, SearchPage, assign_resource_id, build_history_bundle, build_search_bundle,
-        error_entry, parse_search_params, validate_identifier_value, validate_path_resource_type,
-        validate_resource_payload,
-    };
+    use super::{assign_resource_id, validate_path_resource_type, validate_resource_payload};
     use crate::{
-        AppState, SearchConfig,
-        auth::AuthConfig,
-        build_router,
-        error::AppError,
-        store::{HistoricalResource, PgStore, StoredResource},
+        AppState, SearchConfig, auth::AuthConfig, build_router, store::PgStore,
         validation::FhirSchemaValidator,
     };
-    use chrono::Utc;
 
     const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
 
@@ -1676,151 +780,6 @@ mod tests {
             err.to_string()
                 .contains("unsupported FHIR resource type 'ObviouslyNotAValidType'")
         );
-    }
-
-    #[test]
-    fn search_bundle_contains_self_and_next_links() {
-        let bundle = build_search_bundle(
-            "http://localhost:8080/fhir",
-            "Patient",
-            SearchPage {
-                count: 1,
-                after_id: None,
-                next_after_id: Some("example"),
-            },
-            2,
-            vec![StoredResource {
-                id: "example".to_owned(),
-                version_id: 1,
-                last_updated: Utc::now(),
-                resource: json!({
-                    "resourceType": "Patient",
-                    "id": "example"
-                }),
-            }],
-            &[],
-        );
-
-        assert_eq!(bundle["resourceType"], "Bundle");
-        assert_eq!(bundle["type"], "searchset");
-        assert_eq!(bundle["total"], 2);
-        assert_eq!(bundle["link"][0]["relation"], "self");
-        assert_eq!(bundle["link"][1]["relation"], "next");
-        assert_eq!(
-            bundle["link"][1]["url"],
-            "http://localhost:8080/fhir/Patient?_count=1&_after_id=example"
-        );
-        assert_eq!(bundle["entry"][0]["resource"]["id"], "example");
-    }
-
-    #[test]
-    fn history_bundle_contains_versions_including_deletes() {
-        let now = Utc::now();
-        let bundle = build_history_bundle(
-            "http://localhost:8080/fhir",
-            "Patient",
-            "example",
-            vec![
-                HistoricalResource {
-                    id: "example".to_owned(),
-                    version_id: 2,
-                    last_updated: now,
-                    deleted: true,
-                    resource: json!({
-                        "resourceType": "Patient",
-                        "id": "example"
-                    }),
-                },
-                HistoricalResource {
-                    id: "example".to_owned(),
-                    version_id: 1,
-                    last_updated: now,
-                    deleted: false,
-                    resource: json!({
-                        "resourceType": "Patient",
-                        "id": "example"
-                    }),
-                },
-            ],
-        );
-
-        assert_eq!(bundle["resourceType"], "Bundle");
-        assert_eq!(bundle["type"], "history");
-        assert_eq!(bundle["total"], 2);
-        assert_eq!(bundle["link"][0]["relation"], "self");
-        assert_eq!(bundle["entry"][0]["response"]["status"], "410 Gone");
-        assert_eq!(bundle["entry"][0]["response"]["etag"], "W/\"2\"");
-        assert_eq!(bundle["entry"][1]["response"]["status"], "200 OK");
-    }
-
-    #[test]
-    fn parse_search_params_builds_patient_filters() {
-        let params = parse_search_params(
-            "Patient",
-            BTreeMap::from([
-                ("_count".to_owned(), "5".to_owned()),
-                ("name".to_owned(), "peter".to_owned()),
-                (
-                    "identifier".to_owned(),
-                    "urn:oid:1.2.36.146.595.217.0.1|12345".to_owned(),
-                ),
-            ]),
-            SearchConfig {
-                default_count: 50,
-                max_count: 500,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(params.count, 5);
-        assert_eq!(params.after_id, None);
-        assert_eq!(params.filters.len(), 2);
-        assert_eq!(params.canonical_filters.len(), 2);
-    }
-
-    #[test]
-    fn parse_search_params_accepts_after_id_cursor() {
-        let params = parse_search_params(
-            "Patient",
-            BTreeMap::from([("_after_id".to_owned(), "patient-123".to_owned())]),
-            SearchConfig {
-                default_count: 50,
-                max_count: 500,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(params.count, 50);
-        assert_eq!(params.after_id.as_deref(), Some("patient-123"));
-    }
-
-    #[test]
-    fn parse_search_params_rejects_unknown_resource_search_parameter() {
-        let error = parse_search_params(
-            "Patient",
-            BTreeMap::from([("status".to_owned(), "final".to_owned())]),
-            SearchConfig {
-                default_count: 50,
-                max_count: 500,
-            },
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, AppError::BadRequest(_)));
-    }
-
-    #[test]
-    fn validate_identifier_value_accepts_value_or_system_value() {
-        validate_identifier_value("12345").unwrap();
-        validate_identifier_value("urn:test|12345").unwrap();
-    }
-
-    #[test]
-    fn validate_identifier_value_rejects_empty() {
-        validate_identifier_value("").unwrap_err();
-        validate_identifier_value("|").unwrap_err();
-        validate_identifier_value("|12345").unwrap_err();
-        validate_identifier_value("urn:test|").unwrap_err();
     }
 
     #[tokio::test]
@@ -1942,113 +901,5 @@ mod tests {
                 .expect("diagnostics should be present")
                 .contains("invalid JSON payload")
         );
-    }
-
-    // ───────────────────────────────────────────────────────────────
-    // EntryError classification / outcome mapping
-    // ───────────────────────────────────────────────────────────────
-
-    #[test]
-    fn entry_error_from_app_preserves_classification() {
-        use crate::error::OperationIssue;
-
-        assert!(matches!(
-            EntryError::from_app(AppError::BadRequest("bad".to_owned())),
-            EntryError::BadRequest(_)
-        ));
-        assert!(matches!(
-            EntryError::from_app(AppError::Forbidden),
-            EntryError::Forbidden(_)
-        ));
-        assert!(matches!(
-            EntryError::from_app(AppError::NotFound),
-            EntryError::NotFound(_)
-        ));
-        assert!(matches!(
-            EntryError::from_app(AppError::Conflict("dup".to_owned())),
-            EntryError::Conflict(_)
-        ));
-        assert!(matches!(
-            EntryError::from_app(AppError::PreconditionFailed("stale".to_owned())),
-            EntryError::PreconditionFailed(_)
-        ));
-        assert!(matches!(
-            EntryError::from_app(AppError::Validation(vec![OperationIssue::error(
-                "invalid",
-                "x"
-            )])),
-            EntryError::Validation(_)
-        ));
-    }
-
-    #[test]
-    fn entry_error_internal_never_exposes_db_message() {
-        let db_err = AppError::Database(sqlx::Error::Configuration("sql secrets".into()));
-        let entry_err = EntryError::from_app(db_err);
-        let outcome = entry_err.outcome();
-        let diagnostics = outcome["issue"][0]["diagnostics"]
-            .as_str()
-            .expect("diagnostics present");
-        assert!(!diagnostics.contains("sql secrets"));
-        assert_eq!(entry_err.status_line(), "500 Internal Server Error");
-        assert_eq!(outcome["issue"][0]["code"], "exception");
-
-        let internal = EntryError::from_app(AppError::Internal("boom detail".to_owned()));
-        let outcome = internal.outcome();
-        assert!(!outcome.to_string().contains("boom detail"));
-    }
-
-    #[test]
-    fn entry_error_status_lines_match_http_classes() {
-        assert_eq!(EntryError::BadRequest("x".to_owned()).status_line(), "400 Bad Request");
-        assert_eq!(EntryError::Forbidden("x".to_owned()).status_line(), "403 Forbidden");
-        assert_eq!(EntryError::NotFound("x".to_owned()).status_line(), "404 Not Found");
-        assert_eq!(EntryError::Conflict("x".to_owned()).status_line(), "409 Conflict");
-        assert_eq!(
-            EntryError::PreconditionFailed("x".to_owned()).status_line(),
-            "412 Precondition Failed"
-        );
-        assert_eq!(EntryError::Internal.status_line(), "500 Internal Server Error");
-        assert_eq!(
-            EntryError::Validation(vec![crate::error::OperationIssue::error("invalid", "x")])
-                .status_line(),
-            "400 Bad Request"
-        );
-    }
-
-    #[test]
-    fn error_entry_places_outcome_in_response_not_resource() {
-        let entry = error_entry(&EntryError::NotFound("missing".to_owned()));
-        assert_eq!(entry["response"]["status"], "404 Not Found");
-        assert_eq!(entry["response"]["outcome"]["resourceType"], "OperationOutcome");
-        assert_eq!(entry["response"]["outcome"]["issue"][0]["code"], "not-found");
-        // The outcome must never be placed in entry.resource.
-        assert!(entry.get("resource").is_none());
-    }
-
-    #[test]
-    fn entry_error_into_app_preserves_status_for_transaction_rollback() {
-        assert!(matches!(
-            EntryError::Forbidden("x".to_owned()).into_app_error(),
-            AppError::Forbidden
-        ));
-        assert!(matches!(
-            EntryError::NotFound("x".to_owned()).into_app_error(),
-            AppError::NotFound
-        ));
-        assert!(matches!(
-            EntryError::Conflict("dup".to_owned()).into_app_error(),
-            AppError::Conflict(_)
-        ));
-        assert!(matches!(
-            EntryError::PreconditionFailed("stale".to_owned()).into_app_error(),
-            AppError::PreconditionFailed(_)
-        ));
-        assert!(matches!(
-            EntryError::Validation(vec![crate::error::OperationIssue::error("invalid", "x")])
-                .into_app_error(),
-            AppError::Validation(_)
-        ));
-        assert!(matches!(EntryError::Internal.into_app_error(), AppError::Internal(_)));
     }
 }

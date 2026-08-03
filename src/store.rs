@@ -1042,10 +1042,7 @@ mod tests {
             "Patient",
             &[patient_filter("identifier", "x")],
         );
-        assert_ne!(
-            a, b,
-            "different tenants must produce different lock keys"
-        );
+        assert_ne!(a, b, "different tenants must produce different lock keys");
     }
 
     #[test]

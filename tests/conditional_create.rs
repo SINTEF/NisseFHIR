@@ -220,18 +220,27 @@ async fn conditional_create_reordered_parameters_share_lock() {
         post_resource_conditional("Patient", &patient, &token, condition_b),
     )
     .await;
-    assert_eq!(status_b, StatusCode::OK, "second create should hit existing: {body_b}");
+    assert_eq!(
+        status_b,
+        StatusCode::OK,
+        "second create should hit existing: {body_b}"
+    );
 
     // The reordered condition must return the same resource id.
     assert_eq!(body_a["id"], body_b["id"]);
 
     // Exactly one logical resource was persisted for this identifier.
     let count = common::count_resources(&pool, tenant).await;
-    assert_eq!(count, 1, "expected exactly one Patient for the shared condition");
+    assert_eq!(
+        count, 1,
+        "expected exactly one Patient for the shared condition"
+    );
 
-    let history =
-        common::count_history_entries(&pool, tenant).await;
-    assert_eq!(history, 1, "expected a single history entry from the first create");
+    let history = common::count_history_entries(&pool, tenant).await;
+    assert_eq!(
+        history, 1,
+        "expected a single history entry from the first create"
+    );
 
     clean_tenant(&pool, tenant).await;
 }
@@ -265,13 +274,15 @@ async fn conditional_create_concurrent_identical_produces_one_resource() {
     let req_a = post_resource_conditional("Patient", &patient, &token, condition);
     let req_b = post_resource_conditional("Patient", &patient, &token, condition);
 
-    let (res_a, res_b) = tokio::join!(
-        async { send_request(app_a, req_a).await },
-        async { send_request(app_b, req_b).await },
-    );
+    let (res_a, res_b) = tokio::join!(async { send_request(app_a, req_a).await }, async {
+        send_request(app_b, req_b).await
+    },);
 
     let statuses = [res_a.0, res_b.0];
-    let created = statuses.iter().filter(|s| **s == StatusCode::CREATED).count();
+    let created = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::CREATED)
+        .count();
     let matched = statuses.iter().filter(|s| **s == StatusCode::OK).count();
     assert_eq!(
         created, 1,
@@ -283,7 +294,10 @@ async fn conditional_create_concurrent_identical_produces_one_resource() {
     );
 
     let count = common::count_resources(&pool, tenant).await;
-    assert_eq!(count, 1, "exactly one logical resource must remain persisted");
+    assert_eq!(
+        count, 1,
+        "exactly one logical resource must remain persisted"
+    );
 
     clean_tenant(&pool, tenant).await;
 }
@@ -315,13 +329,15 @@ async fn conditional_create_unrelated_conditions_do_not_collide() {
     let req_a = post_resource_conditional("Patient", &patient_a, &token, condition_a);
     let req_b = post_resource_conditional("Patient", &patient_b, &token, condition_b);
 
-    let (res_a, res_b) = tokio::join!(
-        async { send_request(app_a, req_a).await },
-        async { send_request(app_b, req_b).await },
-    );
+    let (res_a, res_b) = tokio::join!(async { send_request(app_a, req_a).await }, async {
+        send_request(app_b, req_b).await
+    },);
     assert_eq!(res_a.0, StatusCode::CREATED, "got: {:?}", res_a);
     assert_eq!(res_b.0, StatusCode::CREATED, "got: {:?}", res_b);
-    assert_ne!(res_a.1["id"], res_b.1["id"], "the two resources must be distinct");
+    assert_ne!(
+        res_a.1["id"], res_b.1["id"],
+        "the two resources must be distinct"
+    );
 
     let count = common::count_resources(&pool, tenant).await;
     assert_eq!(count, 2, "both unrelated resources must be persisted");
