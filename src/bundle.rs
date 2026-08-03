@@ -1,9 +1,12 @@
+use std::collections::{HashMap, HashSet};
+
 use axum::{
     Json,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     AppState,
@@ -106,6 +109,7 @@ fn error_entry(err: &EntryError) -> Value {
 /// accurate statuses (`400`, `403`, `404`, `409`, `412`, `5xx`) instead of
 /// collapsing every failure to `400 Bad Request`, and so a failed
 /// transaction can roll back with the appropriate top-level status.
+#[derive(Debug)]
 enum EntryError {
     /// 400 Bad Request — malformed entry or payload.
     BadRequest(String),
@@ -256,6 +260,171 @@ fn authorize_entry(access: &AccessContext, req: &EntryRequest) -> Result<(), Ent
     Ok(())
 }
 
+/// Identities worked out for a transaction Bundle before any entry executes.
+///
+/// A transaction may reference resources it is creating in the same Bundle,
+/// including forwards and in cycles, so every identity has to be known before
+/// the first write. Planning up front also makes the outcome independent of
+/// entry order.
+struct TransactionPlan {
+    /// `ResourceType/id` per entry, for entries that establish an identity.
+    targets: Vec<Option<String>>,
+    /// Server-assigned id per entry, for `POST` entries only.
+    assigned_ids: Vec<Option<String>>,
+    /// `fullUrl` → `ResourceType/id`, used to rewrite internal links.
+    identities: HashMap<String, String>,
+}
+
+/// Assign ids, reject ambiguous identities, and collect the `fullUrl` mapping
+/// for a transaction Bundle.
+fn plan_transaction(entries: &[Value]) -> Result<TransactionPlan, EntryError> {
+    let mut targets = Vec::with_capacity(entries.len());
+    let mut assigned_ids = Vec::with_capacity(entries.len());
+    let mut identities = HashMap::new();
+    let mut claimed_targets = HashSet::new();
+    let mut seen_full_urls = HashSet::new();
+
+    for entry in entries {
+        let req = parse_entry_request(entry)?;
+
+        // Only creates and updates establish an identity other entries can
+        // point at; reads and deletes target resources that already exist.
+        let (assigned_id, target) = match req.method.as_str() {
+            "POST" => {
+                let id = Uuid::new_v4().to_string();
+                let target = format!("{}/{}", req.resource_type, id);
+                (Some(id), Some(target))
+            }
+            "PUT" => {
+                let id = req
+                    .id
+                    .as_deref()
+                    .ok_or("PUT requires a resource id in the URL")?;
+                (None, Some(format!("{}/{}", req.resource_type, id)))
+            }
+            _ => (None, None),
+        };
+
+        if let Some(target) = &target
+            && !claimed_targets.insert(target.clone())
+        {
+            return Err(EntryError::Conflict(format!(
+                "transaction contains more than one entry targeting '{target}'"
+            )));
+        }
+
+        if let Some(full_url) = entry.get("fullUrl").and_then(Value::as_str)
+            && !full_url.is_empty()
+        {
+            if !seen_full_urls.insert(full_url.to_owned()) {
+                return Err(EntryError::Conflict(format!(
+                    "transaction contains duplicate fullUrl '{full_url}'"
+                )));
+            }
+            if let Some(target) = &target {
+                identities.insert(full_url.to_owned(), target.clone());
+            }
+        }
+
+        targets.push(target);
+        assigned_ids.push(assigned_id);
+    }
+
+    Ok(TransactionPlan {
+        targets,
+        assigned_ids,
+        identities,
+    })
+}
+
+/// Rewrite links in each entry's resource so they use the identities this
+/// server assigned.
+fn resolve_entry_links(entries: &mut [Value], identities: &HashMap<String, String>) {
+    if identities.is_empty() {
+        return;
+    }
+    for entry in entries {
+        if let Some(resource) = entry.get_mut("resource") {
+            resolve_links(resource, identities);
+        }
+    }
+}
+
+/// Replace `fullUrl` links with their resolved identity throughout a resource.
+///
+/// Only `Reference.reference` values and `href`/`src` attributes in narrative
+/// XHTML are rewritten. Other URI-valued elements — canonicals in particular,
+/// which the specification excludes — are left alone, and the traversal is
+/// structural so no string-wide replacement can corrupt unrelated data.
+fn resolve_links(value: &mut Value, identities: &HashMap<String, String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                match (key.as_str(), child) {
+                    ("reference", Value::String(link)) => {
+                        if let Some(resolved) = resolve_link(link, identities) {
+                            *link = resolved;
+                        }
+                    }
+                    ("div", Value::String(div)) => *div = resolve_narrative(div, identities),
+                    (_, child) => resolve_links(child, identities),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                resolve_links(item, identities);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Resolve a single link, matching either the whole value or the URL portion
+/// preceding a fragment. Links without a matching entry are left unchanged, as
+/// the specification requires.
+fn resolve_link(link: &str, identities: &HashMap<String, String>) -> Option<String> {
+    if let Some(target) = identities.get(link) {
+        return Some(target.clone());
+    }
+    let (url, fragment) = link.split_once('#')?;
+    let target = identities.get(url)?;
+    Some(format!("{target}#{fragment}"))
+}
+
+/// Resolve links held in narrative XHTML attributes.
+fn resolve_narrative(div: &str, identities: &HashMap<String, String>) -> String {
+    let mut resolved = div.to_owned();
+    for attribute in ["href=\"", "src=\""] {
+        resolved = resolve_attribute(&resolved, attribute, identities);
+    }
+    resolved
+}
+
+fn resolve_attribute(div: &str, attribute: &str, identities: &HashMap<String, String>) -> String {
+    let mut resolved = String::with_capacity(div.len());
+    let mut rest = div;
+
+    while let Some(start) = rest.find(attribute) {
+        let (head, tail) = rest.split_at(start + attribute.len());
+        resolved.push_str(head);
+        let Some(end) = tail.find('"') else {
+            // Unterminated attribute: leave the remainder untouched.
+            rest = tail;
+            break;
+        };
+        let (link, remainder) = tail.split_at(end);
+        match resolve_link(link, identities) {
+            Some(target) => resolved.push_str(&target),
+            None => resolved.push_str(link),
+        }
+        rest = remainder;
+    }
+
+    resolved.push_str(rest);
+    resolved
+}
+
 /// Process a single Bundle entry against the store.
 /// Returns the response entry Value on success.
 async fn process_single_entry<E>(
@@ -264,6 +433,8 @@ async fn process_single_entry<E>(
     entry: &Value,
     validator: &FhirSchemaValidator,
     access: &AccessContext,
+    // Id reserved for this entry by transaction planning, if any.
+    assigned_id: Option<&str>,
 ) -> Result<Value, EntryError>
 where
     E: BundleExecutor,
@@ -281,7 +452,7 @@ where
 
             validate_resource_payload(&req.resource_type, &resource, None)
                 .map_err(EntryError::from_app)?;
-            assign_resource_id(&mut resource, None).map_err(EntryError::from_app)?;
+            assign_resource_id(&mut resource, assigned_id).map_err(EntryError::from_app)?;
             validator
                 .validate_resource(&req.resource_type, &resource)
                 .map_err(EntryError::from_app)?;
@@ -588,25 +759,38 @@ impl BundleExecutor for PoolBundleExecutor<'_> {
 pub(crate) async fn process_transaction(
     state: &AppState,
     access: &AccessContext,
-    entries: Vec<Value>,
+    mut entries: Vec<Value>,
 ) -> Result<Response, AppError> {
+    // Plan before touching the database, so every entry knows the identity of
+    // every other entry regardless of the order they appear in.
+    let plan = plan_transaction(&entries).map_err(EntryError::into_app_error)?;
+    resolve_entry_links(&mut entries, &plan.identities);
+
+    let base_url = state.fhir_base_url.trim_end_matches('/');
     let mut executor = TxBundleExecutor {
         tx: state.store.begin_tx().await?,
     };
 
     let mut response_entries = Vec::with_capacity(entries.len());
 
-    for entry in &entries {
+    for ((entry, assigned_id), target) in entries.iter().zip(&plan.assigned_ids).zip(&plan.targets)
+    {
         match process_single_entry(
             &mut executor,
             &access.tenant_id,
             entry,
             &state.validator,
             access,
+            assigned_id.as_deref(),
         )
         .await
         {
-            Ok(resp) => response_entries.push(resp),
+            Ok(mut resp) => {
+                if let Some(target) = target {
+                    resp["fullUrl"] = Value::String(format!("{base_url}/{target}"));
+                }
+                response_entries.push(resp);
+            }
             Err(entry_err) => {
                 // Transaction mode: any failure aborts the whole thing.
                 // The transaction is dropped (rolled back) automatically, and
@@ -652,6 +836,9 @@ pub(crate) async fn process_batch(
             entry,
             &state.validator,
             access,
+            // Batch entries are independent, so there is no cross-entry
+            // identity to reserve.
+            None,
         )
         .await
         {
@@ -677,8 +864,147 @@ mod tests {
     // EntryError classification / outcome mapping
     // ───────────────────────────────────────────────────────────────
 
-    use super::{EntryError, error_entry};
+    use super::{EntryError, error_entry, plan_transaction, resolve_entry_links};
     use crate::error::OperationIssue;
+    use serde_json::{Value, json};
+
+    fn post_entry(full_url: &str, resource: Value) -> Value {
+        json!({
+            "fullUrl": full_url,
+            "resource": resource,
+            "request": {"method": "POST", "url": resource_type_of(&resource)},
+        })
+    }
+
+    fn resource_type_of(resource: &Value) -> String {
+        resource["resourceType"]
+            .as_str()
+            .expect("resourceType present")
+            .to_owned()
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Transaction planning and link resolution
+    // ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn plan_assigns_ids_and_maps_full_urls() {
+        let entries = vec![post_entry(
+            "urn:uuid:aaa",
+            json!({"resourceType": "Patient"}),
+        )];
+        let plan = plan_transaction(&entries).expect("plan should succeed");
+
+        let id = plan.assigned_ids[0].as_deref().expect("POST gets an id");
+        assert_eq!(
+            plan.targets[0].as_deref(),
+            Some(format!("Patient/{id}")).as_deref()
+        );
+        assert_eq!(plan.identities["urn:uuid:aaa"], format!("Patient/{id}"));
+    }
+
+    #[test]
+    fn plan_rejects_duplicate_full_urls_and_targets() {
+        let duplicate_full_urls = vec![
+            post_entry("urn:uuid:aaa", json!({"resourceType": "Patient"})),
+            post_entry("urn:uuid:aaa", json!({"resourceType": "Observation"})),
+        ];
+        assert!(matches!(
+            plan_transaction(&duplicate_full_urls),
+            Err(EntryError::Conflict(_))
+        ));
+
+        let overlapping_targets = vec![
+            json!({"request": {"method": "PUT", "url": "Patient/1"}}),
+            json!({"request": {"method": "PUT", "url": "Patient/1"}}),
+        ];
+        assert!(matches!(
+            plan_transaction(&overlapping_targets),
+            Err(EntryError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn resolution_is_independent_of_entry_order() {
+        // The Observation references the Patient that appears after it.
+        let mut entries = vec![
+            post_entry(
+                "urn:uuid:obs",
+                json!({
+                    "resourceType": "Observation",
+                    "subject": {"reference": "urn:uuid:pat"},
+                }),
+            ),
+            post_entry(
+                "urn:uuid:pat",
+                json!({
+                    "resourceType": "Patient",
+                    "link": [{"other": {"reference": "urn:uuid:obs"}}],
+                }),
+            ),
+        ];
+        let plan = plan_transaction(&entries).expect("plan should succeed");
+        resolve_entry_links(&mut entries, &plan.identities);
+
+        let patient = plan.targets[1].as_deref().expect("patient target");
+        let observation = plan.targets[0].as_deref().expect("observation target");
+        assert_eq!(entries[0]["resource"]["subject"]["reference"], patient);
+        assert_eq!(
+            entries[1]["resource"]["link"][0]["other"]["reference"],
+            observation
+        );
+    }
+
+    #[test]
+    fn resolution_handles_fragments_narratives_and_leaves_the_rest_alone() {
+        let mut entries = vec![
+            post_entry(
+                "urn:uuid:pat",
+                json!({
+                    "resourceType": "Patient",
+                    // A canonical that happens to carry the same value must not
+                    // be rewritten.
+                    "meta": {"profile": ["urn:uuid:pat"]},
+                }),
+            ),
+            post_entry(
+                "urn:uuid:obs",
+                json!({
+                    "resourceType": "Observation",
+                    "subject": {"reference": "urn:uuid:pat#section"},
+                    "performer": [{"reference": "urn:uuid:absent"}],
+                    "encounter": {"reference": "http://example.org/fhir/Encounter/7"},
+                    "text": {
+                        "div": "<div><a href=\"urn:uuid:pat\">subject</a> and <a href=\"http://example.org\">other</a></div>",
+                    },
+                }),
+            ),
+        ];
+        let plan = plan_transaction(&entries).expect("plan should succeed");
+        resolve_entry_links(&mut entries, &plan.identities);
+
+        let patient = plan.targets[0].as_deref().expect("patient target");
+        let observation = &entries[1]["resource"];
+
+        assert_eq!(
+            observation["subject"]["reference"],
+            format!("{patient}#section")
+        );
+        // Unmatched and external links are stored as sent.
+        assert_eq!(observation["performer"][0]["reference"], "urn:uuid:absent");
+        assert_eq!(
+            observation["encounter"]["reference"],
+            "http://example.org/fhir/Encounter/7"
+        );
+        assert_eq!(
+            observation["text"]["div"],
+            format!(
+                "<div><a href=\"{patient}\">subject</a> and <a href=\"http://example.org\">other</a></div>"
+            )
+        );
+        // Canonicals are excluded from replacement.
+        assert_eq!(entries[0]["resource"]["meta"]["profile"][0], "urn:uuid:pat");
+    }
 
     #[test]
     fn entry_error_from_app_preserves_classification() {

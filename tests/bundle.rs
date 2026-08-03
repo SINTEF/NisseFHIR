@@ -1276,3 +1276,242 @@ async fn bundle_response_includes_etag_and_location() {
     );
     assert!(entry["response"]["lastModified"].as_str().is_some());
 }
+
+// ──────────────────────────────────────────────────────────────────
+// Transaction internal link resolution
+// ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn transaction_resolves_urn_uuid_references_in_both_directions() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-links";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    // The Observation references a Patient defined *after* it, and the Patient
+    // references the Observation back, so no entry order resolves this without
+    // a planning pass.
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [
+            {
+                "fullUrl": "urn:uuid:11111111-1111-1111-1111-111111111111",
+                "resource": {
+                    "resourceType": "Observation",
+                    "status": "final",
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "1234-5"}]},
+                    "subject": {"reference": "urn:uuid:22222222-2222-2222-2222-222222222222"},
+                    "text": {
+                        "status": "generated",
+                        "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\"><a href=\"urn:uuid:22222222-2222-2222-2222-222222222222\">subject</a></div>"
+                    }
+                },
+                "request": {"method": "POST", "url": "Observation"}
+            },
+            {
+                "fullUrl": "urn:uuid:22222222-2222-2222-2222-222222222222",
+                "resource": {
+                    "resourceType": "Patient",
+                    "name": [{"family": "Linked"}],
+                    "generalPractitioner": [
+                        {"reference": "urn:uuid:11111111-1111-1111-1111-111111111111#top"},
+                        {"reference": "urn:uuid:99999999-9999-9999-9999-999999999999"},
+                        {"reference": "http://example.org/fhir/Practitioner/7"}
+                    ]
+                },
+                "request": {"method": "POST", "url": "Patient"}
+            }
+        ]
+    });
+
+    let (status, body) = send_request(app.clone(), bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let observation_id = body["entry"][0]["resource"]["id"].as_str().unwrap();
+    let patient_id = body["entry"][1]["resource"]["id"].as_str().unwrap();
+
+    // Response entries carry the server's identity for each created resource.
+    assert_eq!(
+        body["entry"][1]["fullUrl"].as_str().unwrap(),
+        format!("http://localhost:8080/fhir/Patient/{patient_id}")
+    );
+    assert_eq!(
+        body["entry"][1]["response"]["location"].as_str().unwrap(),
+        format!("Patient/{patient_id}")
+    );
+
+    // Read both back, to confirm the resolved links were persisted and not
+    // merely echoed in the response.
+    let (status, stored_observation) = send_request(
+        app.clone(),
+        get_resource_with_token("Observation", observation_id, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {stored_observation}");
+    assert_eq!(
+        stored_observation["subject"]["reference"].as_str().unwrap(),
+        format!("Patient/{patient_id}")
+    );
+    assert!(
+        stored_observation["text"]["div"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("href=\"Patient/{patient_id}\"")),
+        "narrative link should be resolved: {}",
+        stored_observation["text"]["div"]
+    );
+
+    let (status, stored_patient) =
+        send_request(app, get_resource_with_token("Patient", patient_id, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {stored_patient}");
+    let practitioners = stored_patient["generalPractitioner"].as_array().unwrap();
+    // Backward reference, resolved with its fragment preserved.
+    assert_eq!(
+        practitioners[0]["reference"].as_str().unwrap(),
+        format!("Observation/{observation_id}#top")
+    );
+    // No matching entry, and an external reference: both stored as sent.
+    assert_eq!(
+        practitioners[1]["reference"].as_str().unwrap(),
+        "urn:uuid:99999999-9999-9999-9999-999999999999"
+    );
+    assert_eq!(
+        practitioners[2]["reference"].as_str().unwrap(),
+        "http://example.org/fhir/Practitioner/7"
+    );
+}
+
+#[tokio::test]
+async fn transaction_resolves_absolute_full_url_for_put_entry() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-absolute";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [
+            {
+                "fullUrl": "http://localhost:8080/fhir/Patient/absolute-pat",
+                "resource": {"resourceType": "Patient", "name": [{"family": "Absolute"}]},
+                "request": {"method": "PUT", "url": "Patient/absolute-pat"}
+            },
+            {
+                "fullUrl": "urn:uuid:33333333-3333-3333-3333-333333333333",
+                "resource": {
+                    "resourceType": "Observation",
+                    "status": "final",
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "1234-5"}]},
+                    "subject": {"reference": "http://localhost:8080/fhir/Patient/absolute-pat"}
+                },
+                "request": {"method": "POST", "url": "Observation"}
+            }
+        ]
+    });
+
+    let (status, body) = send_request(app.clone(), bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let observation_id = body["entry"][1]["resource"]["id"].as_str().unwrap();
+    let (status, stored) = send_request(
+        app,
+        get_resource_with_token("Observation", observation_id, &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {stored}");
+    assert_eq!(
+        stored["subject"]["reference"].as_str().unwrap(),
+        "Patient/absolute-pat"
+    );
+}
+
+#[tokio::test]
+async fn transaction_rejects_duplicate_full_url_before_persisting() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-dup-fullurl";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [
+            {
+                "fullUrl": "urn:uuid:44444444-4444-4444-4444-444444444444",
+                "resource": {"resourceType": "Patient", "name": [{"family": "One"}]},
+                "request": {"method": "POST", "url": "Patient"}
+            },
+            {
+                "fullUrl": "urn:uuid:44444444-4444-4444-4444-444444444444",
+                "resource": {"resourceType": "Patient", "name": [{"family": "Two"}]},
+                "request": {"method": "POST", "url": "Patient"}
+            }
+        ]
+    });
+
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert_eq!(body["resourceType"], "OperationOutcome");
+    assert_eq!(count_resources(&pool, tenant).await, 0);
+}
+
+#[tokio::test]
+async fn transaction_rejects_overlapping_target_identities() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-dup-target";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [
+            {
+                "resource": {"resourceType": "Patient", "name": [{"family": "One"}]},
+                "request": {"method": "PUT", "url": "Patient/same-target"}
+            },
+            {
+                "resource": {"resourceType": "Patient", "name": [{"family": "Two"}]},
+                "request": {"method": "PUT", "url": "Patient/same-target"}
+            }
+        ]
+    });
+
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert_eq!(count_resources(&pool, tenant).await, 0);
+}
+
+#[tokio::test]
+async fn transaction_rolls_back_resolved_links_when_a_later_entry_fails() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-links-rollback";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = tenant_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [
+            {
+                "fullUrl": "urn:uuid:55555555-5555-5555-5555-555555555555",
+                "resource": {"resourceType": "Patient", "name": [{"family": "Rollback"}]},
+                "request": {"method": "POST", "url": "Patient"}
+            },
+            {
+                "request": {"method": "DELETE", "url": "Observation/does-not-exist"}
+            }
+        ]
+    });
+
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    assert_eq!(count_resources(&pool, tenant).await, 0);
+}
