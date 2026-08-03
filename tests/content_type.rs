@@ -100,7 +100,7 @@ async fn metadata_uses_fhir_json_content_type() {
 
     let request = axum::http::Request::builder()
         .method("GET")
-        .uri("/metadata")
+        .uri("/fhir/metadata")
         .body(Body::empty())
         .expect("request should build");
 

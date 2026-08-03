@@ -17,6 +17,9 @@ use crate::{
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/fhir/metadata", get(get_metadata))
+        // Temporary backwards-compatible alias. The standard endpoint is
+        // `[base]/metadata`, which is `/fhir/metadata` for the built-in base.
         .route("/metadata", get(get_metadata))
         .route("/fhir", axum::routing::post(process_bundle))
         .route(
@@ -41,9 +44,12 @@ pub async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "ok"})))
 }
 
-#[utoipa::path(get, path = "/metadata", responses((status = 200, description = "FHIR CapabilityStatement")))]
+#[utoipa::path(get, path = "/fhir/metadata", responses((status = 200, description = "FHIR CapabilityStatement")))]
 pub async fn get_metadata(State(state): State<AppState>) -> impl IntoResponse {
-    Json(capability_statement(&state.fhir_base_url))
+    Json(capability_statement(
+        &state.fhir_base_url,
+        !state.cors_allowed_origins.is_empty(),
+    ))
 }
 
 #[utoipa::path(get, path = "/fhir/{resource_type}",

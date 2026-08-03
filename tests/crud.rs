@@ -655,10 +655,10 @@ async fn metadata_returns_capability_statement() {
     let app = common::build_test_app(pool);
 
     let req = axum::http::Request::builder()
-        .uri("/metadata")
+        .uri("/fhir/metadata")
         .body(axum::body::Body::empty())
         .unwrap();
-    let (status, body) = send_request(app, req).await;
+    let (status, body) = send_request(app.clone(), req).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["resourceType"], "CapabilityStatement");
@@ -667,6 +667,10 @@ async fn metadata_returns_capability_statement() {
     assert_eq!(body["fhirVersion"], "6.0.0-ballot3");
     assert_eq!(body["format"][0], "json");
     assert_eq!(body["implementation"]["url"], "http://localhost:8080/fhir");
+    assert_eq!(
+        body["url"],
+        "https://sintef.github.io/NisseFHIR/CapabilityStatement/nissefhir"
+    );
 
     let rest = &body["rest"][0];
     assert_eq!(rest["mode"], "server");
@@ -676,8 +680,98 @@ async fn metadata_returns_capability_statement() {
             .as_array()
             .unwrap()
             .iter()
+            .all(|resource| resource["type"] != "*")
+    );
+    assert!(
+        rest["resource"]
+            .as_array()
+            .unwrap()
+            .iter()
             .all(|resource| resource["updateCreate"] == true)
     );
+
+    let patient = rest["resource"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|resource| resource["type"] == "Patient")
+        .unwrap();
+    let advertised = patient["interaction"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|interaction| interaction["code"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    let routed = [
+        ("create", "POST", "/fhir/Patient"),
+        ("read", "GET", "/fhir/Patient/route-contract"),
+        (
+            "history-instance",
+            "GET",
+            "/fhir/Patient/route-contract/_history",
+        ),
+        ("update", "PUT", "/fhir/Patient/route-contract"),
+        ("patch", "PATCH", "/fhir/Patient/route-contract"),
+        ("delete", "DELETE", "/fhir/Patient/route-contract"),
+        ("search-type", "GET", "/fhir/Patient"),
+    ];
+    assert_eq!(
+        advertised,
+        routed
+            .iter()
+            .map(|(code, _, _)| *code)
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+    for (code, method, uri) in routed {
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("route contract request should complete");
+        assert_ne!(
+            response.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "advertised {code} interaction has no route"
+        );
+    }
+
+    let system_interactions = rest["interaction"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|interaction| interaction["code"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(system_interactions, ["batch", "transaction"].into());
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/fhir")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = app
+        .oneshot(request)
+        .await
+        .expect("Bundle route contract request should complete");
+    assert_ne!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn legacy_metadata_alias_returns_capability_statement() {
+    let pool = setup_test_db().await;
+    let app = common::build_test_app(pool);
+
+    let req = axum::http::Request::builder()
+        .uri("/metadata")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = send_request(app, req).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["resourceType"], "CapabilityStatement");
 }
 
 // ─── SERVER-ASSIGNED CREATE IDS ─────────────────────────────────────────────

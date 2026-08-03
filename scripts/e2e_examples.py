@@ -562,7 +562,7 @@ def assert_true(condition: bool, message: str) -> None:
 
 
 def verify_metadata(base_url: str) -> None:
-    status, body, _ = request_json("GET", f"{base_url}/metadata")
+    status, body, _ = request_json("GET", f"{base_url}/fhir/metadata")
     assert_equal(status, 200, "metadata endpoint should return 200")
     assert_true(isinstance(body, dict), "metadata response should be a JSON object")
     assert_equal(body.get("resourceType"), "CapabilityStatement", "metadata resourceType")

@@ -12,7 +12,8 @@ Lightweight FHIR 6.0 server implementation in Rust.
 - FHIR `OperationOutcome` error responses for auth and request validation failures
 - Endpoints:
   - `GET /healthz`
-  - `GET /metadata`
+  - `GET /fhir/metadata` (standard `[base]/metadata` endpoint)
+  - `GET /metadata` (temporary legacy alias)
   - `POST /fhir/:resource_type`
   - `GET /fhir/:resource_type/:id`
   - `GET /fhir/:resource_type/:id/_history`
@@ -80,7 +81,13 @@ cargo run
 
 ## Authentication And Docs
 
-Most FHIR endpoints require an `Authorization: Bearer <token>` header. Only `GET /healthz` and `GET /metadata` are intentionally public.
+Most FHIR endpoints require an `Authorization: Bearer <token>` header. Only `GET /healthz`, `GET /fhir/metadata`, and its temporary legacy alias `GET /metadata` are intentionally public.
+
+The CapabilityStatement uses
+`https://sintef.github.io/NisseFHIR/CapabilityStatement/nissefhir` as its stable
+canonical identifier. This identifier is deployment-independent; the
+statement's `implementation.url` contains the configured `FHIR_BASE_URL`, and
+the statement is retrieved from `[FHIR_BASE_URL]/metadata`.
 
 Tenant handling is explicit:
 

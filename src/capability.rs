@@ -2,7 +2,14 @@ use serde_json::{Value, json};
 
 use crate::search_params::{RESOURCE_TYPES, SearchParamType, search_params_for};
 
-pub fn capability_statement(base_url: &str) -> Value {
+/// Stable canonical identifier for the NisseFHIR CapabilityStatement.
+///
+/// This identifies the capability definition. It is deliberately independent
+/// of the deployment-specific URL from which `/fhir/metadata` is retrieved.
+pub const CAPABILITY_STATEMENT_CANONICAL_URL: &str =
+    "https://sintef.github.io/NisseFHIR/CapabilityStatement/nissefhir";
+
+pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
     let generic_interactions = json!([
         {"code": "create"},
         {"code": "read"},
@@ -26,36 +33,17 @@ pub fn capability_statement(base_url: &str) -> Value {
         }),
     ];
 
-    // Build resource entries dynamically from the search parameter registry
-    let mut resource_entries: Vec<Value> = Vec::with_capacity(RESOURCE_TYPES.len() + 1);
-
-    // Wildcard entry with shared pagination params
-    resource_entries.push(json!({
-        "type": "*",
-        "interaction": generic_interactions,
-        "conditionalCreate": true,
-        "updateCreate": true,
-        "searchParam": pagination_params,
-    }));
+    // Build concrete resource entries dynamically from the schema-derived
+    // resource list and the executable search parameter registry.
+    let mut resource_entries: Vec<Value> = Vec::with_capacity(RESOURCE_TYPES.len());
 
     for &rt in RESOURCE_TYPES {
-        let params = search_params_for(rt);
-        if params.is_empty() {
-            // Still list the resource type even if it has no search params
-            resource_entries.push(json!({
-                "type": rt,
-                "interaction": generic_interactions,
-                "conditionalCreate": true,
-                "updateCreate": true,
-            }));
-            continue;
-        }
-
         let mut search_params: Vec<Value> = pagination_params.clone();
-        for sp in params
+        let executable_params = search_params_for(rt)
             .iter()
             .filter(|sp| crate::search_params::sql::is_executable_search_param(sp))
-        {
+            .collect::<Vec<_>>();
+        for sp in &executable_params {
             let type_str = match sp.param_type {
                 SearchParamType::String => "string",
                 SearchParamType::Token => "token",
@@ -76,7 +64,7 @@ pub fn capability_statement(base_url: &str) -> Value {
         resource_entries.push(json!({
             "type": rt,
             "interaction": generic_interactions,
-            "conditionalCreate": true,
+            "conditionalCreate": !executable_params.is_empty(),
             "updateCreate": true,
             "searchParam": search_params,
         }));
@@ -86,19 +74,17 @@ pub fn capability_statement(base_url: &str) -> Value {
 
     json!({
         "resourceType": "CapabilityStatement",
-        "url": format!("{base_url}/metadata"),
+        "url": CAPABILITY_STATEMENT_CANONICAL_URL,
         "version": version,
         "name": "NisseFHIR",
         "title": "NisseFHIR – Lightweight FHIR R6 Server",
         "status": "active",
-        "date": "2026-03-10",
         "publisher": "SINTEF / Invest4Health",
         "description": "A lightweight, stateless FHIR R6 server written in Rust. Supports JSON-only with PostgreSQL JSONB storage, JWT-based multi-tenant authentication, and comprehensive FHIR CRUD with search.",
         "kind": "instance",
         "software": {
             "name": "NisseFHIR",
-            "version": version,
-            "releaseDate": "2026-03-10"
+            "version": version
         },
         "fhirVersion": "6.0.0-ballot3",
         "format": ["json", "application/fhir+json"],
@@ -106,20 +92,13 @@ pub fn capability_statement(base_url: &str) -> Value {
         "rest": [{
             "mode": "server",
             "security": {
-                "cors": true,
+                "cors": cors_enabled,
                 "service": [
                     {
-                        "coding": [
-                            {
-                                "system": "http://terminology.hl7.org/CodeSystem/restful-security-service",
-                                "code": "SMART-on-FHIR",
-                                "display": "SMART on FHIR"
-                            }
-                        ],
-                        "text": "JWT Bearer Token authentication. Tokens must include tenant or sub, scope (read/write), and optionally resource_types claims."
+                        "text": "JWT Bearer token authentication"
                     }
                 ],
-                "description": "This server supports JWT Bearer Token authentication with static keys or a JWKS provider. Tokens encode tenant identity, read/write scopes, and optional resource type restrictions."
+                "description": "JWTs are verified with a configured static key or JWKS provider. A tenant or sub claim selects the tenant. The scope claim recognizes whitespace-separated read and write tokens and currently defaults to both when omitted. An optional resource_types claim restricts resource types. SMART discovery, launch contexts, and SMART clinical scopes are not implemented."
             },
             "resource": resource_entries,
             "interaction": [
@@ -136,13 +115,29 @@ pub fn capability_statement(base_url: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::capability_statement;
+    use std::collections::BTreeSet;
+
+    use super::{CAPABILITY_STATEMENT_CANONICAL_URL, capability_statement as build_statement};
+
+    fn capability_statement(base_url: &str) -> serde_json::Value {
+        build_statement(base_url, false)
+    }
 
     #[test]
     fn capability_has_fhir_resource_type() {
         let value = capability_statement("http://localhost:8080/fhir");
         assert_eq!(value["resourceType"], "CapabilityStatement");
         assert_eq!(value["format"][0], "json");
+    }
+
+    #[test]
+    fn capability_is_valid_fhir_json() {
+        let validator = crate::validation::FhirSchemaValidator::new().unwrap();
+        let value = capability_statement("http://localhost:8080/fhir");
+
+        validator
+            .validate_resource("CapabilityStatement", &value)
+            .unwrap();
     }
 
     #[test]
@@ -238,25 +233,40 @@ mod tests {
         let value = capability_statement("http://localhost:8080/fhir");
         let resources = value["rest"][0]["resource"].as_array().unwrap();
 
-        for resource in resources.iter().filter(|resource| resource["type"] != "*") {
+        assert_eq!(resources.len(), crate::search_params::RESOURCE_TYPES.len());
+        assert!(resources.iter().all(|resource| resource["type"] != "*"));
+
+        for resource in resources {
             let resource_type = resource["type"].as_str().unwrap();
             let advertised = resource["searchParam"]
                 .as_array()
-                .into_iter()
-                .flatten()
+                .unwrap()
+                .iter()
                 .filter_map(|param| param["name"].as_str())
-                .filter(|name| !name.starts_with('_'));
+                .filter(|name| !name.starts_with('_'))
+                .collect::<BTreeSet<_>>();
+            let executable = crate::search_params::search_params_for(resource_type)
+                .iter()
+                .filter(|param| crate::search_params::sql::is_executable_search_param(param))
+                .map(|param| param.code)
+                .collect::<BTreeSet<_>>();
 
-            for name in advertised {
-                let executable = crate::search_params::search_params_for(resource_type)
-                    .iter()
-                    .any(|param| {
-                        param.code == name
-                            && crate::search_params::sql::is_executable_search_param(param)
-                    });
-                assert!(executable, "{resource_type}.{name} is not executable");
-            }
+            assert_eq!(
+                advertised, executable,
+                "registry mismatch for {resource_type}"
+            );
+            assert_eq!(resource["conditionalCreate"], !executable.is_empty());
         }
+    }
+
+    #[test]
+    fn capability_uses_a_stable_canonical_url() {
+        let first = capability_statement("https://one.example/fhir");
+        let second = capability_statement("https://two.example/fhir");
+
+        assert_eq!(first["url"], CAPABILITY_STATEMENT_CANONICAL_URL);
+        assert_eq!(second["url"], CAPABILITY_STATEMENT_CANONICAL_URL);
+        assert_ne!(first["url"], first["implementation"]["url"]);
     }
 
     #[test]
@@ -279,6 +289,8 @@ mod tests {
         assert!(!value["software"]["version"].as_str().unwrap().is_empty());
         assert_eq!(value["name"], "NisseFHIR");
         assert!(value["version"].as_str().unwrap().starts_with("0."));
+        assert!(value.get("date").is_none());
+        assert!(value["software"].get("releaseDate").is_none());
     }
 
     #[test]
@@ -294,9 +306,6 @@ mod tests {
     fn capability_advertises_conditional_create() {
         let value = capability_statement("http://localhost:8080/fhir");
         let resources = value["rest"][0]["resource"].as_array().unwrap();
-        // Wildcard entry
-        assert_eq!(resources[0]["conditionalCreate"], true);
-        // A specific resource type
         let patient = resources.iter().find(|r| r["type"] == "Patient").unwrap();
         assert_eq!(patient["conditionalCreate"], true);
     }
@@ -305,8 +314,27 @@ mod tests {
     fn capability_advertises_update_create() {
         let value = capability_statement("http://localhost:8080/fhir");
         let resources = value["rest"][0]["resource"].as_array().unwrap();
-        assert_eq!(resources[0]["updateCreate"], true);
         let patient = resources.iter().find(|r| r["type"] == "Patient").unwrap();
         assert_eq!(patient["updateCreate"], true);
+    }
+
+    #[test]
+    fn capability_describes_jwt_without_claiming_smart() {
+        let value = capability_statement("http://localhost:8080/fhir");
+        let security = &value["rest"][0]["security"];
+        let serialized = serde_json::to_string(security).unwrap();
+
+        assert!(serialized.contains("JWT Bearer"));
+        assert!(!serialized.contains("SMART-on-FHIR"));
+        assert!(!serialized.contains("Smart-on-FHIR"));
+    }
+
+    #[test]
+    fn capability_reports_instance_cors_configuration() {
+        let disabled = build_statement("http://localhost:8080/fhir", false);
+        let enabled = build_statement("http://localhost:8080/fhir", true);
+
+        assert_eq!(disabled["rest"][0]["security"]["cors"], false);
+        assert_eq!(enabled["rest"][0]["security"]["cors"], true);
     }
 }

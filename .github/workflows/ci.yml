@@ -260,8 +260,8 @@ jobs:
 
       - name: Run E2E smoke test
         run: |
-          # Test capability statement on the public metadata endpoint.
-          curl -sf http://localhost:18080/metadata | jq .resourceType
+          # Test capability statement at the standard FHIR base endpoint.
+          curl -sf http://localhost:18080/fhir/metadata | jq .resourceType
 
       - name: Tear down
         if: always()
