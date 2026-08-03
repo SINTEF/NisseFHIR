@@ -22,6 +22,16 @@ async fn setup(tenant: &str) -> (sqlx::PgPool, String) {
     (pool, token)
 }
 
+async fn create_patient(app: &axum::Router, patient: &serde_json::Value, token: &str) -> String {
+    let (status, created) = send_request(
+        app.clone(),
+        post_resource_with_token("Patient", patient, token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    created["id"].as_str().unwrap().to_owned()
+}
+
 /// Build an authenticated PATCH request.
 fn patch_resource_with_token(
     resource_type: &str,
@@ -62,12 +72,7 @@ async fn patch_add_field() {
         "active": true
     });
 
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let patch = json!([
         {"op": "add", "path": "/birthDate", "value": "1990-01-01"}
@@ -75,7 +80,7 @@ async fn patch_add_field() {
 
     let (status, body) = send_request(
         app,
-        patch_resource_with_token("Patient", "patch-add-1", &patch, &token),
+        patch_resource_with_token("Patient", &id, &patch, &token),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -97,12 +102,7 @@ async fn patch_replace_field() {
         "active": true
     });
 
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let patch = json!([
         {"op": "replace", "path": "/active", "value": false}
@@ -110,7 +110,7 @@ async fn patch_replace_field() {
 
     let (status, body) = send_request(
         app,
-        patch_resource_with_token("Patient", "patch-replace-1", &patch, &token),
+        patch_resource_with_token("Patient", &id, &patch, &token),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -131,12 +131,7 @@ async fn patch_remove_field() {
         "birthDate": "1990-01-01"
     });
 
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let patch = json!([
         {"op": "remove", "path": "/birthDate"}
@@ -144,7 +139,7 @@ async fn patch_remove_field() {
 
     let (status, body) = send_request(
         app,
-        patch_resource_with_token("Patient", "patch-remove-1", &patch, &token),
+        patch_resource_with_token("Patient", &id, &patch, &token),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -185,12 +180,7 @@ async fn patch_invalid_op_returns_400() {
         "active": true
     });
 
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let patch = json!([
         {"op": "replace", "path": "/nonexistent/deep/path", "value": "x"}
@@ -198,7 +188,7 @@ async fn patch_invalid_op_returns_400() {
 
     let (status, body) = send_request(
         app,
-        patch_resource_with_token("Patient", "patch-invalid-op", &patch, &token),
+        patch_resource_with_token("Patient", &id, &patch, &token),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -218,12 +208,7 @@ async fn patch_increments_version() {
         "active": true
     });
 
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let patch = json!([
         {"op": "replace", "path": "/active", "value": false}
@@ -231,12 +216,7 @@ async fn patch_increments_version() {
 
     let response: axum::response::Response = app
         .clone()
-        .oneshot(patch_resource_with_token(
-            "Patient",
-            "patch-version-1",
-            &patch,
-            &token,
-        ))
+        .oneshot(patch_resource_with_token("Patient", &id, &patch, &token))
         .await
         .expect("request should complete");
 
@@ -258,12 +238,7 @@ async fn patch_rejects_resource_type_change() {
         "active": true
     });
 
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let patch = json!([
         {"op": "replace", "path": "/resourceType", "value": "Observation"}
@@ -271,7 +246,7 @@ async fn patch_rejects_resource_type_change() {
 
     let (status, body) = send_request(
         app,
-        patch_resource_with_token("Patient", "patch-type-change", &patch, &token),
+        patch_resource_with_token("Patient", &id, &patch, &token),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -290,12 +265,7 @@ async fn patch_requires_write_scope() {
         "id": "patch-write-scope-1",
         "active": true
     });
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let ro_token = read_only_token("patch-write-scope");
     let patch = json!([
@@ -303,7 +273,7 @@ async fn patch_requires_write_scope() {
     ]);
     let (status, _) = send_request(
         app,
-        patch_resource_with_token("Patient", "patch-write-scope-1", &patch, &ro_token),
+        patch_resource_with_token("Patient", &id, &patch, &ro_token),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -321,12 +291,7 @@ async fn patch_respects_resource_type_restriction() {
         "id": "patch-restrict-1",
         "active": true
     });
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let obs_only_token = restricted_token("patch-restrict", vec!["Observation".to_owned()]);
     let patch = json!([
@@ -334,7 +299,7 @@ async fn patch_respects_resource_type_restriction() {
     ]);
     let (status, _) = send_request(
         app,
-        patch_resource_with_token("Patient", "patch-restrict-1", &patch, &obs_only_token),
+        patch_resource_with_token("Patient", &id, &patch, &obs_only_token),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -352,28 +317,19 @@ async fn patch_result_is_readable() {
         "id": "patch-read-1",
         "active": true
     });
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let patch = json!([
         {"op": "add", "path": "/birthDate", "value": "2000-06-15"}
     ]);
     let (status, _) = send_request(
         app.clone(),
-        patch_resource_with_token("Patient", "patch-read-1", &patch, &token),
+        patch_resource_with_token("Patient", &id, &patch, &token),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, body) = send_request(
-        app,
-        get_resource_with_token("Patient", "patch-read-1", &token),
-    )
-    .await;
+    let (status, body) = send_request(app, get_resource_with_token("Patient", &id, &token)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["birthDate"], "2000-06-15");
     assert_eq!(body["active"], true);
@@ -391,12 +347,7 @@ async fn patch_validates_result_against_schema() {
         "id": "patch-schema-1",
         "active": true
     });
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     // Add an invalid property — schema validation should reject it
     let patch = json!([
@@ -404,7 +355,7 @@ async fn patch_validates_result_against_schema() {
     ]);
     let (status, body) = send_request(
         app,
-        patch_resource_with_token("Patient", "patch-schema-1", &patch, &token),
+        patch_resource_with_token("Patient", &id, &patch, &token),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -423,19 +374,14 @@ async fn patch_rejects_id_removal() {
         "id": "patch-rm-id-1",
         "active": true
     });
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let patch = json!([
         {"op": "remove", "path": "/id"}
     ]);
     let (status, body) = send_request(
         app,
-        patch_resource_with_token("Patient", "patch-rm-id-1", &patch, &token),
+        patch_resource_with_token("Patient", &id, &patch, &token),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -454,19 +400,14 @@ async fn patch_rejects_id_change() {
         "id": "patch-chg-id-1",
         "active": true
     });
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let patch = json!([
         {"op": "replace", "path": "/id", "value": "different-id"}
     ]);
     let (status, body) = send_request(
         app,
-        patch_resource_with_token("Patient", "patch-chg-id-1", &patch, &token),
+        patch_resource_with_token("Patient", &id, &patch, &token),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -483,12 +424,7 @@ async fn patch_without_if_match_succeeds() {
         "id": "patch-missing-if-match-1",
         "active": true
     });
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let patch = json!([
         {"op": "replace", "path": "/active", "value": false}
@@ -496,7 +432,7 @@ async fn patch_without_if_match_succeeds() {
 
     let request = axum::http::Request::builder()
         .method("PATCH")
-        .uri("/fhir/Patient/patch-missing-if-match-1")
+        .uri(format!("/fhir/Patient/{id}"))
         .header("content-type", "application/json-patch+json")
         .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
         .body(axum::body::Body::from(
@@ -519,25 +455,14 @@ async fn patch_stale_if_match_returns_412() {
         "id": "patch-stale-if-match-1",
         "active": true
     });
-    let (status, _) = send_request(
-        app.clone(),
-        post_resource_with_token("Patient", &patient, &token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let id = create_patient(&app, &patient, &token).await;
 
     let patch_true = json!([
         {"op": "replace", "path": "/active", "value": true}
     ]);
     let (status, _) = send_request(
         app.clone(),
-        patch_resource_with_token_if_match(
-            "Patient",
-            "patch-stale-if-match-1",
-            &patch_true,
-            &token,
-            "W/\"1\"",
-        ),
+        patch_resource_with_token_if_match("Patient", &id, &patch_true, &token, "W/\"1\""),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -547,13 +472,7 @@ async fn patch_stale_if_match_returns_412() {
     ]);
     let (status, body) = send_request(
         app.clone(),
-        patch_resource_with_token_if_match(
-            "Patient",
-            "patch-stale-if-match-1",
-            &patch_false,
-            &token,
-            "W/\"1\"",
-        ),
+        patch_resource_with_token_if_match("Patient", &id, &patch_false, &token, "W/\"1\""),
     )
     .await;
     assert_eq!(status, StatusCode::PRECONDITION_FAILED);

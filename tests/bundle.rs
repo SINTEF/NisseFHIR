@@ -7,8 +7,9 @@ use axum::{
 use serde_json::{Value, json};
 
 use common::{
-    build_test_app, clean_tenant, get_resource_with_token, read_only_token, restricted_token,
-    send_request, setup_test_db, tenant_token, write_only_token,
+    build_test_app, clean_tenant, count_resources, get_resource_with_token,
+    post_resource_with_token, read_only_token, restricted_token, send_request, setup_test_db,
+    tenant_token, write_only_token,
 };
 
 fn bundle_request(body: &Value, token: &str) -> Request<Body> {
@@ -72,18 +73,22 @@ async fn transaction_creates_multiple_resources_atomically() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0]["response"]["status"], "201 Created");
     assert_eq!(entries[1]["response"]["status"], "201 Created");
+    let patient_id = entries[0]["resource"]["id"].as_str().unwrap();
+    let observation_id = entries[1]["resource"]["id"].as_str().unwrap();
+    assert_ne!(patient_id, "tx-pat-1");
+    assert_ne!(observation_id, "tx-obs-1");
 
     // Verify both resources exist
     let (s, _) = send_request(
         app.clone(),
-        get_resource_with_token("Patient", "tx-pat-1", &token),
+        get_resource_with_token("Patient", patient_id, &token),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
 
     let (s, _) = send_request(
         app,
-        get_resource_with_token("Observation", "tx-obs-1", &token),
+        get_resource_with_token("Observation", observation_id, &token),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -125,6 +130,7 @@ async fn transaction_rolls_back_on_failure() {
     let (status, body) = send_request(app.clone(), bundle_request(&bundle, &token)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     assert_eq!(body["resourceType"], "OperationOutcome");
+    assert_eq!(count_resources(&pool, tenant).await, 0);
 
     // Patient should NOT exist because transaction was rolled back
     let (s, _) = send_request(
@@ -159,8 +165,12 @@ async fn transaction_with_put_updates_existing() {
             }
         }]
     });
-    let (status, _) = send_request(app.clone(), bundle_request(&create_bundle, &token)).await;
+    let (status, created) = send_request(app.clone(), bundle_request(&create_bundle, &token)).await;
     assert_eq!(status, StatusCode::OK);
+    let id = created["entry"][0]["resource"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     // Now update via PUT in a transaction
     let update_bundle = json!({
@@ -169,12 +179,12 @@ async fn transaction_with_put_updates_existing() {
         "entry": [{
             "resource": {
                 "resourceType": "Patient",
-                "id": "tx-put-pat",
+                "id": id,
                 "name": [{"family": "Updated"}]
             },
             "request": {
                 "method": "PUT",
-                "url": "Patient/tx-put-pat"
+                "url": format!("Patient/{id}")
             }
         }]
     });
@@ -183,11 +193,7 @@ async fn transaction_with_put_updates_existing() {
     assert_eq!(body["entry"][0]["response"]["status"], "200 OK");
 
     // Read back to verify update
-    let (s, patient) = send_request(
-        app,
-        get_resource_with_token("Patient", "tx-put-pat", &token),
-    )
-    .await;
+    let (s, patient) = send_request(app, get_resource_with_token("Patient", &id, &token)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(patient["name"][0]["family"], "Updated");
 }
@@ -216,8 +222,12 @@ async fn transaction_with_delete_removes_resource() {
             }
         }]
     });
-    let (status, _) = send_request(app.clone(), bundle_request(&create_bundle, &token)).await;
+    let (status, created) = send_request(app.clone(), bundle_request(&create_bundle, &token)).await;
     assert_eq!(status, StatusCode::OK);
+    let id = created["entry"][0]["resource"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     // Delete via transaction
     let delete_bundle = json!({
@@ -226,7 +236,7 @@ async fn transaction_with_delete_removes_resource() {
         "entry": [{
             "request": {
                 "method": "DELETE",
-                "url": "Patient/tx-del-pat"
+                "url": format!("Patient/{id}")
             }
         }]
     });
@@ -235,11 +245,7 @@ async fn transaction_with_delete_removes_resource() {
     assert_eq!(body["entry"][0]["response"]["status"], "204 No Content");
 
     // Verify deleted
-    let (s, _) = send_request(
-        app,
-        get_resource_with_token("Patient", "tx-del-pat", &token),
-    )
-    .await;
+    let (s, _) = send_request(app, get_resource_with_token("Patient", &id, &token)).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
@@ -251,37 +257,34 @@ async fn transaction_with_get_reads_resource() {
     let app = build_test_app(pool.clone());
     let token = tenant_token(tenant);
 
-    // Create, then read via GET inside a transaction
+    let create_bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{
+            "resource": {
+                "resourceType": "Patient",
+                "id": "tx-get-pat",
+                "name": [{"family": "Readable"}]
+            },
+            "request": {"method": "POST", "url": "Patient"}
+        }]
+    });
+    let (status, created) = send_request(app.clone(), bundle_request(&create_bundle, &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = created["entry"][0]["resource"]["id"].as_str().unwrap();
+
     let bundle = json!({
         "resourceType": "Bundle",
         "type": "transaction",
-        "entry": [
-            {
-                "resource": {
-                    "resourceType": "Patient",
-                    "id": "tx-get-pat",
-                    "name": [{"family": "Readable"}]
-                },
-                "request": {
-                    "method": "POST",
-                    "url": "Patient"
-                }
-            },
-            {
-                "request": {
-                    "method": "GET",
-                    "url": "Patient/tx-get-pat"
-                }
-            }
-        ]
+        "entry": [{
+            "request": {"method": "GET", "url": format!("Patient/{id}")}
+        }]
     });
-
     let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let entries = body["entry"].as_array().unwrap();
-    assert_eq!(entries[0]["response"]["status"], "201 Created");
-    assert_eq!(entries[1]["response"]["status"], "200 OK");
-    assert_eq!(entries[1]["resource"]["name"][0]["family"], "Readable");
+    assert_eq!(entries[0]["response"]["status"], "200 OK");
+    assert_eq!(entries[0]["resource"]["name"][0]["family"], "Readable");
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -393,7 +396,11 @@ async fn batch_continues_on_individual_failure() {
     // Good patient should exist despite the middle failure
     let (s, _) = send_request(
         app,
-        get_resource_with_token("Patient", "batch-ok-pat", &token),
+        get_resource_with_token(
+            "Patient",
+            entries[0]["resource"]["id"].as_str().unwrap(),
+            &token,
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -570,8 +577,16 @@ async fn transaction_mixed_operations() {
             }
         ]
     });
-    let (s, _) = send_request(app.clone(), bundle_request(&setup, &token)).await;
+    let (s, setup_response) = send_request(app.clone(), bundle_request(&setup, &token)).await;
     assert_eq!(s, StatusCode::OK);
+    let keep_id = setup_response["entry"][0]["resource"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let delete_id = setup_response["entry"][1]["resource"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     // Now do a mixed transaction: update one, delete the other, create a new one
     let mixed = json!({
@@ -581,13 +596,13 @@ async fn transaction_mixed_operations() {
             {
                 "resource": {
                     "resourceType": "Patient",
-                    "id": "mix-keep",
+                    "id": keep_id,
                     "name": [{"family": "Updated"}]
                 },
-                "request": { "method": "PUT", "url": "Patient/mix-keep" }
+                "request": { "method": "PUT", "url": format!("Patient/{keep_id}") }
             },
             {
-                "request": { "method": "DELETE", "url": "Patient/mix-delete" }
+                "request": { "method": "DELETE", "url": format!("Patient/{delete_id}") }
             },
             {
                 "resource": {
@@ -608,11 +623,12 @@ async fn transaction_mixed_operations() {
     assert_eq!(entries[0]["response"]["status"], "200 OK");
     assert_eq!(entries[1]["response"]["status"], "204 No Content");
     assert_eq!(entries[2]["response"]["status"], "201 Created");
+    let observation_id = entries[2]["resource"]["id"].as_str().unwrap();
 
     // Verify state
     let (s, pat) = send_request(
         app.clone(),
-        get_resource_with_token("Patient", "mix-keep", &token),
+        get_resource_with_token("Patient", &keep_id, &token),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -620,14 +636,14 @@ async fn transaction_mixed_operations() {
 
     let (s, _) = send_request(
         app.clone(),
-        get_resource_with_token("Patient", "mix-delete", &token),
+        get_resource_with_token("Patient", &delete_id, &token),
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 
     let (s, _) = send_request(
         app,
-        get_resource_with_token("Observation", "mix-obs", &token),
+        get_resource_with_token("Observation", observation_id, &token),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -711,6 +727,18 @@ async fn batch_returns_403_for_forbidden_entries_and_continues() {
     clean_tenant(&pool, tenant).await;
     let app = build_test_app(pool.clone());
     let token = restricted_token(tenant, vec!["Patient".to_owned()]);
+    let seed = json!({
+        "resourceType": "Patient",
+        "id": "batch-authz-seed",
+        "name": [{"family": "Seed"}]
+    });
+    let (seed_status, seeded) = send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &seed, &token),
+    )
+    .await;
+    assert_eq!(seed_status, StatusCode::CREATED);
+    let patient_id = seeded["id"].as_str().unwrap();
 
     let observation = json!({
         "resourceType": "Observation",
@@ -733,15 +761,15 @@ async fn batch_returns_403_for_forbidden_entries_and_continues() {
                 "request": { "method": "POST", "url": "Patient" }
             },
             {
-                "request": { "method": "GET", "url": "Patient/batch-authz-pat" }
+                "request": { "method": "GET", "url": format!("Patient/{patient_id}") }
             },
             {
                 "resource": {
                     "resourceType": "Patient",
-                    "id": "batch-authz-pat",
+                    "id": patient_id,
                     "name": [{"family": "Updated"}]
                 },
-                "request": { "method": "PUT", "url": "Patient/batch-authz-pat" }
+                "request": { "method": "PUT", "url": format!("Patient/{patient_id}") }
             },
             // Forbidden Observation entries covering all four methods.
             {
@@ -760,7 +788,7 @@ async fn batch_returns_403_for_forbidden_entries_and_continues() {
             },
             // Allowed delete of the Patient created above.
             {
-                "request": { "method": "DELETE", "url": "Patient/batch-authz-pat" }
+                "request": { "method": "DELETE", "url": format!("Patient/{patient_id}") }
             }
         ]
     });
@@ -798,7 +826,7 @@ async fn batch_returns_403_for_forbidden_entries_and_continues() {
     // The allowed Patient was deleted by the final entry.
     let (s, _) = send_request(
         app,
-        get_resource_with_token("Patient", "batch-authz-pat", &full_token),
+        get_resource_with_token("Patient", patient_id, &full_token),
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
@@ -868,11 +896,11 @@ async fn bundle_response_includes_etag_and_location() {
             .unwrap()
             .starts_with("W/\"")
     );
-    assert!(
-        entry["response"]["location"]
-            .as_str()
-            .unwrap()
-            .contains("Patient/etag-pat")
+    let id = entry["resource"]["id"].as_str().unwrap();
+    assert_ne!(id, "etag-pat");
+    assert_eq!(
+        entry["response"]["location"].as_str().unwrap(),
+        format!("Patient/{id}")
     );
     assert!(entry["response"]["lastModified"].as_str().is_some());
 }

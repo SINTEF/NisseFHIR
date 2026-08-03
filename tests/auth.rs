@@ -42,14 +42,14 @@ async fn auth_required_accepts_valid_token() {
     let patient = test_data::minimal_patient();
 
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) =
+    let (status, created) =
         send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(status, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool.clone());
     let (status, _) = send_request(
         app,
-        get_resource_with_token("Patient", "minimal-patient", &token),
+        get_resource_with_token("Patient", created["id"].as_str().unwrap(), &token),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -143,7 +143,7 @@ async fn read_only_token_can_read() {
     let rw_token = tenant_token("auth-ro-read");
     let patient = test_data::minimal_patient();
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) = send_request(
+    let (status, created) = send_request(
         app,
         post_resource_with_token("Patient", &patient, &rw_token),
     )
@@ -155,7 +155,7 @@ async fn read_only_token_can_read() {
     let app = build_test_app_auth_required(pool.clone());
     let (status, _) = send_request(
         app,
-        get_resource_with_token("Patient", "minimal-patient", &ro_token),
+        get_resource_with_token("Patient", created["id"].as_str().unwrap(), &ro_token),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -253,7 +253,7 @@ async fn tenants_are_isolated() {
     // Create under iso-a
     let token_a = tenant_token("iso-a");
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) =
+    let (status, created) =
         send_request(app, post_resource_with_token("Patient", &patient, &token_a)).await;
     assert_eq!(status, StatusCode::CREATED);
 
@@ -261,7 +261,7 @@ async fn tenants_are_isolated() {
     let app = build_test_app_auth_required(pool.clone());
     let (status, _) = send_request(
         app,
-        get_resource_with_token("Patient", "minimal-patient", &token_a),
+        get_resource_with_token("Patient", created["id"].as_str().unwrap(), &token_a),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -271,14 +271,14 @@ async fn tenants_are_isolated() {
     let app = build_test_app_auth_required(pool.clone());
     let (status, _) = send_request(
         app,
-        get_resource_with_token("Patient", "minimal-patient", &token_b),
+        get_resource_with_token("Patient", created["id"].as_str().unwrap(), &token_b),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn different_tenants_can_have_same_id() {
+async fn different_tenants_receive_independent_server_ids() {
     let pool = setup_test_db().await;
     let patient = test_data::minimal_patient();
 
@@ -287,20 +287,23 @@ async fn different_tenants_can_have_same_id() {
     let token_a = tenant_token("dup-a");
     let token_b = tenant_token("dup-b");
 
-    // Both tenants create a Patient with the same id
+    // Both tenants submit the same source id; each receives a server id.
     let app = build_test_app_auth_required(pool.clone());
-    let (s, _) = send_request(app, post_resource_with_token("Patient", &patient, &token_a)).await;
+    let (s, patient_a) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token_a)).await;
     assert_eq!(s, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s, _) = send_request(app, post_resource_with_token("Patient", &patient, &token_b)).await;
+    let (s, patient_b) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token_b)).await;
     assert_eq!(s, StatusCode::CREATED);
+    assert_ne!(patient_a["id"], patient_b["id"]);
 
     // Each can read their own copy
     let app = build_test_app_auth_required(pool.clone());
     let (s, _) = send_request(
         app,
-        get_resource_with_token("Patient", "minimal-patient", &token_a),
+        get_resource_with_token("Patient", patient_a["id"].as_str().unwrap(), &token_a),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -308,7 +311,7 @@ async fn different_tenants_can_have_same_id() {
     let app = build_test_app_auth_required(pool.clone());
     let (s, _) = send_request(
         app,
-        get_resource_with_token("Patient", "minimal-patient", &token_b),
+        get_resource_with_token("Patient", patient_b["id"].as_str().unwrap(), &token_b),
     )
     .await;
     assert_eq!(s, StatusCode::OK);

@@ -42,7 +42,7 @@ async fn search_returns_searchset_bundle() {
     let token = tenant_token("search-bundle");
 
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) = send_request(
+    let (status, created) = send_request(
         app,
         post_resource_with_token("Patient", &test_data::minimal_patient(), &token),
     )
@@ -57,7 +57,7 @@ async fn search_returns_searchset_bundle() {
     assert_eq!(body["resourceType"], "Bundle");
     assert_eq!(body["type"], "searchset");
     assert_eq!(body["total"], 1);
-    assert_eq!(body["entry"][0]["resource"]["id"], "minimal-patient");
+    assert_eq!(body["entry"][0]["resource"]["id"], created["id"]);
     assert_eq!(body["entry"][0]["search"]["mode"], "match");
 }
 
@@ -67,15 +67,18 @@ async fn search_uses_cursor_pagination() {
     clean_tenant(&pool, "search-paging").await;
     let token = tenant_token("search-paging");
 
+    let mut created_ids = Vec::new();
     for id in ["patient-a", "patient-b", "patient-c"] {
         let mut patient = test_data::minimal_patient();
         patient["id"] = serde_json::json!(id);
 
         let app = build_test_app_auth_required(pool.clone());
-        let (status, _) =
+        let (status, created) =
             send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
         assert_eq!(status, StatusCode::CREATED);
+        created_ids.push(created["id"].as_str().unwrap().to_owned());
     }
+    created_ids.sort();
 
     let app = build_test_app_auth_required(pool.clone());
     let (status, first_page) = send_request(
@@ -86,7 +89,7 @@ async fn search_uses_cursor_pagination() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(first_page["total"], 3);
-    assert_eq!(entry_ids(&first_page), vec!["patient-a", "patient-b"]);
+    assert_eq!(entry_ids(&first_page), created_ids[..2]);
     assert_eq!(
         first_page["link"][0]["url"],
         "http://localhost:8080/fhir/Patient?_count=2"
@@ -94,18 +97,25 @@ async fn search_uses_cursor_pagination() {
     assert_eq!(first_page["link"][1]["relation"], "next");
     assert_eq!(
         first_page["link"][1]["url"],
-        "http://localhost:8080/fhir/Patient?_count=2&_after_id=patient-b"
+        format!(
+            "http://localhost:8080/fhir/Patient?_count=2&_after_id={}",
+            created_ids[1]
+        )
     );
 
     let app = build_test_app_auth_required(pool);
     let (status, second_page) = send_request(
         app,
-        search_resource_with_token("Patient", Some("_count=2&_after_id=patient-b"), &token),
+        search_resource_with_token(
+            "Patient",
+            Some(&format!("_count=2&_after_id={}", created_ids[1])),
+            &token,
+        ),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(entry_ids(&second_page), vec!["patient-c"]);
+    assert_eq!(entry_ids(&second_page), created_ids[2..]);
     assert_eq!(second_page["link"].as_array().unwrap().len(), 1);
 }
 
@@ -115,15 +125,17 @@ async fn search_cursor_pagination_traverses_many_filtered_results() {
     clean_tenant(&pool, "search-many-pages").await;
     let token = tenant_token("search-many-pages");
 
+    let mut expected_ids = Vec::new();
     for index in 0..25 {
         let mut patient = test_data::patient_infant();
         patient["id"] = serde_json::json!(format!("patient-{index:03}"));
         patient["name"][0]["family"] = serde_json::json!("Cursor");
 
         let app = build_test_app_auth_required(pool.clone());
-        let (status, _) =
+        let (status, created) =
             send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
         assert_eq!(status, StatusCode::CREATED);
+        expected_ids.push(created["id"].as_str().unwrap().to_owned());
     }
 
     for index in 0..4 {
@@ -161,9 +173,7 @@ async fn search_cursor_pagination_traverses_many_filtered_results() {
         });
     }
 
-    let expected_ids = (0..25)
-        .map(|index| format!("patient-{index:03}"))
-        .collect::<Vec<_>>();
+    expected_ids.sort();
 
     assert_eq!(page_count, 4);
     assert_eq!(collected_ids, expected_ids);
@@ -229,7 +239,7 @@ async fn patient_search_filters_by_name() {
     let token = tenant_token("search-patient-name");
 
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) = send_request(
+    let (status, peter) = send_request(
         app,
         post_resource_with_token("Patient", &test_data::patient_peter_chalmers(), &token),
     )
@@ -253,7 +263,7 @@ async fn patient_search_filters_by_name() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 1);
-    assert_eq!(body["entry"][0]["resource"]["id"], "example");
+    assert_eq!(body["entry"][0]["resource"]["id"], peter["id"]);
 }
 
 #[tokio::test]
@@ -263,7 +273,7 @@ async fn patient_search_filters_by_birthdate() {
     let token = tenant_token("search-patient-birthdate");
 
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) = send_request(
+    let (status, peter) = send_request(
         app,
         post_resource_with_token("Patient", &test_data::patient_peter_chalmers(), &token),
     )
@@ -287,7 +297,7 @@ async fn patient_search_filters_by_birthdate() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 1);
-    assert_eq!(body["entry"][0]["resource"]["id"], "example");
+    assert_eq!(body["entry"][0]["resource"]["id"], peter["id"]);
 }
 
 #[tokio::test]
@@ -297,7 +307,7 @@ async fn patient_search_filters_by_identifier_value_and_system() {
     let token = tenant_token("search-patient-identifier");
 
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) = send_request(
+    let (status, peter) = send_request(
         app,
         post_resource_with_token("Patient", &test_data::patient_peter_chalmers(), &token),
     )
@@ -317,7 +327,7 @@ async fn patient_search_filters_by_identifier_value_and_system() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 1);
-    assert_eq!(body["entry"][0]["resource"]["id"], "example");
+    assert_eq!(body["entry"][0]["resource"]["id"], peter["id"]);
 }
 
 #[tokio::test]
@@ -327,7 +337,7 @@ async fn observation_search_filters_by_code_status_and_subject() {
     let token = tenant_token("search-observation-filters");
 
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) = send_request(
+    let (status, glucose) = send_request(
         app,
         post_resource_with_token(
             "Observation",
@@ -363,7 +373,7 @@ async fn observation_search_filters_by_code_status_and_subject() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 1);
-    assert_eq!(body["entry"][0]["resource"]["id"], "blood-glucose-example");
+    assert_eq!(body["entry"][0]["resource"]["id"], glucose["id"]);
 }
 
 #[tokio::test]
@@ -372,16 +382,19 @@ async fn search_preserves_filters_in_self_and_next_links() {
     clean_tenant(&pool, "search-links").await;
     let token = tenant_token("search-links");
 
+    let mut created_ids = Vec::new();
     for id in ["patient-a", "patient-b", "patient-c"] {
         let mut patient = test_data::patient_infant();
         patient["id"] = serde_json::json!(id);
         patient["name"][0]["family"] = serde_json::json!("Smith");
 
         let app = build_test_app_auth_required(pool.clone());
-        let (status, _) =
+        let (status, created) =
             send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
         assert_eq!(status, StatusCode::CREATED);
+        created_ids.push(created["id"].as_str().unwrap().to_owned());
     }
+    created_ids.sort();
 
     let app = build_test_app_auth_required(pool);
     let (status, body) = send_request(
@@ -397,7 +410,10 @@ async fn search_preserves_filters_in_self_and_next_links() {
     );
     assert_eq!(
         body["link"][1]["url"],
-        "http://localhost:8080/fhir/Patient?_count=2&_after_id=patient-b&name=smith"
+        format!(
+            "http://localhost:8080/fhir/Patient?_count=2&_after_id={}&name=smith",
+            created_ids[1]
+        )
     );
 }
 

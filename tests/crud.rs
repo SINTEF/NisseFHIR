@@ -11,6 +11,7 @@ use common::{
     get_resource_with_token, post_resource_with_token, put_resource_with_token,
     put_resource_with_token_if_match, send_request, setup_test_db, tenant_token, test_data,
 };
+use fhir_server::store::PgStore;
 use sqlx::Row;
 use tower::ServiceExt;
 
@@ -35,7 +36,8 @@ async fn create_patient_returns_201_with_resource() {
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["resourceType"], "Patient");
-    assert_eq!(body["id"], "example");
+    assert_ne!(body["id"], "example", "POST must ignore the submitted id");
+    assert_eq!(body["id"].as_str().unwrap().len(), 36);
     assert_eq!(body["name"][0]["family"], "Chalmers");
 }
 
@@ -69,7 +71,8 @@ async fn create_patient_returns_correct_headers() {
         .expect("Location header must be present")
         .to_str()
         .unwrap();
-    assert_eq!(location, "/fhir/Patient/minimal-patient");
+    assert!(location.starts_with("/fhir/Patient/"));
+    assert_ne!(location, "/fhir/Patient/minimal-patient");
 
     assert!(
         response.headers().get("Last-Modified").is_some(),
@@ -134,9 +137,9 @@ async fn read_after_create_returns_same_resource() {
     assert_eq!(status, StatusCode::CREATED);
 
     // Read
+    let id = created["id"].as_str().unwrap();
     let app = build_test_app_auth_required(pool);
-    let (status, read) =
-        send_request(app, get_resource_with_token("Patient", "example", &token)).await;
+    let (status, read) = send_request(app, get_resource_with_token("Patient", id, &token)).await;
     assert_eq!(status, StatusCode::OK);
 
     assert_eq!(created, read, "Read resource must match created resource");
@@ -148,15 +151,13 @@ async fn read_returns_etag_and_last_modified() {
     let patient = test_data::minimal_patient();
 
     let app = build_test_app_auth_required(pool.clone());
-    let _ = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (_, created) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let id = created["id"].as_str().unwrap();
 
     let app = build_test_app_auth_required(pool);
     let response = app
-        .oneshot(get_resource_with_token(
-            "Patient",
-            "minimal-patient",
-            &token,
-        ))
+        .oneshot(get_resource_with_token("Patient", id, &token))
         .await
         .expect("request should complete");
 
@@ -187,14 +188,12 @@ async fn read_wrong_resource_type_returns_404() {
     let patient = test_data::minimal_patient();
 
     let app = build_test_app_auth_required(pool.clone());
-    let _ = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (_, created) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let id = created["id"].as_str().unwrap();
 
     let app = build_test_app_auth_required(pool);
-    let (status, _) = send_request(
-        app,
-        get_resource_with_token("Observation", "minimal-patient", &token),
-    )
-    .await;
+    let (status, _) = send_request(app, get_resource_with_token("Observation", id, &token)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -206,15 +205,17 @@ async fn update_resource_returns_200() {
     let patient = test_data::minimal_patient();
 
     let app = build_test_app_auth_required(pool.clone());
-    let _ = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (_, created) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let id = created["id"].as_str().unwrap().to_owned();
 
-    let mut updated = patient.clone();
+    let mut updated = created;
     updated["active"] = serde_json::json!(true);
 
     let app = build_test_app_auth_required(pool);
     let (status, body) = send_request(
         app,
-        put_resource_with_token("Patient", "minimal-patient", &updated, &token),
+        put_resource_with_token("Patient", &id, &updated, &token),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -228,24 +229,16 @@ async fn update_increments_version() {
 
     // Create (v1)
     let app = build_test_app_auth_required(pool.clone());
-    let resp = app
-        .oneshot(post_resource_with_token("Patient", &patient, &token))
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.headers().get("ETag").unwrap().to_str().unwrap(),
-        "W/\"1\""
-    );
+    let (status, patient) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = patient["id"].as_str().unwrap().to_owned();
 
     // Update (v2)
     let app = build_test_app_auth_required(pool.clone());
     let resp = app
         .oneshot(put_resource_with_token_if_match(
-            "Patient",
-            "minimal-patient",
-            &patient,
-            &token,
-            "W/\"1\"",
+            "Patient", &id, &patient, &token, "W/\"1\"",
         ))
         .await
         .unwrap();
@@ -258,11 +251,7 @@ async fn update_increments_version() {
     let app = build_test_app_auth_required(pool);
     let resp = app
         .oneshot(put_resource_with_token_if_match(
-            "Patient",
-            "minimal-patient",
-            &patient,
-            &token,
-            "W/\"2\"",
+            "Patient", &id, &patient, &token, "W/\"2\"",
         ))
         .await
         .unwrap();
@@ -278,23 +267,17 @@ async fn create_and_update_write_history_versions() {
     let patient = test_data::minimal_patient();
 
     let app = build_test_app_auth_required(pool.clone());
-    let response = app
-        .oneshot(post_resource_with_token("Patient", &patient, &token))
-        .await
-        .expect("create should complete");
-    assert_eq!(response.status(), StatusCode::CREATED);
+    let (status, created) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_owned();
 
-    let mut updated = patient.clone();
+    let mut updated = created;
     updated["active"] = serde_json::json!(true);
 
     let app = build_test_app_auth_required(pool.clone());
     let response = app
-        .oneshot(put_resource_with_token(
-            "Patient",
-            "minimal-patient",
-            &updated,
-            &token,
-        ))
+        .oneshot(put_resource_with_token("Patient", &id, &updated, &token))
         .await
         .expect("update should complete");
     assert_eq!(response.status(), StatusCode::OK);
@@ -308,11 +291,12 @@ async fn create_and_update_write_history_versions() {
         r#"
         SELECT version_id, deleted
         FROM fhir_resource_history
-        WHERE tenant_id = $1 AND resource_type = 'Patient' AND id = 'minimal-patient'
+        WHERE tenant_id = $1 AND resource_type = 'Patient' AND id = $2
         ORDER BY version_id ASC
         "#,
     )
     .bind("crud-history-versions")
+    .bind(&id)
     .fetch_all(&pool)
     .await
     .expect("history query should succeed");
@@ -339,17 +323,19 @@ async fn update_sets_id_from_url() {
     let app = build_test_app_auth_required(pool.clone());
     let mut create = test_data::minimal_patient();
     create["id"] = serde_json::json!("url-id-test");
-    let (status, _) = send_request(app, post_resource_with_token("Patient", &create, &token)).await;
+    let (status, created) =
+        send_request(app, post_resource_with_token("Patient", &create, &token)).await;
     assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap();
 
     let app = build_test_app_auth_required(pool);
     let (status, body) = send_request(
         app,
-        put_resource_with_token("Patient", "url-id-test", &patient, &token),
+        put_resource_with_token("Patient", id, &patient, &token),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["id"], "url-id-test");
+    assert_eq!(body["id"], id);
 }
 
 #[tokio::test]
@@ -361,13 +347,15 @@ async fn update_rejects_mismatched_id() {
     let app = build_test_app_auth_required(pool.clone());
     let mut create = test_data::minimal_patient();
     create["id"] = serde_json::json!("url-id");
-    let (status, _) = send_request(app, post_resource_with_token("Patient", &create, &token)).await;
+    let (status, created) =
+        send_request(app, post_resource_with_token("Patient", &create, &token)).await;
     assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap();
 
     let app = build_test_app_auth_required(pool);
     let (status, body) = send_request(
         app,
-        put_resource_with_token("Patient", "url-id", &patient, &token),
+        put_resource_with_token("Patient", id, &patient, &token),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -382,15 +370,14 @@ async fn update_rejects_mismatched_resource_type() {
     let app = build_test_app_auth_required(pool.clone());
     let mut create = test_data::minimal_patient();
     create["id"] = serde_json::json!("minimal-obs");
-    let (status, _) = send_request(app, post_resource_with_token("Patient", &create, &token)).await;
+    let (status, created) =
+        send_request(app, post_resource_with_token("Patient", &create, &token)).await;
     assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap();
 
     let app = build_test_app_auth_required(pool);
-    let (status, body) = send_request(
-        app,
-        put_resource_with_token("Patient", "minimal-obs", &obs, &token),
-    )
-    .await;
+    let (status, body) =
+        send_request(app, put_resource_with_token("Patient", id, &obs, &token)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["resourceType"], "OperationOutcome");
 }
@@ -402,7 +389,7 @@ async fn roundtrip_all_valid_resources() {
     let (pool, token) = setup("crud-roundtrip").await;
 
     for (resource_type, resource) in test_data::all_valid_resources() {
-        let id = resource["id"].as_str().expect("test resource must have id");
+        let submitted_id = resource["id"].as_str().expect("test resource must have id");
 
         // Create
         let app = build_test_app_auth_required(pool.clone());
@@ -414,8 +401,12 @@ async fn roundtrip_all_valid_resources() {
         assert_eq!(
             status,
             StatusCode::CREATED,
-            "Failed to create {resource_type}/{id}: {created}"
+            "Failed to create {resource_type}/{submitted_id}: {created}"
         );
+        let id = created["id"]
+            .as_str()
+            .expect("created resource must have id");
+        assert_ne!(id, submitted_id);
 
         // Read back
         let app = build_test_app_auth_required(pool.clone());
@@ -440,17 +431,19 @@ async fn multiple_resources_coexist() {
     let obs = test_data::minimal_observation();
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s, _) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (s, created_patient) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(s, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s, _) = send_request(app, post_resource_with_token("Observation", &obs, &token)).await;
+    let (s, created_observation) =
+        send_request(app, post_resource_with_token("Observation", &obs, &token)).await;
     assert_eq!(s, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool.clone());
     let (s, _) = send_request(
         app,
-        get_resource_with_token("Patient", "minimal-patient", &token),
+        get_resource_with_token("Patient", created_patient["id"].as_str().unwrap(), &token),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -458,7 +451,11 @@ async fn multiple_resources_coexist() {
     let app = build_test_app_auth_required(pool.clone());
     let (s, _) = send_request(
         app,
-        get_resource_with_token("Observation", "minimal-obs", &token),
+        get_resource_with_token(
+            "Observation",
+            created_observation["id"].as_str().unwrap(),
+            &token,
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -472,17 +469,18 @@ async fn update_preserves_all_fields() {
     let patient = test_data::patient_peter_chalmers();
 
     let app = build_test_app_auth_required(pool.clone());
-    let (status, _) =
+    let (status, created) =
         send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_owned();
 
-    let mut updated = patient.clone();
+    let mut updated = created;
     updated["active"] = serde_json::json!(false);
 
     let app = build_test_app_auth_required(pool.clone());
     let (status, body) = send_request(
         app,
-        put_resource_with_token("Patient", "example", &updated, &token),
+        put_resource_with_token("Patient", &id, &updated, &token),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -498,16 +496,17 @@ async fn update_without_if_match_succeeds() {
     let app = build_test_app_auth_required(pool.clone());
     let patient = test_data::minimal_patient();
 
-    let (status, _) = send_request(
+    let (status, patient) = send_request(
         app.clone(),
         post_resource_with_token("Patient", &patient, &token),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
+    let id = patient["id"].as_str().unwrap();
     let request = axum::http::Request::builder()
         .method("PUT")
-        .uri("/fhir/Patient/minimal-patient")
+        .uri(format!("/fhir/Patient/{id}"))
         .header("content-type", "application/json")
         .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
         .body(axum::body::Body::from(
@@ -526,25 +525,20 @@ async fn update_stale_if_match_returns_412() {
     let app = build_test_app_auth_required(pool.clone());
     let patient = test_data::minimal_patient();
 
-    let (status, _) = send_request(
+    let (status, patient) = send_request(
         app.clone(),
         post_resource_with_token("Patient", &patient, &token),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
+    let id = patient["id"].as_str().unwrap().to_owned();
 
     let mut first_update = patient.clone();
     first_update["active"] = serde_json::json!(true);
 
     let (status, _) = send_request(
         app.clone(),
-        put_resource_with_token_if_match(
-            "Patient",
-            "minimal-patient",
-            &first_update,
-            &token,
-            "W/\"1\"",
-        ),
+        put_resource_with_token_if_match("Patient", &id, &first_update, &token, "W/\"1\""),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -554,13 +548,7 @@ async fn update_stale_if_match_returns_412() {
 
     let (status, body) = send_request(
         app.clone(),
-        put_resource_with_token_if_match(
-            "Patient",
-            "minimal-patient",
-            &stale_update,
-            &token,
-            "W/\"1\"",
-        ),
+        put_resource_with_token_if_match("Patient", &id, &stale_update, &token, "W/\"1\""),
     )
     .await;
 
@@ -568,11 +556,7 @@ async fn update_stale_if_match_returns_412() {
     assert_eq!(body["resourceType"], "OperationOutcome");
     assert_eq!(body["issue"][0]["code"], "conflict");
 
-    let (status, body) = send_request(
-        app,
-        get_resource_with_token("Patient", "minimal-patient", &token),
-    )
-    .await;
+    let (status, body) = send_request(app, get_resource_with_token("Patient", &id, &token)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["active"], true);
 }
@@ -618,22 +602,62 @@ async fn metadata_returns_capability_statement() {
     assert!(rest["resource"].is_array());
 }
 
-// ─── IDEMPOTENT UPSERT ─────────────────────────────────────────────────────
+// ─── SERVER-ASSIGNED CREATE IDS ─────────────────────────────────────────────
 
 #[tokio::test]
-async fn double_create_upserts_same_resource() {
+async fn repeated_create_ignores_submitted_id_and_creates_distinct_resources() {
     let (pool, token) = setup("crud-double-create").await;
     let patient = test_data::minimal_patient();
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s1, _) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (s1, first) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(s1, StatusCode::CREATED);
 
     let app = build_test_app_auth_required(pool.clone());
-    let (s2, _) = send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+    let (s2, second) =
+        send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
     assert_eq!(s2, StatusCode::CREATED);
 
-    assert_eq!(count_resources(&pool, "crud-double-create").await, 1);
+    assert_ne!(first["id"], "minimal-patient");
+    assert_ne!(second["id"], "minimal-patient");
+    assert_ne!(first["id"], second["id"]);
+    assert_eq!(count_resources(&pool, "crud-double-create").await, 2);
+}
+
+#[tokio::test]
+async fn concurrent_store_creates_for_same_identity_have_one_winner() {
+    let tenant = "crud-concurrent-create";
+    let (pool, _) = setup(tenant).await;
+    let store = PgStore::new(pool.clone());
+    let resource = serde_json::json!({
+        "resourceType": "Patient",
+        "id": "generated-collision",
+        "active": true
+    });
+
+    let first_store = store.clone();
+    let first_resource = resource.clone();
+    let first = async move {
+        first_store
+            .create(tenant, "Patient", "generated-collision", first_resource)
+            .await
+    };
+    let second = async move {
+        store
+            .create(tenant, "Patient", "generated-collision", resource)
+            .await
+    };
+
+    let (first, second) = tokio::join!(first, second);
+    let winners = [first.unwrap(), second.unwrap()]
+        .into_iter()
+        .filter(Option::is_some)
+        .count();
+
+    assert_eq!(winners, 1);
+    assert_eq!(count_resources(&pool, tenant).await, 1);
+    assert_eq!(count_history_entries(&pool, tenant).await, 1);
 }
 
 // ─── PAYLOAD TOO LARGE ─────────────────────────────────────────────────────

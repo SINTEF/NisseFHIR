@@ -135,6 +135,62 @@ impl PgStore {
         })
     }
 
+    /// Create a resource without ever changing an existing logical resource.
+    ///
+    /// Returns `None` if the generated logical id is already present. The
+    /// current-row insert and initial history insert are one SQL statement, so
+    /// concurrent attempts for the same tenant, type, and id cannot both win.
+    pub async fn create(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+    ) -> Result<Option<StoredResource>, AppError> {
+        let row = sqlx::query(
+            r#"
+            WITH created AS (
+                INSERT INTO fhir_resources (
+                    tenant_id, resource_type, id, version_id, resource
+                )
+                SELECT $1, $2, $3, 1, $4
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM fhir_resource_history
+                    WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+                )
+                ON CONFLICT (resource_type, tenant_id, id) DO NOTHING
+                RETURNING version_id, last_updated, resource
+            )
+            INSERT INTO fhir_resource_history (
+                tenant_id,
+                resource_type,
+                id,
+                version_id,
+                last_updated,
+                deleted,
+                resource
+            )
+            SELECT $1, $2, $3, version_id, last_updated, FALSE, resource
+            FROM created
+            RETURNING version_id, last_updated, resource
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(resource)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|row| StoredResource {
+            id: id.to_owned(),
+            version_id: row.get::<i64, _>("version_id"),
+            last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
+            resource: row.get::<Value, _>("resource"),
+        }))
+    }
+
     pub async fn update_if_version_matches(
         &self,
         tenant_id: &str,
@@ -405,6 +461,52 @@ impl PgStore {
     /// Begin a database transaction for Bundle transaction processing.
     pub async fn begin_tx(&self) -> Result<TxExecutor<'_>, AppError> {
         Ok(self.pool.begin().await?)
+    }
+
+    /// Create a resource inside an existing transaction without overwriting.
+    pub async fn create_in_tx(
+        tx: &mut TxExecutor<'_>,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+    ) -> Result<Option<StoredResource>, AppError> {
+        let row = sqlx::query(
+            r#"
+            WITH created AS (
+                INSERT INTO fhir_resources (
+                    tenant_id, resource_type, id, version_id, resource
+                )
+                SELECT $1, $2, $3, 1, $4
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM fhir_resource_history
+                    WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+                )
+                ON CONFLICT (resource_type, tenant_id, id) DO NOTHING
+                RETURNING version_id, last_updated, resource
+            )
+            INSERT INTO fhir_resource_history (
+                tenant_id, resource_type, id, version_id, last_updated, deleted, resource
+            )
+            SELECT $1, $2, $3, version_id, last_updated, FALSE, resource
+            FROM created
+            RETURNING version_id, last_updated, resource
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .bind(resource)
+        .fetch_optional(&mut **tx)
+        .await?;
+
+        Ok(row.map(|row| StoredResource {
+            id: id.to_owned(),
+            version_id: row.get::<i64, _>("version_id"),
+            last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
+            resource: row.get::<Value, _>("resource"),
+        }))
     }
 
     /// Upsert a resource inside an existing transaction.

@@ -173,18 +173,22 @@ pub async fn create_resource(
     }
 
     let Json(mut body) = parse_json_payload(payload)?;
-    validate_resource_payload(&resource_type, &mut body, None)?;
+    validate_resource_payload(&resource_type, &body, None)?;
+    assign_resource_id(&mut body, None)?;
+    state.validator.validate_resource(&resource_type, &body)?;
+
     let id = body
         .get("id")
         .and_then(Value::as_str)
-        .ok_or_else(|| AppError::BadRequest("resource id is required".to_owned()))?;
-
-    state.validator.validate_resource(&resource_type, &body)?;
-
+        .ok_or_else(|| AppError::Internal("resource is missing its id after assignment".to_owned()))?;
     let stored = state
         .store
-        .upsert(&access.tenant_id, &resource_type, id, body.clone())
-        .await?;
+        .create(&access.tenant_id, &resource_type, id, body.clone())
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict("a resource with the generated id already exists".to_owned())
+        })?;
+    let id = &stored.id;
 
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -297,7 +301,8 @@ pub async fn update_resource(
     let expected_version = parse_if_match_version(&headers)?;
 
     let Json(mut body) = parse_json_payload(payload)?;
-    validate_resource_payload(&resource_type, &mut body, Some(&id))?;
+    validate_resource_payload(&resource_type, &body, Some(&id))?;
+    assign_resource_id(&mut body, Some(&id))?;
     state.validator.validate_resource(&resource_type, &body)?;
 
     let updated = match expected_version {
@@ -692,22 +697,28 @@ where
                 .cloned()
                 .ok_or("POST entry must include a resource")?;
 
-            validate_resource_payload(&req.resource_type, &mut resource, None)
+            validate_resource_payload(&req.resource_type, &resource, None)
                 .map_err(|e| e.to_string())?;
-            let id = resource
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or("resource id is required after validation")?
-                .to_owned();
-
+            assign_resource_id(&mut resource, None).map_err(|e| e.to_string())?;
             validator
                 .validate_resource(&req.resource_type, &resource)
                 .map_err(|e| e.to_string())?;
 
+            let id = resource
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("resource is missing its id after assignment")?
+                .to_owned();
             let stored = executor
-                .exec_upsert(tenant_id, &req.resource_type, &id, resource)
+                .exec_create(tenant_id, &req.resource_type, &id, resource)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| {
+                    EntryError::Failed(
+                        "a resource with the generated id already exists".to_owned(),
+                    )
+                })?;
+            let id = &stored.id;
 
             Ok(success_entry(
                 "201 Created",
@@ -728,8 +739,9 @@ where
                 .cloned()
                 .ok_or("PUT entry must include a resource")?;
 
-            validate_resource_payload(&req.resource_type, &mut resource, Some(id))
+            validate_resource_payload(&req.resource_type, &resource, Some(id))
                 .map_err(|e| e.to_string())?;
+            assign_resource_id(&mut resource, Some(id)).map_err(|e| e.to_string())?;
 
             validator
                 .validate_resource(&req.resource_type, &resource)
@@ -798,6 +810,14 @@ where
 /// transaction (single TX) and batch (per-entry) modes share the same logic.
 #[allow(async_fn_in_trait)]
 trait BundleExecutor {
+    async fn exec_create(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+    ) -> Result<Option<crate::store::StoredResource>, AppError>;
+
     async fn exec_upsert(
         &mut self,
         tenant_id: &str,
@@ -827,6 +847,17 @@ struct TxBundleExecutor<'a> {
 }
 
 impl BundleExecutor for TxBundleExecutor<'_> {
+    async fn exec_create(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+    ) -> Result<Option<crate::store::StoredResource>, AppError> {
+        crate::store::PgStore::create_in_tx(&mut self.tx, tenant_id, resource_type, id, resource)
+            .await
+    }
+
     async fn exec_upsert(
         &mut self,
         tenant_id: &str,
@@ -863,6 +894,18 @@ struct PoolBundleExecutor<'a> {
 }
 
 impl BundleExecutor for PoolBundleExecutor<'_> {
+    async fn exec_create(
+        &mut self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+    ) -> Result<Option<crate::store::StoredResource>, AppError> {
+        self.store
+            .create(tenant_id, resource_type, id, resource)
+            .await
+    }
+
     async fn exec_upsert(
         &mut self,
         tenant_id: &str,
@@ -1080,13 +1123,17 @@ fn parse_if_match_version(headers: &HeaderMap) -> Result<Option<i64>, AppError> 
     Ok(Some(version))
 }
 
+/// Validate that `body` is a JSON object whose `resourceType` matches
+/// `path_resource_type`, and that, when `expected_id` is provided, any `id`
+/// present in the payload matches it. This function is pure: it does not
+/// mutate `body`.
 fn validate_resource_payload(
     path_resource_type: &str,
-    body: &mut Value,
+    body: &Value,
     expected_id: Option<&str>,
 ) -> Result<(), AppError> {
     let object = body
-        .as_object_mut()
+        .as_object()
         .ok_or_else(|| AppError::BadRequest("resource payload must be a JSON object".to_owned()))?;
 
     let resource_type = object
@@ -1100,19 +1147,30 @@ fn validate_resource_payload(
         )));
     }
 
-    if let Some(id) = expected_id {
-        if let Some(payload_id) = object.get("id").and_then(Value::as_str)
-            && payload_id != id
-        {
-            return Err(AppError::BadRequest(
-                "resource id in payload does not match URL id".to_owned(),
-            ));
-        }
-        object.insert("id".to_owned(), Value::String(id.to_owned()));
-    } else if object.get("id").and_then(Value::as_str).is_none() {
-        object.insert("id".to_owned(), Value::String(Uuid::new_v4().to_string()));
+    if let Some(id) = expected_id
+        && let Some(payload_id) = object.get("id").and_then(Value::as_str)
+        && payload_id != id
+    {
+        return Err(AppError::BadRequest(
+            "resource id in payload does not match URL id".to_owned(),
+        ));
     }
 
+    Ok(())
+}
+
+/// Assign the resource `id`. When `expected_id` is `Some` (PUT/update), the
+/// payload `id` is rewritten with the URL id. Otherwise (POST/create), a
+/// fresh server-assigned UUIDv4 is generated; a logical id supplied in a POST
+/// representation is source-system metadata and SHALL be ignored.
+fn assign_resource_id(body: &mut Value, expected_id: Option<&str>) -> Result<(), AppError> {
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| AppError::BadRequest("resource payload must be a JSON object".to_owned()))?;
+    let id = expected_id
+        .map(|id| id.to_owned())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    object.insert("id".to_owned(), Value::String(id));
     Ok(())
 }
 
@@ -1338,8 +1396,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        SearchPage, build_history_bundle, build_search_bundle, parse_search_params,
-        validate_identifier_value, validate_path_resource_type, validate_resource_payload,
+        SearchPage, assign_resource_id, build_history_bundle, build_search_bundle,
+        parse_search_params, validate_identifier_value, validate_path_resource_type,
+        validate_resource_payload,
     };
     use crate::{
         AppState, SearchConfig,
@@ -1356,14 +1415,24 @@ mod tests {
     #[test]
     fn generates_id_for_create() {
         let mut body = json!({"resourceType": "Patient"});
-        validate_resource_payload("Patient", &mut body, None).expect("valid payload");
+        validate_resource_payload("Patient", &body, None).expect("valid payload");
+        assign_resource_id(&mut body, None).expect("id assigned");
         assert!(body.get("id").and_then(|v| v.as_str()).is_some());
     }
 
     #[test]
+    fn create_ignores_submitted_id() {
+        let mut body = json!({"resourceType": "Patient", "id": "source-id"});
+        validate_resource_payload("Patient", &body, None).expect("valid payload");
+        assign_resource_id(&mut body, None).expect("id assigned");
+        assert_ne!(body["id"], "source-id");
+        assert_eq!(body["id"].as_str().unwrap().len(), 36);
+    }
+
+    #[test]
     fn rejects_mismatched_type() {
-        let mut body = json!({"resourceType": "Observation"});
-        let err = validate_resource_payload("Patient", &mut body, None).expect_err("must fail");
+        let body = json!({"resourceType": "Observation"});
+        let err = validate_resource_payload("Patient", &body, None).expect_err("must fail");
         assert!(err.to_string().contains("does not match path"));
     }
 
