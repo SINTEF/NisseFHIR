@@ -74,6 +74,11 @@ config:
   # Serve Swagger/OpenAPI docs
   serveDocs: "false"
 
+  # Graceful-shutdown drain window in seconds (maps to SHUTDOWN_TIMEOUT_SECS).
+  # The server stops accepting connections on SIGTERM and waits up to this
+  # bound for in-flight requests before forcing exit.
+  shutdownTimeoutSecs: "10"
+
   # Rust log level
   rustLog: "fhir_server=info,tower_http=info"
 

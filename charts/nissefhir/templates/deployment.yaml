@@ -96,6 +96,10 @@ spec:
             - name: SERVE_DOCS
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.shutdownTimeoutSecs }}
+            - name: SHUTDOWN_TIMEOUT_SECS
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.config.rustLog }}
             - name: RUST_LOG
               value: {{ . | quote }}

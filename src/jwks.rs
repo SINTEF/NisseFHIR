@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use jsonwebtoken::jwk::JwkSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::auth::JwksConfig;
@@ -28,8 +29,10 @@ pub async fn initial_fetch(cfg: &JwksConfig) -> Result<()> {
 
 /// Spawn a background task that periodically refreshes the JWKS key store.
 ///
-/// On failure the existing keys are retained and a warning is logged.
-pub fn spawn_refresh(cfg: JwksConfig) {
+/// On failure the existing keys are retained and a warning is logged. The
+/// task exits promptly once `shutdown` is cancelled, so the server can stop
+/// the background work cleanly during graceful shutdown.
+pub fn spawn_refresh(cfg: JwksConfig, shutdown: CancellationToken) {
     tokio::spawn(async move {
         let client = match build_client() {
             Ok(c) => c,
@@ -42,23 +45,29 @@ pub fn spawn_refresh(cfg: JwksConfig) {
         let interval = Duration::from_secs(cfg.refresh_secs);
 
         loop {
-            tokio::time::sleep(interval).await;
-
-            match fetch_jwks(&client, &cfg.jwks_uri).await {
-                Ok(jwk_set) => {
-                    let count = jwk_set.keys.len();
-                    match cfg.key_store.write() {
-                        Ok(mut store) => {
-                            *store = jwk_set;
-                            info!(keys = count, "JWKS refreshed");
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    info!("JWKS background refresh stopped");
+                    return;
+                }
+                _ = tokio::time::sleep(interval) => {
+                    match fetch_jwks(&client, &cfg.jwks_uri).await {
+                        Ok(jwk_set) => {
+                            let count = jwk_set.keys.len();
+                            match cfg.key_store.write() {
+                                Ok(mut store) => {
+                                    *store = jwk_set;
+                                    info!(keys = count, "JWKS refreshed");
+                                }
+                                Err(_) => {
+                                    warn!("JWKS key store lock poisoned; cannot refresh");
+                                }
+                            }
                         }
-                        Err(_) => {
-                            warn!("JWKS key store lock poisoned; cannot refresh");
+                        Err(e) => {
+                            warn!(error = %e, "JWKS refresh failed; keeping existing keys");
                         }
                     }
-                }
-                Err(e) => {
-                    warn!(error = %e, "JWKS refresh failed; keeping existing keys");
                 }
             }
         }

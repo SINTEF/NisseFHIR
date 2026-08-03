@@ -22,6 +22,9 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     pub fhir_base_url: String,
     pub search: SearchConfig,
+    /// Upper bound, in seconds, that the server will wait for in-flight
+    /// requests to drain after a shutdown signal before forcing exit.
+    pub shutdown_timeout_secs: u64,
     pub cors_allowed_origins: Vec<HeaderValue>,
     pub serve_docs: bool,
 }
@@ -46,6 +49,11 @@ impl AppConfig {
             bail!("DB_STATEMENT_TIMEOUT_MS must be greater than 0");
         }
 
+        let shutdown_timeout_secs = parse_u64_env_var("SHUTDOWN_TIMEOUT_SECS")?.unwrap_or(10);
+        if shutdown_timeout_secs == 0 {
+            bail!("SHUTDOWN_TIMEOUT_SECS must be greater than 0");
+        }
+
         let fhir_base_url =
             env::var("FHIR_BASE_URL").unwrap_or_else(|_| "http://localhost:8080/fhir".to_owned());
         let search = load_search_config()?;
@@ -62,6 +70,7 @@ impl AppConfig {
             auth,
             fhir_base_url,
             search,
+            shutdown_timeout_secs,
             cors_allowed_origins,
             serve_docs,
         })
@@ -862,6 +871,7 @@ mod tests {
                 ("DB_CONNECT_TIMEOUT_SECS", Some("6")),
                 ("DB_ACQUIRE_TIMEOUT_SECS", Some("7")),
                 ("DB_STATEMENT_TIMEOUT_MS", Some("8000")),
+                ("SHUTDOWN_TIMEOUT_SECS", Some("12")),
                 ("BIND_ADDR", Some("127.0.0.1:9090")),
                 ("FHIR_BASE_URL", Some("http://localhost:9090/fhir")),
                 ("SEARCH_DEFAULT_COUNT", Some("15")),
@@ -883,6 +893,7 @@ mod tests {
                 assert_eq!(config.db_connect_timeout_secs, 6);
                 assert_eq!(config.db_acquire_timeout_secs, 7);
                 assert_eq!(config.db_statement_timeout_ms, 8000);
+                assert_eq!(config.shutdown_timeout_secs, 12);
                 assert_eq!(config.fhir_base_url, "http://localhost:9090/fhir");
                 assert_eq!(config.search.default_count, 15);
                 assert_eq!(config.search.max_count, 60);
@@ -937,6 +948,52 @@ mod tests {
                 assert_eq!(config.db_connect_timeout_secs, 5);
                 assert_eq!(config.db_acquire_timeout_secs, 5);
                 assert_eq!(config.db_statement_timeout_ms, 10_000);
+            },
+        );
+    }
+
+    #[test]
+    fn from_env_rejects_zero_shutdown_timeout() {
+        with_env_vars(
+            &[
+                ("DATABASE_URL", Some("postgres://localhost/test")),
+                ("SHUTDOWN_TIMEOUT_SECS", Some("0")),
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("a-very-long-secret-at-least-32-chars!!")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let error = AppConfig::from_env().unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("SHUTDOWN_TIMEOUT_SECS must be greater than 0")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn from_env_uses_default_shutdown_timeout_when_unset() {
+        with_env_vars(
+            &[
+                ("DATABASE_URL", Some("postgres://localhost/test")),
+                ("SHUTDOWN_TIMEOUT_SECS", None),
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("a-very-long-secret-at-least-32-chars!!")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+                ("JWT_PUBLIC_KEY_PEM", None),
+                ("JWT_PUBLIC_KEY_PATH", None),
+            ],
+            || {
+                let config = AppConfig::from_env().unwrap();
+                assert_eq!(config.shutdown_timeout_secs, 10);
             },
         );
     }
