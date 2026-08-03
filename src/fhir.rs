@@ -270,13 +270,14 @@ pub async fn read_resource(
 }
 
 #[utoipa::path(get, path = "/fhir/{resource_type}/{id}/_history",
-    params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID")),
+    params(("resource_type" = String, Path, description = "FHIR resource type"), ("id" = String, Path, description = "Resource ID"), ("_count" = Option<u32>, Query, description = "Page size (bounded by SEARCH_MAX_COUNT)"), ("_after_id" = Option<String>, Query, description = "Version-id cursor from a previous page's next link")),
     responses((status = 200, description = "Resource history Bundle"), (status = 401, description = "Missing or invalid bearer token"), (status = 403, description = "Forbidden"), (status = 404, description = "Not found")),
     security(("bearer_auth" = [])))]
 pub async fn read_resource_history(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((resource_type, id)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
     validate_path_resource_type(&resource_type)?;
@@ -284,14 +285,25 @@ pub async fn read_resource_history(
         return Err(AppError::Forbidden);
     }
 
-    let history = state
+    let query = crate::search::parse_query_pairs(query.as_deref().unwrap_or(""));
+    let params = crate::search::parse_history_params(query, state.search)?;
+
+    let results = state
         .store
-        .read_history(&access.tenant_id, &resource_type, &id)
+        .read_history(
+            &access.tenant_id,
+            &resource_type,
+            &id,
+            i64::from(params.count),
+            params.after_version_id,
+        )
         .await?;
 
-    if history.is_empty() {
+    if !results.exists {
         return Err(AppError::NotFound);
     }
+
+    let after_id_str = params.after_version_id.map(|v| v.to_string());
 
     Ok((
         StatusCode::OK,
@@ -299,7 +311,12 @@ pub async fn read_resource_history(
             &state.fhir_base_url,
             &resource_type,
             &id,
-            history,
+            crate::search::HistoryPage {
+                count: params.count,
+                after_id: after_id_str.as_deref(),
+                next_after_id: results.next_after_version_id,
+            },
+            results.versions,
         )),
     )
         .into_response())

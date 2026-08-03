@@ -159,6 +159,23 @@ def extract_json_path_segments(resource_type, expression):
     return None, "unsupported"
 
 
+def extract_date_path_alternatives(resource_type, expression):
+    """Return every supported field branch of a date choice expression."""
+    alternatives = []
+    for part in (expression or "").split("|"):
+        path_info, category = extract_json_path_segments(resource_type, part.strip())
+        if isinstance(path_info, list) and category in (
+            "simple",
+            "nested",
+            "ofType",
+            "as_type",
+            "repeat",
+        ):
+            if path_info not in alternatives:
+                alternatives.append(path_info)
+    return alternatives
+
+
 def sp_type_to_rust(sp_type):
     mapping = {
         "string": "String",
@@ -236,6 +253,8 @@ def generate_registry_rs(resource_types, registry):
         "pub enum JsonPath {",
         "    /// Simple path segments: resource->'field' or resource->'field'->'subfield'",
         "    Field(&'static [&'static str]),",
+        "    /// Alternative field paths from a FHIR choice element.",
+        "    FieldAlternatives(&'static [&'static [&'static str]]),",
         "    /// Array field with a filter: e.g. telecom.where(system='phone')",
         "    WhereFilter {",
         "        base: &'static [&'static str],",
@@ -290,6 +309,19 @@ def generate_registry_rs(resource_types, registry):
         supported_params = []
 
         for p in rt_params:
+            if p["type"] == "date":
+                alternatives = extract_date_path_alternatives(
+                    rt, p.get("expression")
+                )
+                if len(alternatives) > 1:
+                    path_exprs = [
+                        json_path_to_rust_expr(path) for path in alternatives
+                    ]
+                    supported_params.append(
+                        f'    SearchParam {{ code: "{p["code"]}", param_type: SearchParamType::Date, path: JsonPath::FieldAlternatives(&[{", ".join(path_exprs)}]) }}'
+                    )
+                    continue
+
             path_info, category = extract_json_path_segments(rt, p.get("expression"))
 
             if path_info is None:

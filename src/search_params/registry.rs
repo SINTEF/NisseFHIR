@@ -24,6 +24,8 @@ pub enum SearchParamType {
 pub enum JsonPath {
     /// Simple path segments: resource->'field' or resource->'field'->'subfield'
     Field(&'static [&'static str]),
+    /// Alternative field paths from a FHIR choice element.
+    FieldAlternatives(&'static [&'static [&'static str]]),
     /// Array field with a filter: e.g. telecom.where(system='phone')
     WhereFilter {
         base: &'static [&'static str],
@@ -536,7 +538,7 @@ static PARAMS_ADVERSEEVENT: [SearchParam; 16] = [
     SearchParam {
         code: "effect",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["effectDateTime"]),
+        path: JsonPath::FieldAlternatives(&[&["effectDateTime"], &["effectPeriod"]]),
     },
     SearchParam {
         code: "location",
@@ -546,7 +548,10 @@ static PARAMS_ADVERSEEVENT: [SearchParam; 16] = [
     SearchParam {
         code: "occurrence",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["suspectEntity", "occurrenceDateTime"]),
+        path: JsonPath::FieldAlternatives(&[
+            &["suspectEntity", "occurrenceDateTime"],
+            &["suspectEntity", "occurrencePeriod"],
+        ]),
     },
     SearchParam {
         code: "recorder",
@@ -1805,7 +1810,7 @@ static PARAMS_COMMUNICATIONREQUEST: [SearchParam; 17] = [
     SearchParam {
         code: "occurrence",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["occurrenceDateTime"]),
+        path: JsonPath::FieldAlternatives(&[&["occurrenceDateTime"], &["occurrencePeriod"]]),
     },
     SearchParam {
         code: "priority",
@@ -2177,7 +2182,7 @@ static PARAMS_CONDITION: [SearchParam; 21] = [
     SearchParam {
         code: "abatement-date",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["abatementDateTime"]),
+        path: JsonPath::FieldAlternatives(&[&["abatementDateTime"], &["abatementPeriod"]]),
     },
     SearchParam {
         code: "abatement-string",
@@ -2222,7 +2227,7 @@ static PARAMS_CONDITION: [SearchParam; 21] = [
     SearchParam {
         code: "onset-date",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["onsetDateTime"]),
+        path: JsonPath::FieldAlternatives(&[&["onsetDateTime"], &["onsetPeriod"]]),
     },
     SearchParam {
         code: "onset-info",
@@ -2590,7 +2595,7 @@ static PARAMS_DETECTEDISSUE: [SearchParam; 9] = [
     SearchParam {
         code: "identified",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["identifiedDateTime"]),
+        path: JsonPath::FieldAlternatives(&[&["identifiedDateTime"], &["identifiedPeriod"]]),
     },
     SearchParam {
         code: "implicated",
@@ -2776,7 +2781,7 @@ static PARAMS_DEVICEALERT: [SearchParam; 22] = [
     SearchParam {
         code: "occurrence",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["occurrencePeriod"]),
+        path: JsonPath::FieldAlternatives(&[&["occurrencePeriod"], &["occurrenceDateTime"]]),
     },
     SearchParam {
         code: "patient",
@@ -2998,7 +3003,7 @@ static PARAMS_DEVICEREQUEST: [SearchParam; 18] = [
     SearchParam {
         code: "event-date",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["occurrenceDateTime"]),
+        path: JsonPath::FieldAlternatives(&[&["occurrenceDateTime"], &["occurrencePeriod"]]),
     },
     SearchParam {
         code: "group-identifier",
@@ -3076,7 +3081,7 @@ static PARAMS_DIAGNOSTICREPORT: [SearchParam; 19] = [
     SearchParam {
         code: "date",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["effectiveDateTime"]),
+        path: JsonPath::FieldAlternatives(&[&["effectiveDateTime"], &["effectivePeriod"]]),
     },
     SearchParam {
         code: "encounter",
@@ -5565,7 +5570,7 @@ static PARAMS_MEDICATIONADMINISTRATION: [SearchParam; 15] = [
     SearchParam {
         code: "date",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["occurrenceDateTime"]),
+        path: JsonPath::FieldAlternatives(&[&["occurrenceDateTime"], &["occurrencePeriod"]]),
     },
     SearchParam {
         code: "device",
@@ -5844,7 +5849,7 @@ static PARAMS_MEDICATIONSTATEMENT: [SearchParam; 11] = [
     SearchParam {
         code: "effective",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["effectiveDateTime"]),
+        path: JsonPath::FieldAlternatives(&[&["effectiveDateTime"], &["effectivePeriod"]]),
     },
     SearchParam {
         code: "source",
@@ -6229,7 +6234,7 @@ static PARAMS_NUTRITIONINTAKE: [SearchParam; 9] = [
     SearchParam {
         code: "date",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["occurrenceDateTime"]),
+        path: JsonPath::FieldAlternatives(&[&["occurrenceDateTime"], &["occurrencePeriod"]]),
     },
     SearchParam {
         code: "encounter",
@@ -6378,7 +6383,12 @@ static PARAMS_OBSERVATION: [SearchParam; 36] = [
     SearchParam {
         code: "date",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["effectiveDateTime"]),
+        path: JsonPath::FieldAlternatives(&[
+            &["effectiveDateTime"],
+            &["effectivePeriod"],
+            &["effectiveTiming"],
+            &["effectiveInstant"],
+        ]),
     },
     SearchParam {
         code: "encounter",
@@ -6528,7 +6538,7 @@ static PARAMS_OBSERVATION: [SearchParam; 36] = [
     SearchParam {
         code: "value-date",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["valueDateTime"]),
+        path: JsonPath::FieldAlternatives(&[&["valueDateTime"], &["valuePeriod"]]),
     },
     SearchParam {
         code: "value-quantity",
@@ -7647,7 +7657,11 @@ static PARAMS_PROCEDURE: [SearchParam; 15] = [
     SearchParam {
         code: "date",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["occurrenceDateTime"]),
+        path: JsonPath::FieldAlternatives(&[
+            &["occurrenceDateTime"],
+            &["occurrencePeriod"],
+            &["occurrenceTiming"],
+        ]),
     },
     SearchParam {
         code: "encounter",
@@ -8708,7 +8722,11 @@ static PARAMS_SERVICEREQUEST: [SearchParam; 23] = [
     SearchParam {
         code: "occurrence",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["occurrenceDateTime"]),
+        path: JsonPath::FieldAlternatives(&[
+            &["occurrenceDateTime"],
+            &["occurrencePeriod"],
+            &["occurrenceTiming"],
+        ]),
     },
     SearchParam {
         code: "performer",
@@ -8829,7 +8847,10 @@ static PARAMS_SPECIMEN: [SearchParam; 14] = [
     SearchParam {
         code: "collected",
         param_type: SearchParamType::Date,
-        path: JsonPath::Field(&["collection", "collectedDateTime"]),
+        path: JsonPath::FieldAlternatives(&[
+            &["collection", "collectedDateTime"],
+            &["collection", "collectedPeriod"],
+        ]),
     },
     SearchParam {
         code: "collection-device-code",

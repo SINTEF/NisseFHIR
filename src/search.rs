@@ -23,6 +23,17 @@ pub(crate) struct SearchPage<'a> {
     pub(crate) next_after_id: Option<&'a str>,
 }
 
+/// Cursor-pagination metadata for an instance-history Bundle page.
+///
+/// `after_id` is the version-id cursor the client supplied (as a string),
+/// `next_after_id` is the version id of the last entry on this page when
+/// more pages follow.
+pub(crate) struct HistoryPage<'a> {
+    pub(crate) count: u32,
+    pub(crate) after_id: Option<&'a str>,
+    pub(crate) next_after_id: Option<i64>,
+}
+
 pub(crate) fn build_search_bundle(
     base_url: &str,
     resource_type: &str,
@@ -72,11 +83,29 @@ pub(crate) fn build_history_bundle(
     base_url: &str,
     resource_type: &str,
     id: &str,
+    page: HistoryPage<'_>,
     history: Vec<HistoricalResource>,
 ) -> Value {
     let base_url = base_url.trim_end_matches('/');
-    let self_url = format!("{base_url}/{resource_type}/{id}/_history");
-    let total = history.len() as i64;
+    let self_url = build_history_url(base_url, resource_type, id, page.count, page.after_id);
+
+    let mut links = vec![json!({
+        "relation": "self",
+        "url": self_url,
+    })];
+
+    if let Some(next_after_version_id) = page.next_after_id {
+        links.push(json!({
+            "relation": "next",
+            "url": build_history_url(
+                base_url,
+                resource_type,
+                id,
+                page.count,
+                Some(&next_after_version_id.to_string()),
+            ),
+        }));
+    }
 
     let entry = history
         .into_iter()
@@ -100,11 +129,7 @@ pub(crate) fn build_history_bundle(
     json!({
         "resourceType": "Bundle",
         "type": "history",
-        "total": total,
-        "link": [{
-            "relation": "self",
-            "url": self_url,
-        }],
+        "link": links,
         "entry": entry,
     })
 }
@@ -347,6 +372,125 @@ fn build_search_url(
     format!("{base_url}/{resource_type}?{}", serializer.finish())
 }
 
+fn build_history_url(
+    base_url: &str,
+    resource_type: &str,
+    id: &str,
+    count: u32,
+    after_id: Option<&str>,
+) -> String {
+    let mut serializer = Serializer::new(String::new());
+    serializer.append_pair("_count", &count.to_string());
+
+    if let Some(after_id) = after_id {
+        serializer.append_pair("_after_id", after_id);
+    }
+
+    format!(
+        "{base_url}/{resource_type}/{id}/_history?{}",
+        serializer.finish()
+    )
+}
+
+/// Pagination/cursor parameters parsed for an instance-history request.
+#[derive(Debug)]
+pub(crate) struct ParsedHistoryParams {
+    pub(crate) count: u32,
+    pub(crate) after_version_id: Option<i64>,
+}
+
+/// Parse the query string of `GET /fhir/{type}/{id}/_history`.
+///
+/// Only `_count` and `_after_id` are honored. `_after_id` is the version-id
+/// cursor returned in a previous page's `next` link. Unknown parameters are
+/// rejected so clients get a clear signal rather than silently being ignored.
+pub(crate) fn parse_history_params(
+    query: Vec<(String, String)>,
+    search: SearchConfig,
+) -> Result<ParsedHistoryParams, AppError> {
+    if query.len() > MAX_SEARCH_PARAMETER_OCCURRENCES {
+        return Err(AppError::BadRequest(format!(
+            "history contains too many parameter occurrences; maximum is {MAX_SEARCH_PARAMETER_OCCURRENCES}"
+        )));
+    }
+    let query_bytes = query
+        .iter()
+        .map(|(key, value)| key.len().saturating_add(value.len()))
+        .sum::<usize>();
+    if query_bytes > MAX_SEARCH_QUERY_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "decoded history query is too large; maximum is {MAX_SEARCH_QUERY_BYTES} bytes"
+        )));
+    }
+
+    let mut count = search.default_count;
+    let mut after_version_id = None;
+    let mut saw_count = false;
+    let mut saw_after_id = false;
+
+    for (key, value) in query {
+        match key.as_str() {
+            "_count" => {
+                if saw_count {
+                    return Err(AppError::BadRequest(
+                        "_count must not be repeated".to_owned(),
+                    ));
+                }
+                saw_count = true;
+                count = parse_u32_query_param("_count", &value)?;
+                if count == 0 {
+                    return Err(AppError::BadRequest(
+                        "_count must be greater than 0".to_owned(),
+                    ));
+                }
+                if count > search.max_count {
+                    return Err(AppError::BadRequest(format!(
+                        "_count must be less than or equal to {}",
+                        search.max_count
+                    )));
+                }
+            }
+            "_after_id" => {
+                if saw_after_id {
+                    return Err(AppError::BadRequest(
+                        "_after_id must not be repeated".to_owned(),
+                    ));
+                }
+                saw_after_id = true;
+                if value.is_empty() {
+                    return Err(AppError::BadRequest(
+                        "_after_id must not be empty".to_owned(),
+                    ));
+                }
+                let parsed = value.parse::<i64>().map_err(|_| {
+                    AppError::BadRequest("_after_id must be a version id".to_owned())
+                })?;
+                if parsed <= 0 {
+                    return Err(AppError::BadRequest(
+                        "_after_id must be a positive version id".to_owned(),
+                    ));
+                }
+                after_version_id = Some(parsed);
+            }
+            "_offset" => {
+                return Err(AppError::BadRequest(
+                    "_offset is no longer supported; use _after_id cursor pagination".to_owned(),
+                ));
+            }
+            other => {
+                return Err(AppError::BadRequest(format!(
+                    "unsupported history parameter '{other}'"
+                )));
+            }
+        }
+    }
+
+    Ok(ParsedHistoryParams {
+        count,
+        after_version_id,
+    })
+}
+
 /// Parse the If-None-Exist query string into search filters.
 pub(crate) fn parse_if_none_exist_query(
     resource_type: &str,
@@ -370,8 +514,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        SearchPage, build_history_bundle, build_search_bundle, parse_query_pairs,
-        parse_search_params, split_fhir_delimiter, validate_identifier_value,
+        HistoryPage, SearchPage, build_history_bundle, build_search_bundle, parse_history_params,
+        parse_query_pairs, parse_search_params, split_fhir_delimiter, validate_identifier_value,
     };
     use crate::{
         MAX_SEARCH_OR_VALUES_PER_OCCURRENCE, MAX_SEARCH_PARAMETER_OCCURRENCES,
@@ -447,6 +591,11 @@ mod tests {
             "http://localhost:8080/fhir",
             "Patient",
             "example",
+            HistoryPage {
+                count: 10,
+                after_id: None,
+                next_after_id: None,
+            },
             vec![
                 HistoricalResource {
                     id: "example".to_owned(),
@@ -473,11 +622,209 @@ mod tests {
 
         assert_eq!(bundle["resourceType"], "Bundle");
         assert_eq!(bundle["type"], "history");
-        assert_eq!(bundle["total"], 2);
+        assert!(bundle.get("total").is_none());
         assert_eq!(bundle["link"][0]["relation"], "self");
+        assert_eq!(
+            bundle["link"][0]["url"],
+            "http://localhost:8080/fhir/Patient/example/_history?_count=10"
+        );
         assert_eq!(bundle["entry"][0]["response"]["status"], "410 Gone");
         assert_eq!(bundle["entry"][0]["response"]["etag"], "W/\"2\"");
         assert_eq!(bundle["entry"][1]["response"]["status"], "200 OK");
+    }
+
+    #[test]
+    fn history_bundle_emits_next_link_with_version_id_cursor() {
+        let now = Utc::now();
+        let bundle = build_history_bundle(
+            "http://localhost:8080/fhir",
+            "Patient",
+            "example",
+            HistoryPage {
+                count: 2,
+                after_id: None,
+                next_after_id: Some(3),
+            },
+            vec![HistoricalResource {
+                id: "example".to_owned(),
+                version_id: 5,
+                last_updated: now,
+                deleted: false,
+                resource: json!({"resourceType": "Patient", "id": "example"}),
+            }],
+        );
+
+        assert!(bundle.get("total").is_none());
+        assert_eq!(bundle["link"][0]["relation"], "self");
+        assert_eq!(
+            bundle["link"][0]["url"],
+            "http://localhost:8080/fhir/Patient/example/_history?_count=2"
+        );
+        assert_eq!(bundle["link"][1]["relation"], "next");
+        assert_eq!(
+            bundle["link"][1]["url"],
+            "http://localhost:8080/fhir/Patient/example/_history?_count=2&_after_id=3"
+        );
+    }
+
+    #[test]
+    fn history_bundle_self_link_preserves_after_id_cursor() {
+        let bundle = build_history_bundle(
+            "http://localhost:8080/fhir",
+            "Patient",
+            "example",
+            HistoryPage {
+                count: 2,
+                after_id: Some("5"),
+                next_after_id: None,
+            },
+            vec![],
+        );
+
+        assert_eq!(
+            bundle["link"][0]["url"],
+            "http://localhost:8080/fhir/Patient/example/_history?_count=2&_after_id=5"
+        );
+        assert!(
+            bundle["link"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|l| l["relation"] != "next")
+        );
+    }
+
+    #[test]
+    fn parse_history_params_accepts_count_and_cursor() {
+        let params = parse_history_params(
+            parse_query_pairs("_count=3&_after_id=7"),
+            SearchConfig {
+                default_count: 50,
+                max_count: 500,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(params.count, 3);
+        assert_eq!(params.after_version_id, Some(7));
+    }
+
+    #[test]
+    fn parse_history_params_uses_defaults_when_omitted() {
+        let params = parse_history_params(
+            Vec::new(),
+            SearchConfig {
+                default_count: 50,
+                max_count: 500,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(params.count, 50);
+        assert_eq!(params.after_version_id, None);
+    }
+
+    #[test]
+    fn parse_history_params_rejects_oversized_count() {
+        let error = parse_history_params(
+            parse_query_pairs("_count=501"),
+            SearchConfig {
+                default_count: 50,
+                max_count: 500,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn parse_history_params_rejects_zero_count() {
+        let error = parse_history_params(
+            parse_query_pairs("_count=0"),
+            SearchConfig {
+                default_count: 50,
+                max_count: 500,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn parse_history_params_rejects_non_numeric_cursor() {
+        let error = parse_history_params(
+            parse_query_pairs("_after_id=abc"),
+            SearchConfig {
+                default_count: 50,
+                max_count: 500,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn parse_history_params_rejects_non_positive_cursor() {
+        for cursor in ["0", "-1"] {
+            let error = parse_history_params(
+                parse_query_pairs(&format!("_after_id={cursor}")),
+                SearchConfig {
+                    default_count: 50,
+                    max_count: 500,
+                },
+            )
+            .unwrap_err();
+
+            assert!(matches!(error, AppError::BadRequest(_)));
+        }
+    }
+
+    #[test]
+    fn parse_history_params_enforces_query_complexity_limits() {
+        let config = SearchConfig {
+            default_count: 50,
+            max_count: 500,
+        };
+        let too_many = (0..=MAX_SEARCH_PARAMETER_OCCURRENCES)
+            .map(|_| ("unknown".to_owned(), "1".to_owned()))
+            .collect();
+        assert!(parse_history_params(too_many, config).is_err());
+
+        let too_large = "1".repeat(MAX_SEARCH_QUERY_BYTES + 1);
+        assert!(parse_history_params(vec![("_after_id".to_owned(), too_large)], config).is_err());
+    }
+
+    #[test]
+    fn parse_history_params_rejects_unknown_parameter() {
+        let error = parse_history_params(
+            parse_query_pairs("name=Alice"),
+            SearchConfig {
+                default_count: 50,
+                max_count: 500,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn parse_history_params_rejects_repeated_control_parameters() {
+        for query in ["_count=1&_count=2", "_after_id=2&_after_id=1"] {
+            let error = parse_history_params(
+                parse_query_pairs(query),
+                SearchConfig {
+                    default_count: 50,
+                    max_count: 500,
+                },
+            )
+            .unwrap_err();
+
+            assert!(matches!(error, AppError::BadRequest(_)));
+        }
     }
 
     #[test]
@@ -699,17 +1046,50 @@ mod tests {
     }
 
     #[test]
-    fn parse_search_params_rejects_unimplemented_comparators() {
-        let error = parse_search_params(
-            "Patient",
-            parse_query_pairs("birthdate=ge2000-01-01"),
-            SearchConfig {
-                default_count: 50,
-                max_count: 500,
-            },
-        )
-        .unwrap_err();
+    fn parse_search_params_rejects_invalid_date_comparator() {
+        // The comparators themselves are now supported (see
+        // `parse_fhir_date_value`), so a malformed date body — not an
+        // unsupported comparator — is what should yield a 400 response.
+        for invalid in ["gt", "ge", "xx2020-01-01", "2024-13-15", "1974-13"] {
+            assert!(
+                parse_search_params(
+                    "Patient",
+                    parse_query_pairs(&format!("birthdate={invalid}")),
+                    SearchConfig {
+                        default_count: 50,
+                        max_count: 500,
+                    },
+                )
+                .is_err(),
+                "expected rejection of invalid date value '{invalid}'"
+            );
+        }
 
-        assert!(matches!(error, AppError::BadRequest(_)));
+        // And supported date prefixed values should parse cleanly.
+        for valid in [
+            "1974",
+            "1974-12",
+            "1974-12-25",
+            "1974-12-25T10:30:00Z",
+            "eq1974",
+            "ne1974",
+            "gt1974",
+            "ge1974",
+            "lt1974",
+            "le1974",
+            "sa1974",
+            "eb1974",
+            "ap1974",
+        ] {
+            parse_search_params(
+                "Patient",
+                parse_query_pairs(&format!("birthdate={valid}")),
+                SearchConfig {
+                    default_count: 50,
+                    max_count: 500,
+                },
+            )
+            .unwrap_or_else(|error| panic!("expected '{valid}' to parse: {error:?}"));
+        }
     }
 }

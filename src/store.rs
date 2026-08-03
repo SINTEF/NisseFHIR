@@ -60,6 +60,13 @@ pub struct HistoricalResource {
     pub resource: Value,
 }
 
+/// A page of instance-history versions plus the cursor for the next page.
+pub struct HistoryResults {
+    pub exists: bool,
+    pub versions: Vec<HistoricalResource>,
+    pub next_after_version_id: Option<i64>,
+}
+
 impl PgStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -902,22 +909,54 @@ impl PgStore {
         tenant_id: &str,
         resource_type: &str,
         id: &str,
-    ) -> Result<Vec<HistoricalResource>, AppError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT version_id, last_updated, deleted, resource
-            FROM fhir_resource_history
-            WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
-            ORDER BY version_id DESC
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(resource_type)
-        .bind(id)
-        .fetch_all(&self.pool)
-        .await?;
+        limit: i64,
+        after_version_id: Option<i64>,
+    ) -> Result<HistoryResults, AppError> {
+        if limit <= 0 {
+            return Ok(HistoryResults {
+                exists: false,
+                versions: Vec::new(),
+                next_after_version_id: None,
+            });
+        }
 
-        Ok(rows
+        let rows = if let Some(after) = after_version_id {
+            sqlx::query(
+                r#"
+                SELECT version_id, last_updated, deleted, resource
+                FROM fhir_resource_history
+                WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+                  AND version_id < $4
+                ORDER BY version_id DESC
+                LIMIT $5
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(resource_type)
+            .bind(id)
+            .bind(after)
+            .bind(limit.saturating_add(1))
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT version_id, last_updated, deleted, resource
+                FROM fhir_resource_history
+                WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+                ORDER BY version_id DESC
+                LIMIT $4
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(resource_type)
+            .bind(id)
+            .bind(limit.saturating_add(1))
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let mut versions = rows
             .into_iter()
             .map(|row| HistoricalResource {
                 id: id.to_owned(),
@@ -926,7 +965,41 @@ impl PgStore {
                 deleted: row.get::<bool, _>("deleted"),
                 resource: row.get::<Value, _>("resource"),
             })
-            .collect())
+            .collect::<Vec<_>>();
+
+        let next_after_version_id = if versions.len() > limit as usize {
+            versions.truncate(limit as usize);
+            versions.last().map(|version| version.version_id)
+        } else {
+            None
+        };
+
+        // A cursor can legitimately point past the oldest version. Only that
+        // empty-page case needs a separate existence check to distinguish it
+        // from a resource that has no history at all.
+        let exists = if versions.is_empty() && after_version_id.is_some() {
+            sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM fhir_resource_history
+                    WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
+                )
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(resource_type)
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await?
+        } else {
+            !versions.is_empty()
+        };
+
+        Ok(HistoryResults {
+            exists,
+            versions,
+            next_after_version_id,
+        })
     }
 }
 

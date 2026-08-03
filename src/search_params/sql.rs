@@ -60,6 +60,9 @@ pub fn validate_search_filter(param: &SearchParam, values: &[String]) -> Result<
         (SearchParamType::Reference, JsonPath::Field(segments)) => !segments.is_empty(),
         (SearchParamType::Reference, JsonPath::WhereFilter { .. }) => true,
         (SearchParamType::Date, JsonPath::Field(segments)) => !segments.is_empty(),
+        (SearchParamType::Date, JsonPath::FieldAlternatives(paths)) => {
+            !paths.is_empty() && paths.iter().all(|segments| !segments.is_empty())
+        }
         (SearchParamType::Date, JsonPath::WhereFilter { .. }) => true,
         (SearchParamType::Uri, JsonPath::Field(segments)) => !segments.is_empty(),
         (SearchParamType::Number, JsonPath::Field(segments)) => !segments.is_empty(),
@@ -75,9 +78,15 @@ pub fn validate_search_filter(param: &SearchParam, values: &[String]) -> Result<
         )));
     }
 
+    if matches!(param.param_type, SearchParamType::Date) {
+        for value in values {
+            super::date::parse_fhir_date_value(value).map_err(AppError::BadRequest)?;
+        }
+    }
+
     if matches!(
         param.param_type,
-        SearchParamType::Date | SearchParamType::Number | SearchParamType::Quantity
+        SearchParamType::Number | SearchParamType::Quantity
     ) {
         for value in values {
             if has_unsupported_comparator(value) {
@@ -102,7 +111,14 @@ pub fn validate_search_filter(param: &SearchParam, values: &[String]) -> Result<
 }
 
 pub fn is_executable_search_param(param: &SearchParam) -> bool {
-    validate_search_filter(param, &["0|0".to_owned()]).is_ok()
+    // Pick a placeholder value that is structurally valid for the parameter
+    // type so the validation path can reach the executable-path check without
+    // short-circuiting on type-specific value validation.
+    let placeholder = match param.param_type {
+        SearchParamType::Date => "2000-01-01",
+        _ => "0|0",
+    };
+    validate_search_filter(param, &[placeholder.to_owned()]).is_ok()
 }
 
 fn has_unsupported_comparator(value: &str) -> bool {
@@ -167,7 +183,7 @@ fn push_string_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value
         } => {
             push_string_where_filter(query, base, filter_field, filter_value, suffix, &pattern);
         }
-        JsonPath::Exists(_) | JsonPath::Position(_) => {
+        JsonPath::FieldAlternatives(_) | JsonPath::Exists(_) | JsonPath::Position(_) => {
             // Exists/Position don't apply to string search, skip.
         }
     }
@@ -300,7 +316,7 @@ fn push_token_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value:
             // exists and is not false/null
             push_exists_filter(query, segments, &code);
         }
-        JsonPath::Position(_) => {}
+        JsonPath::FieldAlternatives(_) | JsonPath::Position(_) => {}
     }
 }
 
@@ -599,38 +615,33 @@ fn push_reference_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, va
             query.push_bind(value);
             query.push(")");
         }
-        JsonPath::Exists(_) | JsonPath::Position(_) => {}
+        JsonPath::FieldAlternatives(_) | JsonPath::Exists(_) | JsonPath::Position(_) => {}
     }
 }
 
 // ---------------------------------------------------------------------------
-// Date search: exact date match (prefix comparators not yet supported)
+// Date search: FHIR comparator prefixes with precision-aware ranges.
+// See `super::date` for the supported prefix semantics.
 // ---------------------------------------------------------------------------
 
 fn push_date_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &str) {
     let value = crate::search::unescape_fhir_value(value);
+    // Validation runs before SQL generation, so this branch indicates an
+    // internal caller bug. Fail closed rather than silently dropping a filter.
+    let Ok((prefix, bounds)) = super::date::parse_fhir_date_value(&value) else {
+        query.push(" AND FALSE");
+        return;
+    };
     match path {
-        JsonPath::Field(segments) => {
-            let jsonb_text = build_jsonb_text_path("resource", segments);
-            // For array parents, expand them
-            if segments.len() >= 2 {
-                let parent = segments[0];
-                let child_segments = &segments[1..];
-                let arr = safe_array_elements(&format!("resource->'{parent}'"));
-                query.push(format!(" AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE "));
-                let elem_text = build_jsonb_text_path("elem", child_segments);
-                query.push(&elem_text);
-                // Date matching: the FHIR date could be partial (year, year-month, full date)
-                // For now, use prefix matching
-                query.push(" LIKE ");
-                query.push_bind(format!("{value}%"));
+        JsonPath::Field(segments) => push_date_field_filter(query, segments, prefix, bounds),
+        JsonPath::FieldAlternatives(paths) => {
+            query.push(" AND (FALSE");
+            for segments in *paths {
+                query.push(" OR (TRUE");
+                push_date_field_filter(query, segments, prefix, bounds);
                 query.push(")");
-            } else {
-                query.push(" AND ");
-                query.push(&jsonb_text);
-                query.push(" LIKE ");
-                query.push_bind(format!("{value}%"));
             }
+            query.push(")");
         }
         JsonPath::WhereFilter {
             base,
@@ -640,25 +651,49 @@ fn push_date_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: 
         } => {
             let base_path = build_jsonb_path("resource", base);
             let arr = safe_array_elements(&base_path);
+            let target = if suffix.is_empty() {
+                "elem".to_owned()
+            } else {
+                build_jsonb_path("elem", suffix)
+            };
+            let values = safe_array_elements(&target);
             query.push(format!(
-                " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE elem->>'"
+                " AND EXISTS (SELECT 1 FROM {arr} AS elem, {values} AS date_value WHERE elem->>'"
             ));
             query.push(filter_field);
             query.push("' = '");
             query.push(filter_value);
             query.push("'");
-            if suffix.is_empty() {
-                query.push(" AND elem::text LIKE ");
-            } else {
-                let suffix_text = build_jsonb_text_path("elem", suffix);
-                query.push(" AND ");
-                query.push(&suffix_text);
-                query.push(" LIKE ");
-            }
-            query.push_bind(format!("{value}%"));
+            super::date::push_date_predicate(query, "date_value", prefix, bounds);
             query.push(")");
         }
         JsonPath::Exists(_) | JsonPath::Position(_) => {}
+    }
+}
+
+fn push_date_field_filter(
+    query: &mut QueryBuilder<Postgres>,
+    segments: &[&str],
+    prefix: super::date::DatePrefix,
+    bounds: super::date::DateBounds,
+) {
+    if segments.len() >= 2 {
+        let parent = segments[0];
+        let child_segments = &segments[1..];
+        let arr = safe_array_elements(&format!("resource->'{parent}'"));
+        let values = safe_array_elements(&build_jsonb_path("elem", child_segments));
+        query.push(format!(
+            " AND EXISTS (SELECT 1 FROM {arr} AS elem, {values} AS date_value WHERE TRUE"
+        ));
+        super::date::push_date_predicate(query, "date_value", prefix, bounds);
+        query.push(")");
+    } else {
+        let values = safe_array_elements(&build_jsonb_path("resource", segments));
+        query.push(format!(
+            " AND EXISTS (SELECT 1 FROM {values} AS date_value WHERE TRUE"
+        ));
+        super::date::push_date_predicate(query, "date_value", prefix, bounds);
+        query.push(")");
     }
 }
 
@@ -676,7 +711,10 @@ fn push_uri_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &
             query.push(" = ");
             query.push_bind(value);
         }
-        JsonPath::WhereFilter { .. } | JsonPath::Exists(_) | JsonPath::Position(_) => {}
+        JsonPath::FieldAlternatives(_)
+        | JsonPath::WhereFilter { .. }
+        | JsonPath::Exists(_)
+        | JsonPath::Position(_) => {}
     }
 }
 
@@ -696,7 +734,10 @@ fn push_number_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value
             query.push_bind(value);
             query.push("::numeric");
         }
-        JsonPath::WhereFilter { .. } | JsonPath::Exists(_) | JsonPath::Position(_) => {}
+        JsonPath::FieldAlternatives(_)
+        | JsonPath::WhereFilter { .. }
+        | JsonPath::Exists(_)
+        | JsonPath::Position(_) => {}
     }
 }
 
@@ -751,7 +792,10 @@ fn push_quantity_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, val
 
             query.push(")");
         }
-        JsonPath::WhereFilter { .. } | JsonPath::Exists(_) | JsonPath::Position(_) => {}
+        JsonPath::FieldAlternatives(_)
+        | JsonPath::WhereFilter { .. }
+        | JsonPath::Exists(_)
+        | JsonPath::Position(_) => {}
     }
 }
 
@@ -1258,17 +1302,21 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn date_filter_single_field_uses_prefix_like() {
+    fn date_filter_single_field_uses_timestamptz_cast() {
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
         push_date_filter(&mut query, &JsonPath::Field(&["birthDate"]), "1974");
         let sql = query.into_sql().as_str().to_owned();
         assert!(
-            sql.contains("resource->>'birthDate'"),
+            sql.contains("resource->'birthDate'"),
             "expected date field extraction, got: {sql}"
         );
         assert!(
-            sql.contains("LIKE"),
-            "expected LIKE for prefix match, got: {sql}"
+            sql.contains("::timestamptz"),
+            "expected timestamptz cast for precision-aware date comparison, got: {sql}"
+        );
+        assert!(
+            !sql.contains("LIKE"),
+            "expected LIKE to be replaced with bound comparison, got: {sql}"
         );
     }
 
@@ -1284,6 +1332,10 @@ mod tests {
         assert!(
             sql.contains("jsonb_array_elements"),
             "expected array expansion for nested date field, got: {sql}"
+        );
+        assert!(
+            !sql.contains("WHERE AND"),
+            "nested date predicate must form valid SQL, got: {sql}"
         );
     }
 
@@ -1306,9 +1358,17 @@ mod tests {
             "expected type filter, got: {sql}"
         );
         assert!(
-            sql.contains("LIKE"),
-            "expected LIKE for prefix match, got: {sql}"
+            sql.contains("::timestamptz"),
+            "expected precision-aware cast, got: {sql}"
         );
+    }
+
+    #[test]
+    fn date_filter_uses_ge_prefix() {
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_date_filter(&mut query, &JsonPath::Field(&["birthDate"]), "ge2000-01-01");
+        let sql = query.into_sql().as_str().to_owned();
+        assert!(sql.contains(" > "), "expected > comparison, got: {sql}");
     }
 
     // -----------------------------------------------------------------------
@@ -1738,7 +1798,7 @@ mod tests {
 
     #[test]
     fn injection_canaries_are_always_bind_parameters() {
-        static PARAMS: [SearchParam; 4] = [
+        static PARAMS: [SearchParam; 3] = [
             SearchParam {
                 code: "name",
                 param_type: SearchParamType::String,
@@ -1753,11 +1813,6 @@ mod tests {
                 code: "subject",
                 param_type: SearchParamType::Reference,
                 path: JsonPath::Field(&["subject"]),
-            },
-            SearchParam {
-                code: "date",
-                param_type: SearchParamType::Date,
-                path: JsonPath::Field(&["date"]),
             },
         ];
         let payload = "x' OR TRUE; DROP TABLE fhir_resources; --";
@@ -1779,6 +1834,64 @@ mod tests {
         );
         assert!(sql.contains("$1"), "expected bind placeholders: {sql}");
         assert!(!sql.contains("DROP TABLE"), "{sql}");
+    }
+
+    #[test]
+    fn date_filter_rejects_injection_payload_via_date_validation() {
+        // The precision parser rejects malformed dates during validation,
+        // before any SQL text is generated. SQL injection payloads cannot
+        // reach the SQL builder for date parameters.
+        static PARAM: SearchParam = SearchParam {
+            code: "date",
+            param_type: SearchParamType::Date,
+            path: JsonPath::Field(&["date"]),
+        };
+        let payload = "x' OR TRUE; DROP TABLE fhir_resources; --";
+        let filters = vec![SearchFilter {
+            param: &PARAM,
+            values: vec![payload.to_owned()],
+        }];
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 WHERE TRUE");
+
+        let result = push_search_filters(&mut query, &filters);
+        assert!(
+            result.is_err(),
+            "expected date validation to reject the injection payload"
+        );
+        // The query must not contain the payload, nor emit any DROP TABLE.
+        let sql = query.into_sql().as_str().to_owned();
+        assert!(!sql.contains(payload), "{sql}");
+        assert!(!sql.contains("DROP TABLE"), "{sql}");
+    }
+
+    #[test]
+    fn date_filter_binds_bounds_as_parameters_not_interpolated() {
+        // Even for a valid date search value, the generated bounds must
+        // appear as bound parameters — never as inline SQL literals.
+        static PARAM: SearchParam = SearchParam {
+            code: "date",
+            param_type: SearchParamType::Date,
+            path: JsonPath::Field(&["date"]),
+        };
+        let filters = vec![SearchFilter {
+            param: &PARAM,
+            values: vec!["ge2020-01-01".to_owned()],
+        }];
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 WHERE TRUE");
+        push_search_filters(&mut query, &filters).unwrap();
+        let sql = query.into_sql().as_str().to_owned();
+
+        // The literal date should not appear directly as a SQL timestamp
+        // string; only Postgres bind placeholders (`$n`) should reference it.
+        assert!(
+            !sql.contains("'2020-01-01'"),
+            "expected the date to be bound rather than interpolated: {sql}"
+        );
+        assert!(sql.contains("$"), "expected at least one bind placeholder");
+        assert!(
+            sql.contains("timestamptz"),
+            "expected precision-aware timestamptz cast: {sql}"
+        );
     }
 
     // -----------------------------------------------------------------------

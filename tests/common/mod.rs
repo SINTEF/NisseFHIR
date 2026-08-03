@@ -242,6 +242,21 @@ pub fn get_resource_history_with_token(
         .expect("request should build")
 }
 
+/// Build an authenticated GET request for instance history with a query string.
+pub fn get_resource_history_with_query(
+    resource_type: &str,
+    id: &str,
+    query: &str,
+    token: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!("/fhir/{resource_type}/{id}/_history?{query}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request should build")
+}
+
 /// Build a GET request to search a FHIR resource collection.
 pub fn search_resource(resource_type: &str) -> Request<Body> {
     Request::builder()
