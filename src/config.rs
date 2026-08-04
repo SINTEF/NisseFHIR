@@ -208,6 +208,13 @@ fn load_static_auth(issuer: Option<&str>, audience: Option<&str>) -> Result<Auth
 
 // --- jwks mode ---
 
+/// Minimum allowed JWKS refresh interval, in seconds.
+///
+/// Zero or unreasonably small values are rejected at configuration time so a
+/// misconfiguration cannot hammer the JWKS endpoint or spin the refresh task
+/// into a tight loop.
+pub const MIN_JWKS_REFRESH_SECS: u64 = 60;
+
 fn load_jwks_auth(issuer: Option<String>, audience: Option<String>) -> Result<AuthConfig> {
     let jwks_uri =
         env::var("JWT_JWKS_URI").context("JWT_JWKS_URI is required when JWT_MODE=jwks")?;
@@ -215,10 +222,15 @@ fn load_jwks_auth(issuer: Option<String>, audience: Option<String>) -> Result<Au
     url::Url::parse(&jwks_uri)
         .with_context(|| format!("JWT_JWKS_URI '{jwks_uri}' is not a valid URL"))?;
 
-    let refresh_secs: u64 = env::var("JWT_JWKS_REFRESH_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300);
+    // Distinguish a missing variable (default 300) from an invalid value: a
+    // typo or non-numeric value fails configuration instead of silently
+    // falling back to the default and hiding the deployment mistake.
+    let refresh_secs = parse_u64_env_var("JWT_JWKS_REFRESH_SECS")?.unwrap_or(300);
+    if refresh_secs < MIN_JWKS_REFRESH_SECS {
+        bail!(
+            "JWT_JWKS_REFRESH_SECS must be at least {MIN_JWKS_REFRESH_SECS} seconds (got {refresh_secs})"
+        );
+    }
 
     // Start with an empty key store; main.rs performs the initial fetch before
     // serving requests.
@@ -832,6 +844,98 @@ mod tests {
                 let result = load_auth_config();
                 assert!(result.is_err());
                 assert!(result.unwrap_err().to_string().contains("not a valid URL"));
+            },
+        );
+    }
+
+    #[test]
+    fn load_jwks_rejects_zero_refresh_secs() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("jwks")),
+                ("JWT_JWKS_URI", Some("https://example.com/jwks.json")),
+                ("JWT_JWKS_REFRESH_SECS", Some("0")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+            ],
+            || {
+                let result = load_auth_config();
+                assert!(result.is_err());
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("JWT_JWKS_REFRESH_SECS")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn load_jwks_rejects_small_refresh_secs() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("jwks")),
+                ("JWT_JWKS_URI", Some("https://example.com/jwks.json")),
+                ("JWT_JWKS_REFRESH_SECS", Some("10")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+            ],
+            || {
+                let result = load_auth_config();
+                assert!(result.is_err());
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("JWT_JWKS_REFRESH_SECS")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn load_jwks_rejects_invalid_refresh_secs() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("jwks")),
+                ("JWT_JWKS_URI", Some("https://example.com/jwks.json")),
+                ("JWT_JWKS_REFRESH_SECS", Some("abc")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+            ],
+            || {
+                let result = load_auth_config();
+                assert!(result.is_err());
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains("JWT_JWKS_REFRESH_SECS"),
+                    "must reference the variable: {err}"
+                );
+                assert!(
+                    err.contains("unsigned integer"),
+                    "must explain the parse failure: {err}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn load_jwks_accepts_min_refresh_secs() {
+        with_env_vars(
+            &[
+                ("JWT_MODE", Some("jwks")),
+                ("JWT_JWKS_URI", Some("https://example.com/jwks.json")),
+                ("JWT_JWKS_REFRESH_SECS", Some("60")),
+                ("JWT_ISSUER", None),
+                ("JWT_AUDIENCE", None),
+            ],
+            || {
+                let auth = load_auth_config().unwrap();
+                let AuthConfig::Jwks(jc) = auth else {
+                    panic!("expected Jwks config");
+                };
+                assert_eq!(jc.refresh_secs, 60);
             },
         );
     }

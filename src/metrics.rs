@@ -118,6 +118,7 @@ impl TelemetryState {
         let in_use = size - idle;
         metrics::gauge!("nissefhir_db_pool_connections", "state" => "idle").set(idle as f64);
         metrics::gauge!("nissefhir_db_pool_connections", "state" => "in_use").set(in_use as f64);
+        sample_jwks();
         self.process.collect();
         self.handle.render()
     }
@@ -172,6 +173,28 @@ fn describe_all() {
         metrics::Unit::Count,
         "NisseFHIR build information"
     );
+    metrics::describe_gauge!(
+        "nissefhir_jwks_keys",
+        metrics::Unit::Count,
+        "Number of verification keys currently held in the JWKS store"
+    );
+    metrics::describe_gauge!(
+        "nissefhir_jwks_last_refresh_age_seconds",
+        metrics::Unit::Seconds,
+        "Seconds since the last successful JWKS fetch or refresh"
+    );
+}
+
+/// Publish the JWKS freshness gauge for the current scrape.
+///
+/// The age is recomputed on every render so it reflects the actual elapsed
+/// time since the last successful fetch, not the value at fetch time. When no
+/// successful JWKS load has happened the gauge is left unset, so the series
+/// stays absent rather than reporting a misleading value.
+fn sample_jwks() {
+    if let Some(age) = crate::jwks::last_refresh_age_secs() {
+        metrics::gauge!("nissefhir_jwks_last_refresh_age_seconds").set(age);
+    }
 }
 
 /// Privacy-safe HTTP metrics middleware.

@@ -234,6 +234,30 @@ fn algorithm_for_jwk(jwk: &Jwk) -> Option<Algorithm> {
     }
 }
 
+/// Returns `true` if the JWK can be turned into a usable verification key:
+/// it maps to a supported algorithm, `DecodingKey::from_jwk` decodes it, and
+/// the key and algorithm belong to the same family.
+///
+/// The family check catches mismatched `alg`/`kty` metadata — for example an
+/// RSA key whose `alg` claims `HS256`. `DecodingKey::from_jwk` derives its
+/// family from the key type while `algorithm_for_jwk` honors the `alg`
+/// metadata, and token verification always fails with `InvalidAlgorithm` when
+/// they disagree, so such a key must not be considered usable.
+///
+/// Used to reject JWKS sets that contain no usable keys before they replace a
+/// working store (or before the server starts), so a non-empty set of
+/// malformed, unsupported, or mismatched keys cannot silently break token
+/// verification.
+pub(crate) fn jwk_is_usable(jwk: &Jwk) -> bool {
+    let Some(algorithm) = algorithm_for_jwk(jwk) else {
+        return false;
+    };
+    let Ok(decoding_key) = DecodingKey::from_jwk(jwk) else {
+        return false;
+    };
+    decoding_key.family() == algorithm.family()
+}
+
 fn key_algorithm_to_algorithm(ka: &jsonwebtoken::jwk::KeyAlgorithm) -> Option<Algorithm> {
     use jsonwebtoken::jwk::KeyAlgorithm;
     match ka {

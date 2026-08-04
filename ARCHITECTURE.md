@@ -56,12 +56,12 @@ For production, prefer asymmetric verification (`RS256`/`ES256`) with a mounted 
 
 #### `JWT_MODE=jwks`
 
-Fetch signing keys from an OpenID Connect / OAuth2 JWKS endpoint. Keys are loaded at startup (server fails fast if unreachable) and refreshed in the background.
+Fetch signing keys from an OpenID Connect / OAuth2 JWKS endpoint. Keys are loaded at startup (server fails fast if unreachable or if the set contains no usable key — fails closed) and refreshed in the background. A failed refresh or a set with no usable key (empty, malformed, or only unsupported algorithms) never replaces the current working set, so a transient bad response cannot wipe out verification keys.
 
 | Variable | Description |
 | --- | --- |
 | `JWT_JWKS_URI` | Required — URL to the provider's `/.well-known/jwks.json` |
-| `JWT_JWKS_REFRESH_SECS` | Background refresh interval (default: `300`) |
+| `JWT_JWKS_REFRESH_SECS` | Background refresh interval (default: `300`); must be at least `60` |
 | `JWT_ISSUER` | Optional — validate the `iss` claim |
 | `JWT_AUDIENCE` | Optional — validate the `aud` claim |
 
