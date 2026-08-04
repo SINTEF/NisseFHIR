@@ -15,6 +15,17 @@
     {{- fail "config.jwtMode=static requires config.jwtSecret.create=true or config.jwtSecret.existingSecret.name to be set" -}}
   {{- end -}}
 {{- end -}}
+{{- $pdb := .Values.podDisruptionBudget -}}
+{{- if $pdb.enabled -}}
+  {{- $hasMin := and (hasKey $pdb "minAvailable") (ne (index $pdb "minAvailable") nil) -}}
+  {{- $hasMax := and (hasKey $pdb "maxUnavailable") (ne (index $pdb "maxUnavailable") nil) -}}
+  {{- if and $hasMin $hasMax -}}
+    {{- fail "podDisruptionBudget.enabled requires exactly one of minAvailable or maxUnavailable, not both" -}}
+  {{- end -}}
+  {{- if and (not $hasMin) (not $hasMax) -}}
+    {{- fail "podDisruptionBudget.enabled requires either minAvailable or maxUnavailable to be set" -}}
+  {{- end -}}
+{{- end -}}
 {{- if .Values.metrics.enabled -}}
   {{- $port := int .Values.metrics.port -}}
   {{- if or (lt $port 1) (gt $port 65535) -}}

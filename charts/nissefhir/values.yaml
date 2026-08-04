@@ -1,5 +1,18 @@
 replicaCount: 1
 
+# PodDisruptionBudget
+# Protects against voluntary disruptions (e.g. node drains, autoscaling) taking
+# down every replica at once. Disabled by default so single-replica installs
+# are unaffected.
+#
+# When enabled, set exactly one of minAvailable or maxUnavailable. Both accept
+# an integer replica count or a percentage string such as "50%". Setting both
+# (or neither) is rejected at render time.
+podDisruptionBudget:
+  enabled: false
+  # minAvailable: 1
+  # maxUnavailable: "25%"
+
 image:
   repository: ghcr.io/sintef/nissefhir
   pullPolicy: IfNotPresent

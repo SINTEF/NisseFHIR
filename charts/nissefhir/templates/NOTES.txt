@@ -18,6 +18,12 @@
 2. FHIR Capability Statement:
   - GET /fhir/metadata
 
+{{- if and .Values.podDisruptionBudget.enabled (eq (int .Values.replicaCount) 1) }}
+NOTE: A PodDisruptionBudget is enabled with a single replica. Voluntary
+      disruptions (e.g. node drains) may be blocked until the replica is ready
+      again. Consider scaling to multiple replicas or disabling the PDB.
+{{- end }}
+
 {{- if .Values.cnpg.enabled }}
 
 3. PostgreSQL (CloudNativePG):

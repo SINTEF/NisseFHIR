@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- Helm chart: optional `podDisruptionBudget` (minAvailable or maxUnavailable) to protect against voluntary disruptions taking down all replicas at once.
+
 ## [0.1.4] - 2026-03-10
 
 ### Changed

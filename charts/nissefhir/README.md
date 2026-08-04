@@ -143,6 +143,28 @@ To verify metrics locally with docker-compose:
 curl --fail http://localhost:9090/metrics
 ```
 
+## PodDisruptionBudget
+
+NisseFHIR can render a `policy/v1` `PodDisruptionBudget` to protect against
+voluntary disruptions (node drains, autoscaling) taking down every replica at
+once. It is disabled by default so single-replica installs are unaffected.
+
+```yaml
+podDisruptionBudget:
+  enabled: false
+  # minAvailable: 1
+  # maxUnavailable: "25%"
+```
+
+- `podDisruptionBudget.enabled` renders the PodDisruptionBudget.
+- When enabled, set **exactly one** of `minAvailable` or `maxUnavailable`.
+  Both accept an integer replica count or a percentage string such as `"50%"`.
+  Setting both (or neither) is rejected at render time.
+- The PDB selector matches the Deployment selector labels.
+- The chart prints a note during install if a PDB is enabled with a single
+  replica, since such a PDB can block voluntary disruptions until the replica
+  is ready again.
+
 ## Notes
 
 - `config.jwksUrl` maps to the server's `JWT_JWKS_URI` environment variable.
