@@ -71,8 +71,11 @@ async fn create_patient_returns_correct_headers() {
         .expect("Location header must be present")
         .to_str()
         .unwrap();
-    assert!(location.starts_with("/fhir/Patient/"));
-    assert_ne!(location, "/fhir/Patient/minimal-patient");
+    assert!(location.starts_with("http://localhost:8080/fhir/Patient/"));
+    assert_ne!(
+        location,
+        "http://localhost:8080/fhir/Patient/minimal-patient"
+    );
 
     assert!(
         response.headers().get("Last-Modified").is_some(),
@@ -250,7 +253,7 @@ async fn update_creates_missing_resource_with_client_id() {
     assert_eq!(response.headers()["ETag"], "W/\"1\"");
     assert_eq!(
         response.headers()["Location"],
-        "/fhir/Patient/client-defined-id/_history/1"
+        "http://localhost:8080/fhir/Patient/client-defined-id/_history/1"
     );
     assert_eq!(count_history_entries(&pool, "crud-update-create").await, 1);
 

@@ -8,6 +8,8 @@ on:
     tags:
       - "*"
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 0"
 
 permissions:
   contents: read
@@ -228,40 +230,58 @@ jobs:
           done
 
   e2e:
-    name: E2E Tests
+    name: E2E (${{ matrix.mode }}, ${{ github.event_name == 'schedule' && 'full' || 'smoke' }})
     runs-on: ubuntu-24.04-arm
     needs:
       - rust
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [native, docker]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Build and start services
+      - name: Checkout full-example fixtures
+        if: github.event_name == 'schedule'
+        run: git submodule update --init --depth 1 references/fhir-test-cases
+
+      - name: Cache FHIR examples
+        uses: actions/cache@v5
+        with:
+          path: examples/examples-json.zip
+          key: fhir-examples-7bbba6b4d9dbd812a93e9dedb97ff0d8bd902525a5e628071a0add302a0700d5
+
+      - name: Run E2E harness
+        env:
+          E2E_ARTIFACTS_DIR: e2e-artifacts
         run: |
-          if ! docker compose -f docker-compose.e2e.yml up -d --build --wait; then
-            docker compose -f docker-compose.e2e.yml ps -a
-            docker compose -f docker-compose.e2e.yml logs
-            exit 1
+          mkdir -p e2e-artifacts
+          dataset="smoke"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            dataset="all-plus-smoke"
           fi
+          set +e
+          python3 scripts/e2e_examples.py \
+            --mode "${{ matrix.mode }}" \
+            --native-db docker \
+            --dataset "$dataset" 2>&1 | tee e2e-artifacts/harness.log
+          status=${PIPESTATUS[0]}
+          jq -n \
+            --arg mode "${{ matrix.mode }}" \
+            --arg dataset "$dataset" \
+            --argjson exit_code "$status" \
+            '{mode: $mode, dataset: $dataset, exit_code: $exit_code, success: ($exit_code == 0)}' \
+            > e2e-artifacts/result.json
+          exit "$status"
 
-      - name: Wait for server readiness
-        run: |
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:18080/healthz > /dev/null 2>&1; then
-              echo "Server is ready"
-              exit 0
-            fi
-            echo "Waiting for server... ($i/30)"
-            sleep 2
-          done
-          echo "Server did not become ready"
-          docker compose -f docker-compose.e2e.yml logs
-          exit 1
-
-      - name: Run E2E smoke test
-        run: |
-          # Test capability statement at the standard FHIR base endpoint.
-          curl -sf http://localhost:18080/fhir/metadata | jq .resourceType
+      - name: Upload E2E failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-${{ matrix.mode }}-${{ github.run_id }}
+          path: e2e-artifacts/
+          if-no-files-found: error
 
       - name: Tear down
         if: always()

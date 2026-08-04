@@ -213,8 +213,11 @@ pub async fn create_resource(
                 );
                 response_headers.insert(
                     "Location",
-                    HeaderValue::from_str(&format!("/fhir/{resource_type}/{stored_id}"))
-                        .map_err(|e| AppError::Internal(format!("invalid Location header: {e}")))?,
+                    HeaderValue::from_str(&format!(
+                        "{}/{resource_type}/{stored_id}",
+                        state.fhir_base_url.trim_end_matches('/')
+                    ))
+                    .map_err(|e| AppError::Internal(format!("invalid Location header: {e}")))?,
                 );
                 return Ok(
                     (StatusCode::CREATED, response_headers, Json(stored.resource)).into_response(),
@@ -246,8 +249,11 @@ pub async fn create_resource(
     );
     response_headers.insert(
         "Location",
-        HeaderValue::from_str(&format!("/fhir/{resource_type}/{id}"))
-            .map_err(|e| AppError::Internal(format!("invalid Location header: {e}")))?,
+        HeaderValue::from_str(&format!(
+            "{}/{resource_type}/{id}",
+            state.fhir_base_url.trim_end_matches('/')
+        ))
+        .map_err(|e| AppError::Internal(format!("invalid Location header: {e}")))?,
     );
 
     Ok((StatusCode::CREATED, response_headers, Json(stored.resource)).into_response())
@@ -416,8 +422,11 @@ pub async fn update_resource(
     response_headers.insert(
         "Location",
         HeaderValue::from_str(&format!(
-            "/fhir/{}/{}/_history/{}",
-            resource_type, id, stored.version_id
+            "{}/{}/{}/_history/{}",
+            state.fhir_base_url.trim_end_matches('/'),
+            resource_type,
+            id,
+            stored.version_id
         ))
         .map_err(|e| AppError::Internal(format!("invalid Location header: {e}")))?,
     );

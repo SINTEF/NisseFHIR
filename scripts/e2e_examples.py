@@ -29,16 +29,19 @@ SERVER_DIR = ROOT_DIR
 EXAMPLES_DIR = ROOT_DIR / "examples"
 EXAMPLES_ZIP = EXAMPLES_DIR / "examples-json.zip"
 COMPOSE_FILE = ROOT_DIR / "docker-compose.e2e.yml"
+BASELINE_FILE = ROOT_DIR / "scripts" / "e2e_baseline.json"
 
 # Additional example directories from fhir-test-cases submodule
 FHIR_TEST_CASES_DIR = ROOT_DIR / "references" / "fhir-test-cases"
 R5_EXAMPLES_DIR = FHIR_TEST_CASES_DIR / "r5" / "examples"
 
 EXAMPLES_URL = "https://build.fhir.org/examples-json.zip"
+EXAMPLES_SHA256 = "7bbba6b4d9dbd812a93e9dedb97ff0d8bd902525a5e628071a0add302a0700d5"
 JWT_SECRET = "e2e-secret-0123456789abcdefghijkl"
 JWT_ALGORITHM = "HS256"
 HOST = "127.0.0.1"
 SERVER_PORT = 18080
+PUBLIC_FHIR_BASE_URL = f"http://{HOST}:{SERVER_PORT}/fhir"
 POSTGRES_PORT = 55432
 LOCAL_POSTGRES_PORT = 5432
 POSTGRES_DB = "fhir_e2e"
@@ -226,6 +229,12 @@ def ensure_examples_data() -> None:
         log(f"downloading FHIR examples archive from {EXAMPLES_URL}")
         with urllib.request.urlopen(EXAMPLES_URL) as response:
             EXAMPLES_ZIP.write_bytes(response.read())
+
+    actual_sha256 = hashlib.sha256(EXAMPLES_ZIP.read_bytes()).hexdigest()
+    if actual_sha256 != EXAMPLES_SHA256:
+        raise E2EError(
+            f"FHIR examples checksum mismatch: expected {EXAMPLES_SHA256}, got {actual_sha256}"
+        )
 
     log(f"extracting examples archive into {EXAMPLES_DIR}")
     with zipfile.ZipFile(EXAMPLES_ZIP) as archive:
@@ -464,6 +473,11 @@ def create_resource_from_examples(
                 raise E2EError(f"created {resource_type} from {path.name} without id")
             if "etag" not in response_headers or "location" not in response_headers:
                 raise E2EError(f"create response for {resource_type} missing headers: {headers}")
+            expected_location = f"{PUBLIC_FHIR_BASE_URL}/{resource_type}/{body['id']}"
+            if not response_headers["location"].startswith(expected_location):
+                raise E2EError(
+                    f"create Location should use public FHIR base {expected_location}: {headers}"
+                )
             log(f"created {resource_type} from {path.name} as id={body['id']}")
             return body, path
 
@@ -573,9 +587,10 @@ def verify_search_summary(
     token: str,
     resource_type: str,
     expected_ids: set[str],
+    count: int = SEARCH_COUNT,
 ) -> None:
     ids: set[str] = set()
-    search_url = f"{base_url}/fhir/{resource_type}?_count={SEARCH_COUNT}"
+    search_url = f"{base_url}/fhir/{resource_type}?_count={count}"
     while True:
         status, body, _ = request_json(
             "GET",
@@ -598,13 +613,26 @@ def verify_search_summary(
 
         links = body.get("link") or []
         next_url = None
+        self_url = None
         if isinstance(links, list):
             for link in links:
                 if not isinstance(link, dict):
                     continue
+                if link.get("relation") == "self" and isinstance(link.get("url"), str):
+                    self_url = link["url"]
                 if link.get("relation") == "next" and isinstance(link.get("url"), str):
                     next_url = link["url"]
-                    break
+
+        public_search_base = f"{PUBLIC_FHIR_BASE_URL}/{resource_type}"
+        assert_true(
+            isinstance(self_url, str) and self_url.startswith(public_search_base),
+            f"search self link should use public FHIR base {public_search_base}: {self_url}",
+        )
+        if next_url is not None:
+            assert_true(
+                next_url.startswith(public_search_base),
+                f"search next link should use public FHIR base {public_search_base}: {next_url}",
+            )
 
         if next_url is None:
             break
@@ -664,6 +692,11 @@ def update_patient(base_url: str, token: str, patient: JsonObject) -> JsonObject
     assert_equal(body.get("id"), patient["id"], "patient update should preserve id")
     assert_equal(body.get("active"), updated["active"], "patient update should persist active")
     assert_true("etag" in response_headers, "patient update should include ETag")
+    expected_location = f"{PUBLIC_FHIR_BASE_URL}/Patient/{patient['id']}"
+    assert_true(
+        response_headers.get("location", "").startswith(expected_location),
+        f"patient update Location should use public FHIR base {expected_location}",
+    )
     return body
 
 
@@ -702,6 +735,15 @@ def run_crud_checks(base_url: str, mode: str) -> None:
 
     for resource in created_resources.values():
         verify_read_roundtrip(base_url, token, resource)
+
+    second_patient, _ = create_resource_from_examples(base_url, token, "Patient")
+    verify_search_summary(
+        base_url,
+        token,
+        "Patient",
+        {created_resources["Patient"]["id"], second_patient["id"]},
+        count=1,
+    )
 
     updated_patient = update_patient(base_url, token, created_resources["Patient"])
     verify_read_roundtrip(base_url, token, updated_patient)
@@ -832,6 +874,19 @@ def run_all_examples_validation(base_url: str, mode: str, workers: int) -> None:
             "example validation failures:\n" + "\n".join(failures[:50])
         )
 
+    with BASELINE_FILE.open("r", encoding="utf-8") as handle:
+        expected = json.load(handle)
+    actual = {
+        "scanned": len(jobs) + len(skipped),
+        "accepted": accepted_count,
+        "invalid": invalid_count,
+        "unsupported": unsupported_count,
+        "payload_too_large": payload_too_large_count,
+        "transport_limited": transport_limited_count,
+    }
+    if actual != expected:
+        raise E2EError(f"full example baseline changed: expected {expected}, got {actual}")
+
     for resource_type, expected_ids in created_ids_by_type.items():
         if expected_ids:
             verify_search_summary(base_url, token, resource_type, expected_ids)
@@ -951,7 +1006,7 @@ def native_environment(database_url: str) -> dict[str, str]:
             "BIND_ADDR": f"{HOST}:{SERVER_PORT}",
             "JWT_MODE": "static",
             "JWT_SECRET": JWT_SECRET,
-            "FHIR_BASE_URL": f"http://{HOST}:{SERVER_PORT}/fhir",
+            "FHIR_BASE_URL": PUBLIC_FHIR_BASE_URL,
             "SERVE_DOCS": "false",
             "RUST_LOG": env.get("RUST_LOG", "fhir_server=info,tower_http=info"),
         }
@@ -1091,12 +1146,22 @@ def run_native_mode(native_db_mode: str, dataset: str, workers: int) -> None:
 def run_docker_mode(dataset: str, workers: int) -> None:
     log("starting PostgreSQL and containerized server via docker compose")
     cleanup_compose()
-    docker_compose("up", "--build", "-d", "postgres", "fhir-server")
-
     try:
+        docker_compose("up", "--build", "-d", "postgres", "fhir-server")
         base_url = wait_for_http(detect_docker_server_urls(), timeout_seconds=180)
         run_dataset(base_url, "docker", dataset, workers)
     finally:
+        artifact_dir = os.environ.get("E2E_ARTIFACTS_DIR")
+        if artifact_dir:
+            output_dir = Path(artifact_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                compose_logs = docker_compose("logs", "--no-color", capture_output=True)
+                (output_dir / "docker-compose.log").write_text(
+                    compose_logs.stdout, encoding="utf-8"
+                )
+            except subprocess.CalledProcessError as exc:
+                log(f"could not capture docker compose logs: {exc}")
         cleanup_compose()
 
 
