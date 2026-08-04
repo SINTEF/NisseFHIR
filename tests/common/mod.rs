@@ -143,6 +143,16 @@ pub fn expired_token(tenant: &str) -> String {
 /// Each test gets its own pool to avoid cross-runtime lifetime issues
 /// (each #[tokio::test] has its own runtime). The expensive part — parsing
 /// the FHIR schema — is shared via SHARED_VALIDATOR above.
+/// Build a pool that connects lazily, without requiring a live database at
+/// construction time. Useful for tests that exercise middleware and routes
+/// that do not hit the database.
+pub fn lazy_pool() -> PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://postgres:postgres@localhost/postgres")
+        .expect("lazy pool should build")
+}
+
 pub async fn setup_test_db() -> PgPool {
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1/fhir_test".to_owned());

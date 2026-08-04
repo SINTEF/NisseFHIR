@@ -5,15 +5,8 @@ use axum::{
     body::Body,
     http::{HeaderValue, Method, Request, StatusCode, header},
 };
-use common::{build_test_app, build_test_app_with_options};
+use common::{build_test_app, build_test_app_with_options, lazy_pool};
 use tower::ServiceExt;
-
-fn lazy_pool() -> sqlx::PgPool {
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect_lazy("postgres://postgres:postgres@localhost/postgres")
-        .expect("lazy pool should build")
-}
 
 #[tokio::test]
 async fn docs_route_is_disabled_by_default() {

@@ -21,7 +21,8 @@ pub const MAX_SEARCH_QUERY_BYTES: usize = 64 * 1024;
 use auth::AuthConfig;
 use axum::{
     Router,
-    http::{Method, header},
+    extract::MatchedPath,
+    http::{Method, Request, Response, header},
     middleware::{self, Next},
     response::IntoResponse,
 };
@@ -32,15 +33,16 @@ use tower_http::{
     compression::CompressionLayer,
     cors::CorsLayer,
     limit::RequestBodyLimitLayer,
-    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+    trace::{MakeSpan, OnResponse, TraceLayer},
 };
-use tracing::Level;
+use tracing::Span;
 use utoipa::openapi::{
     Components,
     security::{Http, HttpAuthScheme, SecurityScheme},
 };
 use utoipa::{Modify, OpenApi};
 use utoipa_swagger_ui::{Config as SwaggerUiConfig, SwaggerUi};
+use uuid::Uuid;
 use validation::FhirSchemaValidator;
 
 /// Maximum request body size: 10 MB.
@@ -103,9 +105,15 @@ impl Modify for SecurityAddon {
 
 pub fn build_router(state: AppState) -> Router {
     let cors = build_cors_layer(&state.cors_allowed_origins);
+    // Privacy-safe trace schema: never record request URIs (which may carry
+    // PHI in the query string), headers, or bodies. Only method, matched route
+    // template, correlation ID, status, and latency are logged.
     let trace = TraceLayer::new_for_http()
-        .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
-        .on_response(DefaultOnResponse::new().level(Level::INFO));
+        .make_span_with(PrivacyMakeSpan)
+        .on_request(())
+        .on_body_chunk(())
+        .on_eos(())
+        .on_response(PrivacyOnResponse);
 
     let mut router = fhir::routes();
     if state.serve_docs {
@@ -128,6 +136,62 @@ pub fn build_router(state: AppState) -> Router {
         .layer(trace)
         .layer(cors)
         .with_state(state)
+}
+
+/// Privacy-safe request span.
+///
+/// Records only the HTTP method, the matched route template, and a fresh
+/// correlation ID. The raw request URI is deliberately *never* recorded,
+/// because FHIR search query strings can contain names, identifiers, dates,
+/// and other protected health information.
+///
+/// Redaction policy for resource IDs and tenant identifiers: both can appear
+/// in request paths and query strings, so the policy is to never log the raw
+/// URI. The matched route template uses `{id}`-style placeholders, so concrete
+/// resource IDs and tenant IDs never reach the logs. If tenant-level
+/// correlation is ever needed, add an explicitly *hashed* tenant field here.
+#[derive(Clone, Debug)]
+struct PrivacyMakeSpan;
+
+impl<B> MakeSpan<B> for PrivacyMakeSpan {
+    fn make_span(&mut self, request: &Request<B>) -> Span {
+        let method = request.method().to_string();
+        let route = request
+            .extensions()
+            .get::<MatchedPath>()
+            .map(|p| p.as_str().to_owned())
+            .unwrap_or_else(|| "<unmatched>".to_owned());
+        let correlation_id = Uuid::new_v4().to_string();
+        tracing::info_span!(
+            "http_request",
+            method = %method,
+            route = %route,
+            correlation_id = %correlation_id,
+            status = tracing::field::Empty,
+            latency_ms = tracing::field::Empty,
+        )
+    }
+}
+
+/// Privacy-safe completion event.
+///
+/// Records status and latency into the request span and emits an INFO event.
+#[derive(Clone, Debug)]
+struct PrivacyOnResponse;
+
+impl<B> OnResponse<B> for PrivacyOnResponse {
+    fn on_response(self, response: &Response<B>, latency: std::time::Duration, span: &Span) {
+        let status = response.status().as_u16();
+        let latency_ms = latency.as_millis() as u64;
+        span.record("status", status);
+        span.record("latency_ms", latency_ms);
+        tracing::info!(
+            parent: span,
+            status,
+            latency_ms,
+            "request completed"
+        );
+    }
 }
 
 fn build_cors_layer(allowed_origins: &[header::HeaderValue]) -> CorsLayer {
