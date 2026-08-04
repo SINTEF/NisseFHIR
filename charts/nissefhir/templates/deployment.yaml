@@ -100,6 +100,22 @@ spec:
             - name: SHUTDOWN_TIMEOUT_SECS
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.dbPoolMinConnections }}
+            - name: DB_POOL_MIN_CONNECTIONS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.dbPoolMaxConnections }}
+            - name: DB_POOL_MAX_CONNECTIONS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.dbPoolIdleTimeoutSecs }}
+            - name: DB_POOL_IDLE_TIMEOUT_SECS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.dbPoolMaxLifetimeSecs }}
+            - name: DB_POOL_MAX_LIFETIME_SECS
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.config.rustLog }}
             - name: RUST_LOG
               value: {{ . | quote }}

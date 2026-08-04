@@ -108,5 +108,6 @@ cnpg:
 
 - `config.jwksUrl` maps to the server's `JWT_JWKS_URI` environment variable.
 - `config.shutdownTimeoutSecs` maps to `SHUTDOWN_TIMEOUT_SECS` and bounds the graceful-shutdown drain window (default `10` seconds).
+- `config.dbPoolMinConnections`, `config.dbPoolMaxConnections`, `config.dbPoolIdleTimeoutSecs`, and `config.dbPoolMaxLifetimeSecs` map to the `DB_POOL_*` environment variables and tune the PostgreSQL connection pool. Leave them unset to use the server defaults.
 - `config.jwtSecret.delivery=file` only changes how the Secret reaches the container; the source Secret configuration stays the same.
 - If `cnpg.enabled=true`, the chart uses the CloudNativePG application Secret for `DATABASE_URL`.

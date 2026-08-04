@@ -79,6 +79,13 @@ config:
   # bound for in-flight requests before forcing exit.
   shutdownTimeoutSecs: "10"
 
+  # PostgreSQL connection-pool settings (maps to DB_POOL_* env vars).
+  # Leave unset (or empty) to use the server defaults.
+  # dbPoolMinConnections: "1"
+  # dbPoolMaxConnections: "10"
+  # dbPoolIdleTimeoutSecs: "600"
+  # dbPoolMaxLifetimeSecs: "3600"
+
   # Rust log level
   rustLog: "fhir_server=info,tower_http=info"
 
