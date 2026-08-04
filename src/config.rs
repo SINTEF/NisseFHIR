@@ -12,6 +12,15 @@ use tracing::warn;
 use crate::auth::{AuthConfig, JwksConfig, StaticKeyConfig, build_validation};
 use crate::{DEFAULT_MAX_SEARCH_PAGE_COUNT, DEFAULT_SEARCH_PAGE_COUNT, SearchConfig};
 
+#[derive(Clone, Copy, Debug)]
+/// Tunable PostgreSQL connection-pool settings.
+pub struct DbPoolConfig {
+    pub min_connections: u32,
+    pub max_connections: u32,
+    pub idle_timeout_secs: Option<u64>,
+    pub max_lifetime_secs: Option<u64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub bind_addr: String,
@@ -19,6 +28,7 @@ pub struct AppConfig {
     pub db_connect_timeout_secs: u64,
     pub db_acquire_timeout_secs: u64,
     pub db_statement_timeout_ms: u64,
+    pub db_pool: DbPoolConfig,
     pub auth: AuthConfig,
     pub fhir_base_url: String,
     pub search: SearchConfig,
@@ -38,6 +48,7 @@ impl AppConfig {
         let db_acquire_timeout_secs = parse_u64_env_var("DB_ACQUIRE_TIMEOUT_SECS")?.unwrap_or(5);
         let db_statement_timeout_ms =
             parse_u64_env_var("DB_STATEMENT_TIMEOUT_MS")?.unwrap_or(10_000);
+        let db_pool = load_db_pool_config()?;
 
         if db_connect_timeout_secs == 0 {
             bail!("DB_CONNECT_TIMEOUT_SECS must be greater than 0");
@@ -67,6 +78,7 @@ impl AppConfig {
             db_connect_timeout_secs,
             db_acquire_timeout_secs,
             db_statement_timeout_ms,
+            db_pool,
             auth,
             fhir_base_url,
             search,
@@ -93,6 +105,36 @@ fn load_auth_config() -> Result<AuthConfig> {
         "jwks" => load_jwks_auth(issuer, audience),
         other => bail!("unsupported JWT_MODE '{other}'; expected 'static' or 'jwks'"),
     }
+}
+
+fn load_db_pool_config() -> Result<DbPoolConfig> {
+    let min_connections = parse_u32_env_var("DB_POOL_MIN_CONNECTIONS")?.unwrap_or(1);
+    let max_connections = parse_u32_env_var("DB_POOL_MAX_CONNECTIONS")?.unwrap_or(10);
+    let idle_timeout_secs = parse_u64_env_var("DB_POOL_IDLE_TIMEOUT_SECS")?;
+    let max_lifetime_secs = parse_u64_env_var("DB_POOL_MAX_LIFETIME_SECS")?;
+
+    if min_connections == 0 {
+        bail!("DB_POOL_MIN_CONNECTIONS must be greater than 0");
+    }
+    if max_connections == 0 {
+        bail!("DB_POOL_MAX_CONNECTIONS must be greater than 0");
+    }
+    if min_connections > max_connections {
+        bail!("DB_POOL_MIN_CONNECTIONS must be less than or equal to DB_POOL_MAX_CONNECTIONS");
+    }
+    if idle_timeout_secs == Some(0) {
+        bail!("DB_POOL_IDLE_TIMEOUT_SECS must be greater than 0");
+    }
+    if max_lifetime_secs == Some(0) {
+        bail!("DB_POOL_MAX_LIFETIME_SECS must be greater than 0");
+    }
+
+    Ok(DbPoolConfig {
+        min_connections,
+        max_connections,
+        idle_timeout_secs,
+        max_lifetime_secs,
+    })
 }
 
 fn load_search_config() -> Result<SearchConfig> {
@@ -1021,6 +1063,105 @@ mod tests {
                 );
             },
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // load_db_pool_config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn db_pool_uses_defaults_when_unset() {
+        with_env_vars(
+            &[
+                ("DB_POOL_MIN_CONNECTIONS", None),
+                ("DB_POOL_MAX_CONNECTIONS", None),
+                ("DB_POOL_IDLE_TIMEOUT_SECS", None),
+                ("DB_POOL_MAX_LIFETIME_SECS", None),
+            ],
+            || {
+                let cfg = load_db_pool_config().unwrap();
+                assert_eq!(cfg.min_connections, 1);
+                assert_eq!(cfg.max_connections, 10);
+                assert_eq!(cfg.idle_timeout_secs, None);
+                assert_eq!(cfg.max_lifetime_secs, None);
+            },
+        );
+    }
+
+    #[test]
+    fn db_pool_reads_explicit_values() {
+        with_env_vars(
+            &[
+                ("DB_POOL_MIN_CONNECTIONS", Some("4")),
+                ("DB_POOL_MAX_CONNECTIONS", Some("32")),
+                ("DB_POOL_IDLE_TIMEOUT_SECS", Some("120")),
+                ("DB_POOL_MAX_LIFETIME_SECS", Some("3600")),
+            ],
+            || {
+                let cfg = load_db_pool_config().unwrap();
+                assert_eq!(cfg.min_connections, 4);
+                assert_eq!(cfg.max_connections, 32);
+                assert_eq!(cfg.idle_timeout_secs, Some(120));
+                assert_eq!(cfg.max_lifetime_secs, Some(3600));
+            },
+        );
+    }
+
+    #[test]
+    fn db_pool_rejects_zero_min() {
+        with_env_vars(&[("DB_POOL_MIN_CONNECTIONS", Some("0"))], || {
+            let err = load_db_pool_config().unwrap_err();
+            assert!(err.to_string().contains("DB_POOL_MIN_CONNECTIONS"));
+        });
+    }
+
+    #[test]
+    fn db_pool_rejects_zero_max() {
+        with_env_vars(&[("DB_POOL_MAX_CONNECTIONS", Some("0"))], || {
+            let err = load_db_pool_config().unwrap_err();
+            assert!(err.to_string().contains("DB_POOL_MAX_CONNECTIONS"));
+        });
+    }
+
+    #[test]
+    fn db_pool_rejects_min_greater_than_max() {
+        with_env_vars(
+            &[
+                ("DB_POOL_MIN_CONNECTIONS", Some("20")),
+                ("DB_POOL_MAX_CONNECTIONS", Some("10")),
+            ],
+            || {
+                let err = load_db_pool_config().unwrap_err();
+                assert!(
+                    err.to_string()
+                        .contains("DB_POOL_MIN_CONNECTIONS must be less than or equal to")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn db_pool_rejects_zero_idle_timeout() {
+        with_env_vars(&[("DB_POOL_IDLE_TIMEOUT_SECS", Some("0"))], || {
+            let err = load_db_pool_config().unwrap_err();
+            assert!(err.to_string().contains("DB_POOL_IDLE_TIMEOUT_SECS"));
+        });
+    }
+
+    #[test]
+    fn db_pool_rejects_zero_max_lifetime() {
+        with_env_vars(&[("DB_POOL_MAX_LIFETIME_SECS", Some("0"))], || {
+            let err = load_db_pool_config().unwrap_err();
+            assert!(err.to_string().contains("DB_POOL_MAX_LIFETIME_SECS"));
+        });
+    }
+
+    #[test]
+    fn db_pool_rejects_non_numeric() {
+        with_env_vars(&[("DB_POOL_MAX_CONNECTIONS", Some("many"))], || {
+            let err = load_db_pool_config().unwrap_err();
+            assert!(err.to_string().contains("DB_POOL_MAX_CONNECTIONS"));
+        });
     }
 
     // -----------------------------------------------------------------------

@@ -20,10 +20,21 @@ async fn main() -> anyhow::Result<()> {
         &config.db_connect_timeout_secs.to_string(),
     );
     let statement_timeout_ms = config.db_statement_timeout_ms;
+    let pool_cfg = config.db_pool;
 
-    let pool = PgPoolOptions::new()
-        .max_connections(10)
-        .acquire_timeout(Duration::from_secs(config.db_acquire_timeout_secs))
+    let mut pool_builder = PgPoolOptions::new()
+        .min_connections(pool_cfg.min_connections)
+        .max_connections(pool_cfg.max_connections)
+        .acquire_timeout(Duration::from_secs(config.db_acquire_timeout_secs));
+    // Only set timeouts when explicitly configured; otherwise keep the
+    // library defaults (passing None would *disable* the default idle timeout).
+    if let Some(secs) = pool_cfg.idle_timeout_secs {
+        pool_builder = pool_builder.idle_timeout(Duration::from_secs(secs));
+    }
+    if let Some(secs) = pool_cfg.max_lifetime_secs {
+        pool_builder = pool_builder.max_lifetime(Duration::from_secs(secs));
+    }
+    let pool = pool_builder
         .after_connect(move |conn, _meta| {
             Box::pin(async move {
                 sqlx::query("SELECT set_config('statement_timeout', $1, false)")
