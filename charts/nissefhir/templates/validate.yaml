@@ -15,3 +15,38 @@
     {{- fail "config.jwtMode=static requires config.jwtSecret.create=true or config.jwtSecret.existingSecret.name to be set" -}}
   {{- end -}}
 {{- end -}}
+{{- if .Values.metrics.enabled -}}
+  {{- $port := int .Values.metrics.port -}}
+  {{- if or (lt $port 1) (gt $port 65535) -}}
+    {{- fail (printf "metrics.port %d is out of range; expected 1-65535" $port) -}}
+  {{- end -}}
+  {{- if .Values.metrics.serviceMonitor.enabled -}}
+    {{- $interval := toString .Values.metrics.serviceMonitor.interval -}}
+    {{- $timeout := toString .Values.metrics.serviceMonitor.scrapeTimeout -}}
+    {{- if not (regexMatch "^[0-9]+(ms|s|m|h)$" $interval) -}}
+      {{- fail (printf "metrics.serviceMonitor.interval %q must be a positive duration like 30s" $interval) -}}
+    {{- end -}}
+    {{- if not (regexMatch "^[0-9]+(ms|s|m|h)$" $timeout) -}}
+      {{- fail (printf "metrics.serviceMonitor.scrapeTimeout %q must be a positive duration like 10s" $timeout) -}}
+    {{- end -}}
+    {{- $intervalNum := regexFind "[0-9]+" $interval | int -}}
+    {{- $timeoutNum := regexFind "[0-9]+" $timeout | int -}}
+    {{- if le $intervalNum 0 -}}
+      {{- fail (printf "metrics.serviceMonitor.interval %q must be positive" $interval) -}}
+    {{- end -}}
+    {{- if le $timeoutNum 0 -}}
+      {{- fail (printf "metrics.serviceMonitor.scrapeTimeout %q must be positive" $timeout) -}}
+    {{- end -}}
+    {{- /* Normalize both durations to milliseconds before comparing them.
+           Comparing only their numeric portions would reject 30s <= 1m and
+           accept 1m <= 30s. */ -}}
+    {{- $multipliers := dict "ms" 1 "s" 1000 "m" 60000 "h" 3600000 -}}
+    {{- $intervalUnit := regexFind "(ms|s|m|h)$" $interval -}}
+    {{- $timeoutUnit := regexFind "(ms|s|m|h)$" $timeout -}}
+    {{- $intervalMillis := mul $intervalNum (get $multipliers $intervalUnit) -}}
+    {{- $timeoutMillis := mul $timeoutNum (get $multipliers $timeoutUnit) -}}
+    {{- if gt $timeoutMillis $intervalMillis -}}
+      {{- fail (printf "metrics.serviceMonitor.scrapeTimeout %q must not be greater than interval %q" $timeout $interval) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}

@@ -51,9 +51,23 @@ spec:
             - name: http
               containerPort: {{ .Values.service.targetPort }}
               protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: BIND_ADDR
               value: "0.0.0.0:{{ .Values.service.targetPort }}"
+            {{- if .Values.metrics.enabled }}
+            - name: METRICS_ENABLED
+              value: "true"
+            - name: METRICS_BIND_ADDR
+              value: "0.0.0.0:{{ .Values.metrics.port }}"
+            {{- else }}
+            - name: METRICS_ENABLED
+              value: "false"
+            {{- end }}
             {{- if .Values.cnpg.enabled }}
             - name: DATABASE_URL
               valueFrom:

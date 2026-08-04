@@ -28,6 +28,9 @@ utoipa = { version = "5.4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }
 url = "2.5"
 uuid = { version = "1.18", features = ["serde", "v4"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+metrics-process = "2.4"
 
 [dev-dependencies]
 http-body-util = "0.1"

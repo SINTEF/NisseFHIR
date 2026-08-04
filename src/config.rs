@@ -1,5 +1,6 @@
 use std::{
     env, fs,
+    net::SocketAddr,
     sync::{Arc, RwLock},
 };
 
@@ -21,6 +22,13 @@ pub struct DbPoolConfig {
     pub max_lifetime_secs: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug)]
+/// Prometheus metrics configuration.
+pub struct MetricsConfig {
+    pub enabled: bool,
+    pub bind_addr: SocketAddr,
+}
+
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub bind_addr: String,
@@ -37,6 +45,7 @@ pub struct AppConfig {
     pub shutdown_timeout_secs: u64,
     pub cors_allowed_origins: Vec<HeaderValue>,
     pub serve_docs: bool,
+    pub metrics: MetricsConfig,
 }
 
 impl AppConfig {
@@ -71,6 +80,7 @@ impl AppConfig {
         let auth = load_auth_config()?;
         let cors_allowed_origins = parse_cors_allowed_origins()?;
         let serve_docs = env_flag("SERVE_DOCS");
+        let metrics = load_metrics_config()?;
 
         Ok(Self {
             bind_addr,
@@ -85,6 +95,7 @@ impl AppConfig {
             shutdown_timeout_secs,
             cors_allowed_origins,
             serve_docs,
+            metrics,
         })
     }
 }
@@ -346,6 +357,40 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+// ---------------------------------------------------------------------------
+// Metrics config
+// ---------------------------------------------------------------------------
+
+fn load_metrics_config() -> Result<MetricsConfig> {
+    let enabled = parse_metrics_enabled()?;
+    let bind_addr = env::var("METRICS_BIND_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:9090".to_owned())
+        .parse::<SocketAddr>()
+        .with_context(|| {
+            "METRICS_BIND_ADDR must be a valid socket address (host:port)".to_owned()
+        })?;
+    Ok(MetricsConfig { enabled, bind_addr })
+}
+
+/// Strict, case-insensitive boolean parser for `METRICS_ENABLED`.
+///
+/// Accepts the repository's established true/false spellings and rejects any
+/// other value instead of silently treating a typo as disabled. Defaults to
+/// `true` so packaged deployments get monitoring for free.
+fn parse_metrics_enabled() -> Result<bool> {
+    match env::var("METRICS_ENABLED") {
+        Ok(value) => match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => Ok(true),
+            "0" | "false" | "no" => Ok(false),
+            other => {
+                bail!("METRICS_ENABLED must be a boolean (true/false/yes/no/1/0); got '{other}'")
+            }
+        },
+        Err(env::VarError::NotPresent) => Ok(true),
+        Err(env::VarError::NotUnicode(_)) => bail!("METRICS_ENABLED contains invalid unicode"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +546,132 @@ mod tests {
         with_env_vars(&[("__TEST_FLAG", None)], || {
             assert!(!env_flag("__TEST_FLAG"));
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // metrics config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn metrics_defaults_enabled_on_0_0_0_0_9090() {
+        with_env_vars(
+            &[("METRICS_ENABLED", None), ("METRICS_BIND_ADDR", None)],
+            || {
+                let cfg = load_metrics_config().unwrap();
+                assert!(cfg.enabled, "metrics must default to enabled");
+                assert_eq!(cfg.bind_addr, "0.0.0.0:9090".parse::<SocketAddr>().unwrap());
+            },
+        );
+    }
+
+    #[test]
+    fn metrics_disabled_spellings() {
+        for v in ["false", "FALSE", "0", "no", "NO"] {
+            with_env_vars(
+                &[("METRICS_ENABLED", Some(v)), ("METRICS_BIND_ADDR", None)],
+                || {
+                    assert!(
+                        !load_metrics_config().unwrap().enabled,
+                        "'{v}' must disable metrics"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn metrics_enabled_spellings() {
+        for v in ["true", "TRUE", "1", "yes", "YES"] {
+            with_env_vars(
+                &[("METRICS_ENABLED", Some(v)), ("METRICS_BIND_ADDR", None)],
+                || {
+                    assert!(
+                        load_metrics_config().unwrap().enabled,
+                        "'{v}' must enable metrics"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn metrics_rejects_invalid_boolean() {
+        for v in ["tru", "enabled", " yes", "yes ", "True "] {
+            with_env_vars(
+                &[("METRICS_ENABLED", Some(v)), ("METRICS_BIND_ADDR", None)],
+                || {
+                    let err = load_metrics_config().unwrap_err();
+                    assert!(
+                        err.to_string().contains("METRICS_ENABLED"),
+                        "'{v}' must be rejected: {err}"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn metrics_valid_bind_override() {
+        with_env_vars(
+            &[
+                ("METRICS_ENABLED", None),
+                ("METRICS_BIND_ADDR", Some("127.0.0.1:9191")),
+            ],
+            || {
+                let cfg = load_metrics_config().unwrap();
+                assert_eq!(
+                    cfg.bind_addr,
+                    "127.0.0.1:9191".parse::<SocketAddr>().unwrap()
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn metrics_rejects_empty_bind_addr() {
+        with_env_vars(
+            &[("METRICS_ENABLED", None), ("METRICS_BIND_ADDR", Some(""))],
+            || {
+                let err = load_metrics_config().unwrap_err();
+                assert!(err.to_string().contains("METRICS_BIND_ADDR"));
+            },
+        );
+    }
+
+    #[test]
+    fn metrics_rejects_invalid_bind_addr() {
+        with_env_vars(
+            &[
+                ("METRICS_ENABLED", None),
+                ("METRICS_BIND_ADDR", Some("not-an-address")),
+            ],
+            || {
+                let err = load_metrics_config().unwrap_err();
+                assert!(err.to_string().contains("METRICS_BIND_ADDR"));
+            },
+        );
+    }
+
+    #[test]
+    fn from_env_reads_metrics_config() {
+        with_env_vars(
+            &[
+                ("METRICS_ENABLED", Some("false")),
+                ("METRICS_BIND_ADDR", Some("127.0.0.1:9191")),
+                ("DATABASE_URL", Some("postgres://localhost/test")),
+                ("JWT_MODE", Some("static")),
+                ("JWT_ALGORITHM", Some("HS256")),
+                ("JWT_SECRET", Some("a-very-long-secret-at-least-32-chars!!")),
+            ],
+            || {
+                let config = AppConfig::from_env().unwrap();
+                assert!(!config.metrics.enabled);
+                assert_eq!(
+                    config.metrics.bind_addr,
+                    "127.0.0.1:9191".parse::<SocketAddr>().unwrap()
+                );
+            },
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -6,6 +6,7 @@ pub mod error;
 pub mod fhir;
 pub mod jwks;
 pub mod media_type;
+pub mod metrics;
 pub mod search;
 pub mod search_params;
 pub mod store;
@@ -134,6 +135,11 @@ pub fn build_router(state: AppState) -> Router {
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(HelmetLayer::with_defaults())
         .layer(trace)
+        // Privacy-safe metrics middleware, placed next to the trace layer so
+        // logging and metrics share one route-normalization policy. It emits
+        // to the metrics-rs global recorder; when the recorder is not
+        // installed (metrics disabled) these are harmless no-ops.
+        .layer(middleware::from_fn(metrics::http_metrics_middleware))
         .layer(cors)
         .with_state(state)
 }

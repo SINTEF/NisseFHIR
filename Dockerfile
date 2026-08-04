@@ -34,8 +34,10 @@ WORKDIR /srv/app
 
 COPY --from=build /srv/app/target/release/fhir_server /usr/local/bin/fhir_server
 
-ENV BIND_ADDR=0.0.0.0:8080
+ENV BIND_ADDR=0.0.0.0:8080 \
+    METRICS_ENABLED=true \
+    METRICS_BIND_ADDR=0.0.0.0:9090
 
-EXPOSE 8080
+EXPOSE 8080 9090
 
 ENTRYPOINT ["fhir_server"]

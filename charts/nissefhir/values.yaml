@@ -137,6 +137,22 @@ extraEnv: []
 # - name: RUST_LOG
 #   value: debug
 
+# Prometheus metrics on a dedicated telemetry listener.
+#
+# The telemetry listener is intentionally separate from the FHIR router and is
+# NOT exposed through the public ingress. It is unauthenticated for Prometheus
+# compatibility and must be protected by cluster networking / firewalls.
+metrics:
+  enabled: true
+  port: 9090
+  serviceMonitor:
+    # Enabling this requires the Prometheus Operator's ServiceMonitor CRD to
+    # exist in the cluster; it is not installed by this chart.
+    enabled: false
+    additionalLabels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+
 resources: {}
 
 livenessProbe:

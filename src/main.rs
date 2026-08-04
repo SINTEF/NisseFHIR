@@ -1,13 +1,13 @@
 use anyhow::Context;
 use fhir_server::{
-    AppState, auth::AuthConfig, build_router, config::AppConfig, store::PgStore,
-    validation::FhirSchemaValidator,
+    AppState, auth::AuthConfig, build_router, config::AppConfig, metrics::TelemetryState,
+    store::PgStore, validation::FhirSchemaValidator,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -54,9 +54,34 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| "failed to run migrations")?;
 
     // A token shared between the shutdown-signal watcher, the HTTP server,
-    // and the background JWKS refresher. Cancelling it stops the background
-    // work cleanly once a shutdown signal arrives.
+    // the telemetry server, and the background JWKS refresher. Cancelling it
+    // stops the background work cleanly once a shutdown signal arrives.
     let shutdown_token = CancellationToken::new();
+
+    // Prometheus metrics: install the recorder and bind the dedicated
+    // telemetry listener before accepting any application traffic. Both are
+    // startup failures if metrics are enabled, so a configured monitoring
+    // surface can never silently disappear.
+    let telemetry = if config.metrics.enabled {
+        let telemetry_state = TelemetryState::install(pool.clone(), config.db_pool.max_connections)
+            .with_context(|| "failed to initialize Prometheus metrics")?;
+        let telemetry_listener = tokio::net::TcpListener::bind(config.metrics.bind_addr)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to bind telemetry listener to {}",
+                    config.metrics.bind_addr
+                )
+            })?;
+        info!(
+            address = %config.metrics.bind_addr,
+            "Prometheus metrics listener bound"
+        );
+        Some((telemetry_state, telemetry_listener))
+    } else {
+        info!("Prometheus metrics disabled; no telemetry listener started");
+        None
+    };
 
     // JWKS: fetch keys before accepting any requests, then start background refresh.
     if let AuthConfig::Jwks(ref jwks_cfg) = config.auth {
@@ -79,6 +104,33 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind to {}", config.bind_addr))?;
 
+    // Spawn the telemetry server (if enabled) watching the shared shutdown
+    // token, so the telemetry listener stops accepting and drains together
+    // with the main HTTP server.
+    let telemetry_handle = if let Some((telemetry_state, telemetry_listener)) = telemetry {
+        let telemetry_router = fhir_server::metrics::telemetry_router(telemetry_state);
+        let token = shutdown_token.clone();
+        Some(tokio::spawn(async move {
+            axum::serve(telemetry_listener, telemetry_router)
+                .with_graceful_shutdown(async move { token.cancelled().await })
+                .await
+        }))
+    } else {
+        None
+    };
+
+    // Wrap the telemetry task in a future we can supervise alongside the main
+    // server and also drain at shutdown. When metrics are disabled this stays
+    // pending forever, so the supervision arm below never fires.
+    let telemetry_enabled = telemetry_handle.is_some();
+    let telemetry_fut = async {
+        match telemetry_handle {
+            Some(handle) => handle.await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(telemetry_fut);
+
     info!(
         address = %config.bind_addr,
         shutdown_timeout_secs = config.shutdown_timeout_secs,
@@ -89,26 +141,42 @@ async fn main() -> anyhow::Result<()> {
     // shutdown signal fires. The drain deadline is measured from the moment
     // the signal arrives (not from server startup), so a wedged request can
     // never stall termination past the configured bound.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown_token.clone(), shutdown_tx))
         .into_future();
     tokio::pin!(server);
 
-    let (serve_result, forced) = tokio::select! {
-        res = &mut server => (res, false),
-        _ = shutdown_rx => {
-            // A shutdown signal arrived: the listener has stopped accepting
-            // and in-flight requests are draining. Bound that drain so a
-            // wedged request cannot stall termination past the deadline.
-            match tokio::time::timeout(
-                Duration::from_secs(config.shutdown_timeout_secs),
-                &mut server,
-            )
-            .await
-            {
-                Ok(res) => (res, false),
-                Err(_elapsed) => (Ok(()), true),
+    // Supervise the telemetry server while the main server runs. If the
+    // telemetry task ends before shutdown — a serve error or a panic — report
+    // it loudly and keep serving the main FHIR router, then loop so the main
+    // server continues to be driven. Once shutdown fires we break out and drain
+    // both listeners.
+    let mut telemetry_done = false;
+    let (serve_result, forced) = loop {
+        tokio::select! {
+            res = &mut server => break (res, false),
+            _ = &mut shutdown_rx => {
+                // A shutdown signal arrived: the listener has stopped accepting
+                // and in-flight requests are draining. Bound that drain so a
+                // wedged request cannot stall termination past the deadline.
+                match tokio::time::timeout(
+                    Duration::from_secs(config.shutdown_timeout_secs),
+                    &mut server,
+                )
+                .await
+                {
+                    Ok(res) => break (res, false),
+                    Err(_elapsed) => break (Ok(()), true),
+                }
+            }
+            outcome = &mut telemetry_fut, if !telemetry_done => {
+                telemetry_done = true;
+                match outcome {
+                    Ok(Ok(())) => info!("telemetry server stopped before main server"),
+                    Ok(Err(e)) => error!("telemetry server failed: {e}"),
+                    Err(e) => error!("telemetry server panicked: {e}"),
+                }
             }
         }
     };
@@ -125,6 +193,20 @@ async fn main() -> anyhow::Result<()> {
 
     // Stop the background JWKS refresh task.
     shutdown_token.cancel();
+
+    // If the telemetry server is still running, give it a bounded window to
+    // drain. It stops accepting on the same cancellation token; scrape requests
+    // are trivial and drain fast, but a wedged connection must not extend
+    // shutdown past this bound. Skipped when it already ended (supervised
+    // failure) or metrics are disabled.
+    if telemetry_enabled
+        && !telemetry_done
+        && tokio::time::timeout(Duration::from_secs(5), &mut telemetry_fut)
+            .await
+            .is_err()
+    {
+        warn!("telemetry server drain deadline reached");
+    }
 
     // Gracefully close the PostgreSQL pool. Bound this too so a connection
     // that cannot be returned cannot extend shutdown indefinitely.

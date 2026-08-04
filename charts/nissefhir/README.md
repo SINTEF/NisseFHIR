@@ -104,6 +104,45 @@ cnpg:
       key: database-url
 ```
 
+## Prometheus Metrics
+
+NisseFHIR serves privacy-safe Prometheus metrics on a dedicated telemetry
+listener that is separate from the public FHIR router and is never exposed
+through the chart's ingress. It is unauthenticated for Prometheus
+compatibility and must be protected by cluster networking.
+
+```yaml
+metrics:
+  enabled: true
+  port: 9090
+  serviceMonitor:
+    enabled: false
+    additionalLabels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+```
+
+- `metrics.enabled` maps to `METRICS_ENABLED`. When `false`, no telemetry
+  listener is started and no metrics port or `ServiceMonitor` is rendered.
+- `metrics.port` maps to `METRICS_BIND_ADDR` and the named `metrics` container
+  and Service ports.
+- `metrics.serviceMonitor.enabled` renders a
+  `monitoring.coreos.com/v1` `ServiceMonitor` that scrapes the chart Service's
+  named `metrics` port at `/metrics`. The `ServiceMonitor` CRD is owned by the
+  Prometheus Operator and is **not** installed by this chart; enabling this
+  option requires that CRD to already exist in your cluster.
+- `additionalLabels` are merged into the `ServiceMonitor` labels so a
+  Prometheus Operator instance can select it.
+
+The chart rejects invalid ports, non-positive durations, and a
+`scrapeTimeout` greater than `interval` at render time.
+
+To verify metrics locally with docker-compose:
+
+```bash
+curl --fail http://localhost:9090/metrics
+```
+
 ## Notes
 
 - `config.jwksUrl` maps to the server's `JWT_JWKS_URI` environment variable.

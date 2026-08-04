@@ -32,8 +32,14 @@ services:
       FHIR_BASE_URL: http://localhost:8080/fhir
       SERVE_DOCS: "true"
       RUST_LOG: fhir_server=info,tower_http=info
+      # Prometheus metrics on a dedicated telemetry listener (default on).
+      METRICS_ENABLED: "true"
+      METRICS_BIND_ADDR: 0.0.0.0:9090
     ports:
       - "8080:8080"
+      # Prometheus metrics endpoint for local inspection:
+      #   curl --fail http://localhost:9090/metrics
+      - "9090:9090"
 
 volumes:
   nissefhir-postgres:
