@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Authorization is now fail-closed when a JWT has no `scope` claim. Previously a valid token lacking `scope` was implicitly granted `read write`, giving full data access by default. Missing, empty, or unrecognized scopes now grant no read or write permission.
+- Read-only JWTs can now submit batch and transaction Bundles containing `GET` entries. Each Bundle entry is authorized by its interaction instead of requiring write access for the Bundle envelope.
+
 ### Added
 
 - Helm chart: optional `podDisruptionBudget` (minAvailable or maxUnavailable) to protect against voluntary disruptions taking down all replicas at once.

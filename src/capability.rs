@@ -98,7 +98,7 @@ pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
                         "text": "JWT Bearer token authentication"
                     }
                 ],
-                "description": "JWTs are verified with a configured static key or JWKS provider. A tenant or sub claim selects the tenant. The scope claim recognizes whitespace-separated read and write tokens and currently defaults to both when omitted. An optional resource_types claim restricts resource types. SMART discovery, launch contexts, and SMART clinical scopes are not implemented."
+                "description": "JWTs are verified with a configured static key or JWKS provider. A tenant or sub claim selects the tenant. The scope claim recognizes whitespace-separated read and write tokens; missing, empty, or unrecognized scopes grant no permission. Bundle entries are authorized individually according to their HTTP interaction. An optional resource_types claim restricts resource types. SMART discovery, launch contexts, and SMART clinical scopes are not implemented."
             },
             "resource": resource_entries,
             "interaction": [
@@ -325,6 +325,8 @@ mod tests {
         let serialized = serde_json::to_string(security).unwrap();
 
         assert!(serialized.contains("JWT Bearer"));
+        assert!(serialized.contains("missing, empty, or unrecognized scopes grant no permission"));
+        assert!(!serialized.contains("defaults to both"));
         assert!(!serialized.contains("SMART-on-FHIR"));
         assert!(!serialized.contains("Smart-on-FHIR"));
     }

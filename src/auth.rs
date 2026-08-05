@@ -169,7 +169,7 @@ pub fn extract_access_context(
     };
 
     let tenant_id = claims.tenant.or(claims.sub).ok_or(AppError::Unauthorized)?;
-    let scope = claims.scope.unwrap_or_else(|| "read write".to_owned());
+    let scope = claims.scope.as_deref().unwrap_or("");
     let can_read = scope
         .split_whitespace()
         .any(|s| s.eq_ignore_ascii_case("read"));
@@ -449,11 +449,56 @@ mod tests {
     }
 
     #[test]
-    fn missing_scope_defaults_to_read_write() {
+    fn missing_scope_grants_no_access() {
         let token = encode_claims(&Claims {
             sub: Some("t".to_owned()),
             tenant: None,
             scope: None,
+            resource_types: None,
+            exp: Some(4_102_444_800),
+        });
+
+        let access = extract_access_context(&bearer_headers(&token), &make_config()).unwrap();
+        assert!(!access.can_read);
+        assert!(!access.can_write);
+    }
+
+    #[test]
+    fn empty_scope_grants_no_access() {
+        let token = encode_claims(&Claims {
+            sub: Some("t".to_owned()),
+            tenant: None,
+            scope: Some(String::new()),
+            resource_types: None,
+            exp: Some(4_102_444_800),
+        });
+
+        let access = extract_access_context(&bearer_headers(&token), &make_config()).unwrap();
+        assert!(!access.can_read);
+        assert!(!access.can_write);
+    }
+
+    #[test]
+    fn unknown_scope_grants_no_access() {
+        let token = encode_claims(&Claims {
+            sub: Some("t".to_owned()),
+            tenant: None,
+            scope: Some("openid profile offline_access".to_owned()),
+            resource_types: None,
+            exp: Some(4_102_444_800),
+        });
+
+        let access = extract_access_context(&bearer_headers(&token), &make_config()).unwrap();
+        assert!(!access.can_read);
+        assert!(!access.can_write);
+    }
+
+    #[test]
+    fn combined_read_write_scope() {
+        let token = encode_claims(&Claims {
+            sub: Some("t".to_owned()),
+            tenant: None,
+            scope: Some("read write".to_owned()),
             resource_types: None,
             exp: Some(4_102_444_800),
         });

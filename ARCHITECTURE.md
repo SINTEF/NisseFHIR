@@ -145,6 +145,17 @@ Whichever mode you use, the token must satisfy this server's authorization check
 - include `scope` with `read`, `write`, or both depending on the operation
 - optionally include `resource_types` to restrict access to specific FHIR resource types
 
+### Scope claim (authorization)
+
+Authorization is fail-closed on the `scope` claim:
+
+- Missing, empty, or whitespace-only `scope` grants no read or write permission.
+- A scope containing only unrecognized values grants no read or write permission.
+- Matching is case-insensitive and whitespace-delimited; recognized names are `read` and `write`.
+- `read` authorizes read interactions (search, read, history); `write` authorizes write interactions (create, update, patch, delete).
+- Bundle (batch/transaction) entries are authorized individually by their HTTP interaction. A read-only token can submit a Bundle containing only authorized `GET` entries; write entries require `write`. In a transaction, one forbidden entry rejects the whole transaction. In a batch, it produces an inline `403 Forbidden` entry while other entries continue.
+- `resource_types` additionally restricts which FHIR resource types may be accessed; it never relaxes scope requirements.
+
 ## End-To-End Checks
 
 From the repository root, run the Python E2E harness against the native server, the Docker image, or both:

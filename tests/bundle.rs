@@ -525,12 +525,12 @@ async fn batch_delete_with_if_match_is_consistent_with_transaction() {
 }
 
 #[tokio::test]
-async fn transaction_with_get_reads_resource() {
+async fn read_only_token_can_submit_get_only_transaction() {
     let pool = setup_test_db().await;
     let tenant = "bundle-tx-get";
     clean_tenant(&pool, tenant).await;
     let app = build_test_app(pool.clone());
-    let token = tenant_token(tenant);
+    let write_token = tenant_token(tenant);
 
     let create_bundle = json!({
         "resourceType": "Bundle",
@@ -544,7 +544,8 @@ async fn transaction_with_get_reads_resource() {
             "request": {"method": "POST", "url": "Patient"}
         }]
     });
-    let (status, created) = send_request(app.clone(), bundle_request(&create_bundle, &token)).await;
+    let (status, created) =
+        send_request(app.clone(), bundle_request(&create_bundle, &write_token)).await;
     assert_eq!(status, StatusCode::OK);
     let id = created["entry"][0]["resource"]["id"].as_str().unwrap();
 
@@ -555,16 +556,78 @@ async fn transaction_with_get_reads_resource() {
             "request": {"method": "GET", "url": format!("Patient/{id}")}
         }]
     });
-    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+    let read_token = read_only_token(tenant);
+    let (status, body) = send_request(app, bundle_request(&bundle, &read_token)).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let entries = body["entry"].as_array().unwrap();
     assert_eq!(entries[0]["response"]["status"], "200 OK");
     assert_eq!(entries[0]["resource"]["name"][0]["family"], "Readable");
 }
 
+#[tokio::test]
+async fn read_only_transaction_rejects_write_entry() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-tx-readonly-write";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = read_only_token(tenant);
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{
+            "resource": {
+                "resourceType": "Patient",
+                "name": [{"family": "Forbidden"}]
+            },
+            "request": {"method": "POST", "url": "Patient"}
+        }]
+    });
+    let (status, body) = send_request(app, bundle_request(&bundle, &token)).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["resourceType"], "OperationOutcome");
+    assert_eq!(count_resources(&pool, tenant).await, 0);
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Batch tests
 // ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn read_only_token_can_submit_get_only_batch() {
+    let pool = setup_test_db().await;
+    let tenant = "bundle-batch-readonly";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool);
+
+    let patient = json!({
+        "resourceType": "Patient",
+        "name": [{"family": "BatchReadable"}]
+    });
+    let write_token = tenant_token(tenant);
+    let (status, created) = send_request(
+        app.clone(),
+        post_resource_with_token("Patient", &patient, &write_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap();
+
+    let bundle = json!({
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [{
+            "request": {"method": "GET", "url": format!("Patient/{id}")}
+        }]
+    });
+    let read_token = read_only_token(tenant);
+    let (status, body) = send_request(app, bundle_request(&bundle, &read_token)).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["entry"][0]["response"]["status"], "200 OK");
+    assert_eq!(body["entry"][0]["resource"]["id"], id);
+}
 
 #[tokio::test]
 async fn batch_creates_multiple_resources_independently() {
@@ -793,20 +856,29 @@ async fn bundle_rejects_unsupported_bundle_type() {
 }
 
 #[tokio::test]
-async fn bundle_requires_write_scope() {
+async fn read_only_batch_rejects_write_entry_inline() {
     let pool = setup_test_db().await;
-    let app = build_test_app(pool);
-    let token = read_only_token("bundle-readonly");
+    let tenant = "bundle-readonly-write";
+    clean_tenant(&pool, tenant).await;
+    let app = build_test_app(pool.clone());
+    let token = read_only_token(tenant);
 
     let body = json!({
         "resourceType": "Bundle",
         "type": "batch",
-        "entry": []
+        "entry": [{
+            "resource": {
+                "resourceType": "Patient",
+                "name": [{"family": "Forbidden"}]
+            },
+            "request": {"method": "POST", "url": "Patient"}
+        }]
     });
 
     let (status, body) = send_request(app, bundle_request(&body, &token)).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body["resourceType"], "OperationOutcome");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["entry"][0]["response"]["status"], "403 Forbidden");
+    assert_eq!(count_resources(&pool, tenant).await, 0);
 }
 
 #[tokio::test]

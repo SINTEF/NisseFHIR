@@ -627,9 +627,6 @@ pub async fn process_bundle(
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
-    if !access.can_write {
-        return Err(AppError::Forbidden);
-    }
 
     crate::media_type::validate_request_content_type(&headers, BodyKind::FhirResource)?;
 
