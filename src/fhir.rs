@@ -824,8 +824,8 @@ mod tests {
 
     use super::{assign_resource_id, validate_path_resource_type, validate_resource_payload};
     use crate::{
-        AppState, SearchConfig, auth::AuthConfig, build_router, store::PgStore,
-        validation::FhirSchemaValidator,
+        AppState, SearchConfig, auth::AuthConfig, build_router, search_params::sql::GeoSearchMode,
+        store::PgStore, validation::FhirSchemaValidator,
     };
 
     const TEST_SECRET: &str = "0123456789abcdef0123456789abcdef";
@@ -871,7 +871,7 @@ mod tests {
             .expect("lazy pool should build");
 
         let app = build_router(AppState {
-            store: PgStore::new(pool),
+            store: PgStore::new(pool, GeoSearchMode::EarthDistance),
             auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_SECRET),
             fhir_base_url: "http://localhost:8080/fhir".to_owned(),
             search: SearchConfig {
@@ -929,7 +929,7 @@ mod tests {
             .expect("lazy pool should build");
 
         let app = build_router(AppState {
-            store: PgStore::new(pool),
+            store: PgStore::new(pool, GeoSearchMode::EarthDistance),
             auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_SECRET),
             fhir_base_url: "http://localhost:8080/fhir".to_owned(),
             search: SearchConfig {
@@ -990,7 +990,7 @@ mod tests {
             .connect_lazy(database_url)
             .expect("lazy pool should build");
         AppState {
-            store: PgStore::new(pool),
+            store: PgStore::new(pool, GeoSearchMode::EarthDistance),
             auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_SECRET),
             fhir_base_url: "http://localhost:8080/fhir".to_owned(),
             search: SearchConfig {

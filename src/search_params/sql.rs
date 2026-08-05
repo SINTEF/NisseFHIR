@@ -18,6 +18,41 @@ pub struct SearchFilter {
     pub values: Vec<String>,
 }
 
+/// How geospatial `near` filtering is computed.
+///
+/// Detected once at startup against the actual database so the server never
+/// depends on the `earthdistance` extension being installable: databases whose
+/// operator cannot install it (e.g. managed offerings with a restricted
+/// extension allow-list) transparently use the haversine fallback instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeoSearchMode {
+    /// `earthdistance` extension is installed: indexed GiST proximity filter.
+    EarthDistance,
+    /// No extension available: pure-SQL haversine filter that needs nothing.
+    Haversine,
+}
+
+/// Detect which geospatial mode the connected database supports.
+///
+/// Returns [`GeoSearchMode::EarthDistance`] when the `earthdistance` extension
+/// is present and [`GeoSearchMode::Haversine`] otherwise, so `near` search
+/// keeps working — and is always advertised — on every database.
+pub async fn detect_geo_search_mode<'e, E>(executor: E) -> Result<GeoSearchMode, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let has_earthdistance: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'earthdistance')",
+    )
+    .fetch_one(executor)
+    .await?;
+    Ok(if has_earthdistance {
+        GeoSearchMode::EarthDistance
+    } else {
+        GeoSearchMode::Haversine
+    })
+}
+
 /// Append SQL `WHERE` clause fragments for the given filters.
 ///
 /// Each filter produces one or more `AND …` conditions that narrow the result
@@ -26,11 +61,12 @@ pub struct SearchFilter {
 pub fn push_search_filters(
     query: &mut QueryBuilder<Postgres>,
     filters: &[SearchFilter],
+    geo_mode: GeoSearchMode,
 ) -> Result<(), AppError> {
     for filter in filters {
         validate_search_filter(filter.param, &filter.values)?;
         if filter.values.len() == 1 {
-            push_search_filter_value(query, filter, &filter.values[0]);
+            push_search_filter_value(query, filter, &filter.values[0], geo_mode);
         } else {
             // Existing filter emitters append `AND <predicate>`. Seeding each
             // branch with TRUE lets us compose those predicates as an OR group
@@ -38,7 +74,7 @@ pub fn push_search_filters(
             query.push(" AND (FALSE");
             for value in &filter.values {
                 query.push(" OR (TRUE");
-                push_search_filter_value(query, filter, value);
+                push_search_filter_value(query, filter, value, geo_mode);
                 query.push(")");
             }
             query.push(")");
@@ -132,6 +168,7 @@ fn push_search_filter_value(
     query: &mut QueryBuilder<Postgres>,
     filter: &SearchFilter,
     value: &str,
+    geo_mode: GeoSearchMode,
 ) {
     match filter.param.param_type {
         SearchParamType::String => push_string_filter(query, &filter.param.path, value),
@@ -141,7 +178,7 @@ fn push_search_filter_value(
         SearchParamType::Uri => push_uri_filter(query, &filter.param.path, value),
         SearchParamType::Number => push_number_filter(query, &filter.param.path, value),
         SearchParamType::Quantity => push_quantity_filter(query, &filter.param.path, value),
-        SearchParamType::Special => push_special_filter(query, &filter.param.path, value),
+        SearchParamType::Special => push_special_filter(query, &filter.param.path, value, geo_mode),
         // Composite is not yet supported as a search filter.
         SearchParamType::Composite => {}
     }
@@ -803,9 +840,14 @@ fn push_quantity_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, val
 // Special search: handles type-specific special parameters (e.g. near)
 // ---------------------------------------------------------------------------
 
-fn push_special_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &str) {
+fn push_special_filter(
+    query: &mut QueryBuilder<Postgres>,
+    path: &JsonPath,
+    value: &str,
+    geo_mode: GeoSearchMode,
+) {
     if let JsonPath::Position(segments) = path {
-        push_near_filter(query, segments, value);
+        push_near_filter(query, segments, value, geo_mode);
     }
 }
 
@@ -842,19 +884,44 @@ fn parse_near_value(value: &str) -> Option<(f64, f64, f64)> {
     Some((lat, lon, distance_meters))
 }
 
-/// Append a geospatial proximity filter using the `earthdistance` extension.
+/// Append a geospatial proximity filter for the FHIR `near` parameter.
 ///
-/// Produces SQL like:
-/// ```sql
-/// AND resource->'position' IS NOT NULL
-/// AND earth_distance(
-///       ll_to_earth(
-///         (resource->'position'->>'latitude')::float8,
-///         (resource->'position'->>'longitude')::float8),
-///       ll_to_earth($lat, $lon)
-///     ) <= $distance_meters
-/// ```
-fn push_near_filter(query: &mut QueryBuilder<Postgres>, segments: &[&str], value: &str) {
+/// Selects the SQL based on [`GeoSearchMode`]:
+///
+/// * [`GeoSearchMode::EarthDistance`] uses the `earthdistance` extension,
+///   which is backed by a GiST index:
+///   ```sql
+///   AND resource->'position' IS NOT NULL
+///   AND earth_box(ll_to_earth($lat, $lon), $distance_meters)
+///         @> ll_to_earth(
+///               (resource->'position'->>'latitude')::float8,
+///               (resource->'position'->>'longitude')::float8)
+///   AND earth_distance(
+///         ll_to_earth(
+///           (resource->'position'->>'latitude')::float8,
+///           (resource->'position'->>'longitude')::float8),
+///         ll_to_earth($lat, $lon)
+///       ) <= $distance_meters
+///   ```
+/// * [`GeoSearchMode::Haversine`] uses a pure-SQL haversine distance formula
+///   that needs no extension and therefore works on any database:
+///   ```sql
+///   AND resource->'position' IS NOT NULL
+///   AND 2 * 6371000.0 * asin(sqrt(
+///         power(sin((radians((resource->'position'->>'latitude')::float8)
+///                    - radians($lat)) / 2), 2)
+///         + cos(radians((resource->'position'->>'latitude')::float8))
+///           * cos(radians($lat))
+///           * power(sin((radians((resource->'position'->>'longitude')::float8)
+///                        - radians($lon)) / 2), 2)
+///       )) <= $distance_meters
+///   ```
+fn push_near_filter(
+    query: &mut QueryBuilder<Postgres>,
+    segments: &[&str],
+    value: &str,
+    geo_mode: GeoSearchMode,
+) {
     let Some((lat, lon, distance_meters)) = parse_near_value(value) else {
         return;
     };
@@ -866,17 +933,59 @@ fn push_near_filter(query: &mut QueryBuilder<Postgres>, segments: &[&str], value
     query.push(&pos_path);
     query.push(" IS NOT NULL");
 
-    // Distance filter using earthdistance extension
-    query.push(" AND earth_distance(ll_to_earth((");
-    query.push(&pos_path);
-    query.push("->>'latitude')::float8, (");
-    query.push(&pos_path);
-    query.push("->>'longitude')::float8), ll_to_earth(");
-    query.push_bind(lat);
-    query.push(", ");
-    query.push_bind(lon);
-    query.push(")) <= ");
-    query.push_bind(distance_meters);
+    match geo_mode {
+        GeoSearchMode::EarthDistance => {
+            // Use an indexable bounding box first, then the exact great-circle
+            // distance to discard the box's corner false positives.
+            query.push(" AND earth_box(ll_to_earth(");
+            query.push_bind(lat);
+            query.push(", ");
+            query.push_bind(lon);
+            query.push("), ");
+            query.push_bind(distance_meters);
+            query.push(") @> ll_to_earth((");
+            query.push(&pos_path);
+            query.push("->>'latitude')::float8, (");
+            query.push(&pos_path);
+            query.push("->>'longitude')::float8)");
+
+            // The bounding box is deliberately approximate; this predicate
+            // supplies the exact circular distance check.
+            query.push(" AND earth_distance(ll_to_earth((");
+            query.push(&pos_path);
+            query.push("->>'latitude')::float8, (");
+            query.push(&pos_path);
+            query.push("->>'longitude')::float8), ll_to_earth(");
+            query.push_bind(lat);
+            query.push(", ");
+            query.push_bind(lon);
+            query.push(")) <= ");
+            query.push_bind(distance_meters);
+        }
+        GeoSearchMode::Haversine => {
+            // Pure-SQL haversine distance; no extension required. Uses the mean
+            // Earth radius (6371 km); the slight difference from
+            // earthdistance's radius is immaterial for a proximity search.
+            query.push(" AND 2 * 6371000.0 * asin(sqrt(");
+            query.push("power(sin((radians((");
+            query.push(&pos_path);
+            query.push("->>'latitude')::float8) - radians(");
+            query.push_bind(lat);
+            query.push(")) / 2), 2)");
+            query.push(" + cos(radians((");
+            query.push(&pos_path);
+            query.push("->>'latitude')::float8)) * cos(radians(");
+            query.push_bind(lat);
+            query.push("))");
+            query.push(" * power(sin((radians((");
+            query.push(&pos_path);
+            query.push("->>'longitude')::float8) - radians(");
+            query.push_bind(lon);
+            query.push(")) / 2), 2)");
+            query.push(")) <= ");
+            query.push_bind(distance_meters);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,11 +1181,24 @@ mod tests {
     #[test]
     fn near_filter_produces_earth_distance_sql() {
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_near_filter(&mut query, &["position"], "42.36|-71.06|10|km");
+        push_near_filter(
+            &mut query,
+            &["position"],
+            "42.36|-71.06|10|km",
+            GeoSearchMode::EarthDistance,
+        );
         let sql = query.into_sql().as_str().to_owned();
         assert!(
             sql.contains("earth_distance"),
             "expected earth_distance in SQL, got: {sql}"
+        );
+        assert!(
+            sql.contains("earth_box"),
+            "expected an indexable earth_box prefilter, got: {sql}"
+        );
+        assert!(
+            sql.contains("@> ll_to_earth"),
+            "expected the GiST containment operator, got: {sql}"
         );
         assert!(
             sql.contains("ll_to_earth"),
@@ -1089,9 +1211,50 @@ mod tests {
     }
 
     #[test]
+    fn near_filter_produces_haversine_sql() {
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_near_filter(
+            &mut query,
+            &["position"],
+            "42.36|-71.06|10|km",
+            GeoSearchMode::Haversine,
+        );
+        let sql = query.into_sql().as_str().to_owned();
+        assert!(
+            !sql.contains("earth_distance"),
+            "haversine SQL must not reference earth_distance, got: {sql}"
+        );
+        assert!(
+            !sql.contains("ll_to_earth"),
+            "haversine SQL must not reference ll_to_earth, got: {sql}"
+        );
+        assert!(
+            sql.contains("6371000.0"),
+            "expected mean Earth radius in haversine SQL, got: {sql}"
+        );
+        assert!(
+            sql.contains("asin(sqrt("),
+            "expected haversine asin(sqrt(...)) formula, got: {sql}"
+        );
+        assert!(
+            sql.contains("cos(radians(("),
+            "expected haversine cosine term, got: {sql}"
+        );
+        assert!(
+            sql.contains("resource->'position'"),
+            "expected position path in SQL, got: {sql}"
+        );
+    }
+
+    #[test]
     fn near_filter_skips_invalid_value() {
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_near_filter(&mut query, &["position"], "invalid");
+        push_near_filter(
+            &mut query,
+            &["position"],
+            "invalid",
+            GeoSearchMode::EarthDistance,
+        );
         let sql = query.into_sql().as_str().to_owned();
         // Should not add any condition for invalid input
         assert_eq!(sql, "SELECT 1 FROM t WHERE 1=1");
@@ -1668,6 +1831,7 @@ mod tests {
             &mut query,
             &JsonPath::Position(&["position"]),
             "42.36|-71.06|10|km",
+            GeoSearchMode::EarthDistance,
         );
         let sql = query.into_sql().as_str().to_owned();
         assert!(
@@ -1679,7 +1843,12 @@ mod tests {
     #[test]
     fn special_filter_non_position_is_noop() {
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_special_filter(&mut query, &JsonPath::Field(&["status"]), "test");
+        push_special_filter(
+            &mut query,
+            &JsonPath::Field(&["status"]),
+            "test",
+            GeoSearchMode::EarthDistance,
+        );
         let sql = query.into_sql().as_str().to_owned();
         assert_eq!(
             sql, "SELECT 1 FROM t WHERE 1=1",
@@ -1720,7 +1889,7 @@ mod tests {
         ];
 
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_search_filters(&mut query, &filters).unwrap();
+        push_search_filters(&mut query, &filters, GeoSearchMode::EarthDistance).unwrap();
         let sql = query.into_sql().as_str().to_owned();
         assert!(
             sql.contains("resource->>'status'"),
@@ -1747,7 +1916,7 @@ mod tests {
         }];
 
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_search_filters(&mut query, &filters).unwrap();
+        push_search_filters(&mut query, &filters, GeoSearchMode::EarthDistance).unwrap();
         let sql = query.into_sql().as_str().to_owned();
 
         assert!(sql.contains("AND (FALSE OR (TRUE AND"), "{sql}");
@@ -1770,7 +1939,8 @@ mod tests {
         }];
 
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        let error = push_search_filters(&mut query, &filters).unwrap_err();
+        let error =
+            push_search_filters(&mut query, &filters, GeoSearchMode::EarthDistance).unwrap_err();
         let sql = query.into_sql().as_str().to_owned();
         assert!(matches!(error, AppError::BadRequest(_)));
         assert_eq!(
@@ -1792,7 +1962,7 @@ mod tests {
         }];
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 WHERE TRUE");
 
-        assert!(push_search_filters(&mut query, &filters).is_err());
+        assert!(push_search_filters(&mut query, &filters, GeoSearchMode::EarthDistance).is_err());
         assert_eq!(query.into_sql().as_str(), "SELECT 1 WHERE TRUE");
     }
 
@@ -1825,7 +1995,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 WHERE TRUE");
 
-        push_search_filters(&mut query, &filters).unwrap();
+        push_search_filters(&mut query, &filters, GeoSearchMode::EarthDistance).unwrap();
         let sql = query.into_sql().as_str().to_owned();
 
         assert!(
@@ -1853,7 +2023,7 @@ mod tests {
         }];
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 WHERE TRUE");
 
-        let result = push_search_filters(&mut query, &filters);
+        let result = push_search_filters(&mut query, &filters, GeoSearchMode::EarthDistance);
         assert!(
             result.is_err(),
             "expected date validation to reject the injection payload"
@@ -1878,7 +2048,7 @@ mod tests {
             values: vec!["ge2020-01-01".to_owned()],
         }];
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 WHERE TRUE");
-        push_search_filters(&mut query, &filters).unwrap();
+        push_search_filters(&mut query, &filters, GeoSearchMode::EarthDistance).unwrap();
         let sql = query.into_sql().as_str().to_owned();
 
         // The literal date should not appear directly as a SQL timestamp

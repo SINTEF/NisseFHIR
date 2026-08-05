@@ -53,6 +53,13 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| "failed to run migrations")?;
 
+    // Detect whether the optional `earthdistance` extension is installed so
+    // `near` search uses its GiST index when present and transparently falls
+    // back to a pure-SQL haversine filter otherwise. Both modes work, so this
+    // never fails and `near` is always advertised.
+    let geo_mode = fhir_server::search_params::sql::detect_geo_search_mode(&pool).await?;
+    info!("geospatial search mode: {geo_mode:?}");
+
     // A token shared between the shutdown-signal watcher, the HTTP server,
     // the telemetry server, and the background JWKS refresher. Cancelling it
     // stops the background work cleanly once a shutdown signal arrives.
@@ -90,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let state = AppState {
-        store: PgStore::new(pool.clone()),
+        store: PgStore::new(pool.clone(), geo_mode),
         auth: config.auth.clone(),
         fhir_base_url: config.fhir_base_url,
         search: config.search,

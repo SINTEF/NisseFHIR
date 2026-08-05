@@ -5,9 +5,11 @@ use serde_json::Value;
 use url::{Url, form_urlencoded::Serializer};
 
 use common::{
-    build_test_app_auth_required, clean_tenant, post_resource_with_token, restricted_token,
-    search_resource_with_token, send_request, setup_test_db, tenant_token, test_data,
+    build_test_app_auth_required, build_test_app_with_geo_mode, clean_tenant,
+    post_resource_with_token, restricted_token, search_resource_with_token, send_request,
+    setup_test_db, tenant_token, test_data,
 };
+use fhir_server::search_params::sql::GeoSearchMode;
 
 fn entry_ids(body: &Value) -> Vec<String> {
     let Some(entries) = body["entry"].as_array() else {
@@ -566,4 +568,120 @@ async fn search_rejects_identifier_with_empty_system() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["issue"][0]["code"], "invalid");
+}
+
+/// Create a Location at the given coordinates and return its server id.
+async fn create_location(
+    pool: &sqlx::PgPool,
+    tenant: &str,
+    name: &str,
+    lat: f64,
+    lon: f64,
+) -> String {
+    let app = build_test_app_auth_required(pool.clone());
+    let token = tenant_token(tenant);
+    let body = serde_json::json!({
+        "resourceType": "Location",
+        "name": name,
+        "position": { "latitude": lat, "longitude": lon }
+    });
+    let (status, created) =
+        send_request(app, post_resource_with_token("Location", &body, &token)).await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    created["id"].as_str().unwrap().to_owned()
+}
+
+/// `near` search must filter by proximity in both geospatial modes: the
+/// indexed `earthdistance` path and the pure-SQL haversine fallback. Both
+/// modes run against the same real database, so a passing test proves the
+/// haversine SQL executes on Postgres and returns correct results.
+async fn near_search_filters_by_proximity(pool: sqlx::PgPool, geo_mode: GeoSearchMode) {
+    let tenant = "search-near";
+    clean_tenant(&pool, tenant).await;
+    let token = tenant_token(tenant);
+
+    // Boston and a point ~111 km east; both must be stored.
+    let boston = create_location(&pool, tenant, "boston", 42.36, -71.06).await;
+    let far = create_location(&pool, tenant, "far", 42.36, -70.06).await;
+
+    let app = build_test_app_with_geo_mode(pool, false, Vec::new(), geo_mode);
+    // 50 km radius around Boston: only Boston qualifies, "far" is excluded.
+    let (status, body) = send_request(
+        app,
+        search_resource_with_token("Location", Some("near=42.36|-71.06|50|km"), &token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "near search failed: {body}");
+    let ids = entry_ids(&body);
+    assert!(
+        ids.contains(&boston),
+        "expected boston ({boston}) in results, got {ids:?}"
+    );
+    assert!(
+        !ids.contains(&far),
+        "expected far ({far}) excluded by 50km radius, got {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn near_search_filters_by_proximity_in_earthdistance_mode() {
+    let pool = setup_test_db().await;
+    near_search_filters_by_proximity(pool, GeoSearchMode::EarthDistance).await;
+}
+
+#[tokio::test]
+async fn near_search_filters_by_proximity_in_haversine_mode() {
+    let pool = setup_test_db().await;
+    near_search_filters_by_proximity(pool, GeoSearchMode::Haversine).await;
+}
+
+#[tokio::test]
+async fn near_search_earthdistance_predicate_uses_gist_index() {
+    let pool = setup_test_db().await;
+    let mut tx = pool.begin().await.expect("begin planner-test transaction");
+
+    // Small test tables normally favor a sequential scan. Disabling it only
+    // for this transaction lets EXPLAIN tell us whether the predicate is
+    // compatible with the functional GiST index created by the migration.
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("disable sequential scans for planner test");
+
+    let plan: Value = sqlx::query_scalar(
+        r#"
+        EXPLAIN (FORMAT JSON)
+        SELECT id
+        FROM fhir_res_location
+        WHERE resource->'position' IS NOT NULL
+          AND earth_box(ll_to_earth($1, $2), $3) @> ll_to_earth(
+                (resource->'position'->>'latitude')::float8,
+                (resource->'position'->>'longitude')::float8
+              )
+          AND earth_distance(
+                ll_to_earth(
+                  (resource->'position'->>'latitude')::float8,
+                  (resource->'position'->>'longitude')::float8
+                ),
+                ll_to_earth($1, $2)
+              ) <= $3
+        "#,
+    )
+    .bind(42.36_f64)
+    .bind(-71.06_f64)
+    .bind(50_000.0_f64)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("explain indexed near-search predicate");
+
+    let plan = plan.to_string();
+    assert!(
+        plan.contains("idx_fhir_res_location_position"),
+        "expected geospatial GiST index in plan: {plan}"
+    );
+    assert!(
+        plan.contains("Index Cond"),
+        "expected an indexed bounding-box condition: {plan}"
+    );
 }

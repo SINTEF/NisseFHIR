@@ -14,6 +14,8 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tower::ServiceExt;
 
+use fhir_server::search_params::sql::GeoSearchMode;
+
 use fhir_server::SearchConfig;
 use fhir_server::auth::AuthConfig;
 use fhir_server::validation::FhirSchemaValidator;
@@ -50,11 +52,28 @@ pub fn build_test_app_with_options(
     serve_docs: bool,
     cors_allowed_origins: Vec<axum::http::HeaderValue>,
 ) -> Router {
+    build_test_app_with_geo_mode(
+        pool,
+        serve_docs,
+        cors_allowed_origins,
+        GeoSearchMode::EarthDistance,
+    )
+}
+
+/// Build a test app using a specific geospatial search mode, so tests can
+/// exercise both the indexed `earthdistance` path and the pure-SQL haversine
+/// fallback against a real database.
+pub fn build_test_app_with_geo_mode(
+    pool: PgPool,
+    serve_docs: bool,
+    cors_allowed_origins: Vec<axum::http::HeaderValue>,
+    geo_mode: GeoSearchMode,
+) -> Router {
     use fhir_server::store::PgStore;
     use fhir_server::{AppState, build_router};
 
     let state = AppState {
-        store: PgStore::new(pool),
+        store: PgStore::new(pool, geo_mode),
         auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_JWT_SECRET),
         fhir_base_url: "http://localhost:8080/fhir".to_owned(),
         search: SearchConfig {

@@ -11,6 +11,7 @@ use common::{
     get_resource_with_token, post_resource_with_token, put_resource_with_token,
     put_resource_with_token_if_match, send_request, setup_test_db, tenant_token, test_data,
 };
+use fhir_server::search_params::sql::GeoSearchMode;
 use fhir_server::store::PgStore;
 use sqlx::Row;
 use tower::ServiceExt;
@@ -804,7 +805,7 @@ async fn repeated_create_ignores_submitted_id_and_creates_distinct_resources() {
 async fn concurrent_store_creates_for_same_identity_have_one_winner() {
     let tenant = "crud-concurrent-create";
     let (pool, _) = setup(tenant).await;
-    let store = PgStore::new(pool.clone());
+    let store = PgStore::new(pool.clone(), GeoSearchMode::EarthDistance);
     let resource = serde_json::json!({
         "resourceType": "Patient",
         "id": "generated-collision",

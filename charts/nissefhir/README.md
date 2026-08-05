@@ -104,6 +104,40 @@ cnpg:
       key: database-url
 ```
 
+## Geospatial search (`near`)
+
+The FHIR `near` search parameter always works, on any PostgreSQL, without
+configuration: when the optional `earthdistance` extension is not installed
+the server transparently falls back to a pure-SQL haversine filter, so startup
+never fails and `near` is always advertised in the CapabilityStatement.
+
+Installing `earthdistance` (which pulls in `cube`) additionally gives `near`
+a GiST-indexed path, which is preferable for large `Location` collections.
+It is an optional enhancement, not a requirement. Pre-provision it so the
+application role never needs elevated privileges:
+
+- **CNPG-managed cluster** — run the `CREATE EXTENSION` statements during
+  bootstrap by adding `postInitApplicationSQL` to the Cluster spec:
+
+  ```yaml
+  cnpg:
+    bootstrap:
+      initdb:
+        postInitApplicationSQL:
+          - CREATE EXTENSION IF NOT EXISTS cube;
+          - CREATE EXTENSION IF NOT EXISTS earthdistance;
+  ```
+
+- **External database** — run once as a superuser / privileged role:
+
+  ```sql
+  CREATE EXTENSION IF NOT EXISTS cube;
+  CREATE EXTENSION IF NOT EXISTS earthdistance;
+  ```
+
+The server detects the extension at startup and logs the selected mode
+(`EarthDistance` or `Haversine`).
+
 ## Prometheus Metrics
 
 NisseFHIR serves privacy-safe Prometheus metrics on a dedicated telemetry

@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use crate::error::AppError;
-use crate::search_params::sql::SearchFilter;
+use crate::search_params::sql::{GeoSearchMode, SearchFilter};
 
 /// Outcome of an atomic conditional create (`If-None-Exist`).
 ///
@@ -32,6 +32,7 @@ pub type TxExecutor<'a> = sqlx::Transaction<'a, Postgres>;
 #[derive(Clone)]
 pub struct PgStore {
     pool: PgPool,
+    geo_mode: GeoSearchMode,
 }
 
 #[derive(Debug)]
@@ -86,8 +87,8 @@ pub struct HistoryResults {
 }
 
 impl PgStore {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, geo_mode: GeoSearchMode) -> Self {
+        Self { pool, geo_mode }
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -504,7 +505,7 @@ impl PgStore {
         total_query.push_bind(tenant_id);
         total_query.push(" AND resource_type = ");
         total_query.push_bind(resource_type);
-        crate::search_params::sql::push_search_filters(&mut total_query, filters)?;
+        crate::search_params::sql::push_search_filters(&mut total_query, filters, self.geo_mode)?;
 
         let total = total_query
             .build_query_scalar::<i64>()
@@ -525,7 +526,11 @@ impl PgStore {
         resource_query.push_bind(tenant_id);
         resource_query.push(" AND resource_type = ");
         resource_query.push_bind(resource_type);
-        crate::search_params::sql::push_search_filters(&mut resource_query, filters)?;
+        crate::search_params::sql::push_search_filters(
+            &mut resource_query,
+            filters,
+            self.geo_mode,
+        )?;
 
         if let Some(after_id) = after_id {
             resource_query.push(" AND id > ");
@@ -620,7 +625,7 @@ impl PgStore {
         query.push_bind(tenant_id);
         query.push(" AND resource_type = ");
         query.push_bind(resource_type);
-        crate::search_params::sql::push_search_filters(&mut query, filters)?;
+        crate::search_params::sql::push_search_filters(&mut query, filters, self.geo_mode)?;
         query.push(" ORDER BY id ASC LIMIT ");
         query.push_bind(2_i64);
 
@@ -1237,7 +1242,7 @@ mod tests {
             .max_connections(1)
             .connect_lazy(&database_url)
             .expect("lazy pool should build");
-        let store = PgStore::new(pool);
+        let store = PgStore::new(pool, GeoSearchMode::EarthDistance);
         assert!(store.is_ready().await, "reachable database must be ready");
     }
 
@@ -1247,7 +1252,7 @@ mod tests {
             .max_connections(1)
             .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/postgres")
             .expect("lazy pool should build");
-        let store = PgStore::new(pool);
+        let store = PgStore::new(pool, GeoSearchMode::EarthDistance);
         assert!(
             !store.is_ready().await,
             "unreachable database must not be ready"
@@ -1263,7 +1268,7 @@ mod tests {
             .max_connections(1)
             .connect_lazy("postgres://postgres:postgres@10.255.255.1:5432/postgres")
             .expect("lazy pool should build");
-        let store = PgStore::new(pool);
+        let store = PgStore::new(pool, GeoSearchMode::EarthDistance);
         let start = std::time::Instant::now();
         assert!(
             !store.is_ready().await,
