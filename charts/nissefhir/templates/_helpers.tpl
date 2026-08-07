@@ -78,13 +78,16 @@ Database URL: either from CNPG or external config
 {{- end }}
 
 {{/*
-JWT Secret name
+JWT Secret name.
+An explicit existingSecret.name always wins over create, so documenting or
+setting an existing Secret never silently falls back to a generated one.
 */}}
 {{- define "nissefhir.jwtSecretName" -}}
-{{- if .Values.config.jwtSecret.create }}
+{{- $existing := .Values.config.jwtSecret.existingSecret | default dict -}}
+{{- if $existing.name }}
+{{- $existing.name }}
+{{- else if .Values.config.jwtSecret.create }}
 {{- printf "%s-jwt" (include "nissefhir.fullname" .) }}
-{{- else }}
-{{- .Values.config.jwtSecret.existingSecret.name | default "" }}
 {{- end }}
 {{- end }}
 
@@ -92,9 +95,10 @@ JWT Secret name
 JWT Secret key
 */}}
 {{- define "nissefhir.jwtSecretKey" -}}
-{{- if .Values.config.jwtSecret.create }}
-{{- .Values.config.jwtSecret.key | default "jwt-secret" }}
+{{- $existing := .Values.config.jwtSecret.existingSecret | default dict -}}
+{{- if $existing.name }}
+{{- $existing.key | default "jwt-secret" }}
 {{- else }}
-{{- .Values.config.jwtSecret.existingSecret.key | default "jwt-secret" }}
+{{- .Values.config.jwtSecret.key | default "jwt-secret" }}
 {{- end }}
 {{- end }}

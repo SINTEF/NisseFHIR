@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Helm chart: `values.schema.json` rejects unsupported enum values (`config.jwtMode`, `config.jwtSecret.delivery`) and out-of-range metrics ports before installation, and requires an absolute `mountPath` when `delivery=file`. Render-time guards now also reject `delivery=file` with a relative `mountPath` and `cnpg.enabled=false` without any database source (`externalDatabase`, or `DATABASE_URL`/`DATABASE_URL_FILE` via `extraEnv`). An explicit `config.jwtSecret.existingSecret.name` now takes precedence over `create=true` so the documented commands never silently use a generated Secret. CI runs `helm lint` and the chart render tests.
 - Helm chart: optional `podDisruptionBudget` (minAvailable or maxUnavailable) to protect against voluntary disruptions taking down all replicas at once.
 
 ## [0.1.4] - 2026-03-10

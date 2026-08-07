@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NisseFHIR chart values",
+  "description": "Deployment-critical value constraints. Conditional requirements (JWKS URL, static-mode secret, external database) are enforced by templates/validate.yaml at render time.",
+  "type": "object",
+  "properties": {
+    "config": {
+      "type": "object",
+      "properties": {
+        "jwtMode": {
+          "type": "string",
+          "enum": ["static", "jwks"]
+        },
+        "jwksUrl": {
+          "type": "string"
+        },
+        "jwtSecret": {
+          "type": "object",
+          "properties": {
+            "create": {
+              "type": "boolean"
+            },
+            "delivery": {
+              "type": "string",
+              "enum": ["env", "file"]
+            },
+            "mountPath": {
+              "type": "string"
+            }
+          },
+          "allOf": [
+            {
+              "description": "mountPath is only used with file delivery; require it to be absolute only in that mode.",
+              "if": {
+                "properties": {
+                  "delivery": { "const": "file" }
+                },
+                "required": ["delivery"]
+              },
+              "then": {
+                "properties": {
+                  "mountPath": { "pattern": "^/" }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "cnpg": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    }
+  }
+}

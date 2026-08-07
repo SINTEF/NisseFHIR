@@ -15,6 +15,33 @@
     {{- fail "config.jwtMode=static requires config.jwtSecret.create=true or config.jwtSecret.existingSecret.name to be set" -}}
   {{- end -}}
 {{- end -}}
+{{- $delivery := .Values.config.jwtSecret.delivery | default "env" -}}
+{{- if not (has $delivery (list "env" "file")) -}}
+  {{- fail (printf "unsupported config.jwtSecret.delivery %q; expected \"env\" or \"file\"" $delivery) -}}
+{{- end -}}
+{{- if eq $delivery "file" -}}
+  {{- $mountPath := .Values.config.jwtSecret.mountPath | default "/var/run/secrets/nissefhir" -}}
+  {{- if not (regexMatch "^/" $mountPath) -}}
+    {{- fail (printf "config.jwtSecret.mountPath %q must be an absolute path when config.jwtSecret.delivery is \"file\"" $mountPath) -}}
+  {{- end -}}
+{{- end -}}
+{{- if not .Values.cnpg.enabled -}}
+  {{- $ext := (.Values.cnpg).externalDatabase -}}
+  {{- /* DATABASE_URL / DATABASE_URL_FILE supplied via extraEnv (optionally
+         backed by extraVolumes) is a valid alternative source. */ -}}
+  {{- $hasEnvDatabase := false -}}
+  {{- range .Values.extraEnv -}}
+    {{- if has (.name | default "") (list "DATABASE_URL" "DATABASE_URL_FILE") -}}
+      {{- /* A bare name renders an empty variable and fails at runtime. */ -}}
+      {{- if or .value .valueFrom -}}
+        {{- $hasEnvDatabase = true -}}
+      {{- end -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if not (or ($ext).url (($ext).existingSecret).name $hasEnvDatabase) -}}
+    {{- fail "cnpg.enabled=false requires a database connection: set cnpg.externalDatabase.url, cnpg.externalDatabase.existingSecret.name, or provide DATABASE_URL / DATABASE_URL_FILE via extraEnv" -}}
+  {{- end -}}
+{{- end -}}
 {{- $pdb := .Values.podDisruptionBudget -}}
 {{- if $pdb.enabled -}}
   {{- $hasMin := and (hasKey $pdb "minAvailable") (ne (index $pdb "minAvailable") nil) -}}

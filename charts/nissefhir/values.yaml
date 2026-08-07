@@ -73,6 +73,7 @@ config:
   jwtMode: "static"
   # JWT secret delivery for JWT_MODE=static.
   # Prefer existingSecret for production. Set create=true to have the chart create a Secret.
+  # An explicit existingSecret.name always takes precedence over create.
   jwtSecret:
     create: true
     key: jwt-secret
