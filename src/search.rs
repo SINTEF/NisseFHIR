@@ -15,12 +15,24 @@ pub(crate) struct ParsedSearchParams {
     pub(crate) after_id: Option<String>,
     pub(crate) filters: Vec<search_params::SearchFilter>,
     pub(crate) canonical_filters: Vec<(String, String)>,
+    /// The client's `_sort` value, unchanged, or `None` when the request did
+    /// not request a sort order (default id-ascending order applies).
+    pub(crate) sort_raw: Option<String>,
+    /// The effective sort order (requested keys plus the `_id` tiebreak) used
+    /// to build the sorted query and its keyset cursor. `None` iff `sort_raw`
+    /// is `None`.
+    pub(crate) sort: Option<Vec<crate::sort::SortKey>>,
+    /// The decoded and validated `_after_id` cursor for a sorted search.
+    /// `None` on a first page, or whenever `sort` is `None` (the legacy
+    /// plain-id cursor in `after_id` is used directly in that case).
+    pub(crate) sort_cursor: Option<Vec<crate::sort::SortCursorValue>>,
 }
 
-pub(crate) struct SearchPage<'a> {
+pub(crate) struct SearchPage {
     pub(crate) count: u32,
-    pub(crate) after_id: Option<&'a str>,
-    pub(crate) next_after_id: Option<&'a str>,
+    pub(crate) sort: Option<String>,
+    pub(crate) after_id: Option<String>,
+    pub(crate) next_after_id: Option<String>,
 }
 
 /// Cursor-pagination metadata for an instance-history Bundle page.
@@ -37,23 +49,30 @@ pub(crate) struct HistoryPage<'a> {
 pub(crate) fn build_search_bundle(
     base_url: &str,
     resource_type: &str,
-    page: SearchPage<'_>,
+    page: SearchPage,
     total: i64,
     resources: Vec<StoredResource>,
     filters: &[(String, String)],
 ) -> Value {
     let base_url = base_url.trim_end_matches('/');
-    let search_url = build_search_url(base_url, resource_type, page.count, page.after_id, filters);
+    let search_url = build_search_url(
+        base_url,
+        resource_type,
+        page.count,
+        page.sort.as_deref(),
+        page.after_id.as_deref(),
+        filters,
+    );
 
     let mut links = vec![json!({
         "relation": "self",
         "url": search_url,
     })];
 
-    if let Some(next_after_id) = page.next_after_id {
+    if let Some(next_after_id) = page.next_after_id.as_deref() {
         links.push(json!({
             "relation": "next",
-            "url": build_search_url(base_url, resource_type, page.count, Some(next_after_id), filters),
+            "url": build_search_url(base_url, resource_type, page.count, page.sort.as_deref(), Some(next_after_id), filters),
         }));
     }
 
@@ -160,6 +179,8 @@ pub(crate) fn parse_search_params(
     let mut canonical_filters = Vec::new();
     let mut saw_count = false;
     let mut saw_after_id = false;
+    let mut saw_sort = false;
+    let mut sort_raw = None;
     let mut total_values = 0_usize;
 
     // Look up the search parameters supported for this resource type
@@ -195,6 +216,15 @@ pub(crate) fn parse_search_params(
                     ));
                 }
                 after_id = Some(value);
+            }
+            "_sort" => {
+                if saw_sort {
+                    return Err(AppError::BadRequest(
+                        "_sort must not be repeated".to_owned(),
+                    ));
+                }
+                saw_sort = true;
+                sort_raw = Some(value);
             }
             "_offset" => {
                 return Err(AppError::BadRequest(
@@ -259,11 +289,31 @@ pub(crate) fn parse_search_params(
         }
     }
 
+    let sort = sort_raw
+        .as_deref()
+        .map(|raw| {
+            crate::sort::parse_sort_param(raw).map(|keys| crate::sort::effective_sort(&keys))
+        })
+        .transpose()?;
+
+    let sort_cursor = match (&sort, &after_id) {
+        (Some(effective), Some(raw)) => Some(crate::sort::decode_cursor(
+            raw,
+            effective,
+            sort_raw.as_deref().expect("sort implies sort_raw"),
+            &canonical_filters,
+        )?),
+        _ => None,
+    };
+
     Ok(ParsedSearchParams {
         count,
         after_id,
         filters,
         canonical_filters,
+        sort_raw,
+        sort,
+        sort_cursor,
     })
 }
 
@@ -355,11 +405,16 @@ pub(crate) fn build_search_url(
     base_url: &str,
     resource_type: &str,
     count: u32,
+    sort: Option<&str>,
     after_id: Option<&str>,
     filters: &[(String, String)],
 ) -> String {
     let mut serializer = Serializer::new(String::new());
     serializer.append_pair("_count", &count.to_string());
+
+    if let Some(sort) = sort {
+        serializer.append_pair("_sort", sort);
+    }
 
     if let Some(after_id) = after_id {
         serializer.append_pair("_after_id", after_id);
@@ -404,6 +459,11 @@ pub(crate) struct ParsedHistoryParams {
 /// Only `_count` and `_after_id` are honored. `_after_id` is the version-id
 /// cursor returned in a previous page's `next` link. Unknown parameters are
 /// rejected so clients get a clear signal rather than silently being ignored.
+///
+/// `_sort` is explicitly not supported here (task 040): instance history is
+/// already strictly ordered by version id, newest first, which is not a key
+/// `_sort` can express. It falls through to the `other =>` arm below and is
+/// rejected with a `400` like any other unrecognized history parameter.
 pub(crate) fn parse_history_params(
     query: Vec<(String, String)>,
     search: SearchConfig,
@@ -531,8 +591,9 @@ mod tests {
             "Patient",
             SearchPage {
                 count: 1,
+                sort: None,
                 after_id: None,
-                next_after_id: Some("example"),
+                next_after_id: Some("example".to_owned()),
             },
             2,
             vec![StoredResource {
@@ -570,8 +631,9 @@ mod tests {
             "Patient",
             SearchPage {
                 count: 10,
+                sort: None,
                 after_id: None,
-                next_after_id: Some("patient-10"),
+                next_after_id: Some("patient-10".to_owned()),
             },
             11,
             vec![],

@@ -183,7 +183,7 @@ What it does:
 ## Notes
 
 - Capability statement advertises create/read/history-instance/update/patch/delete/search-type interactions.
-- Collection search uses cursor pagination ordered by resource id. Clients request the first page with `_count` and follow the returned `next` link using `_after_id`.
+- Collection search uses cursor pagination ordered by resource id by default. Clients request the first page with `_count` and follow the returned `next` link using `_after_id`. Clients can request a different order with `_sort`; see [Sorted search (`_sort`)](#sorted-search-_sort) below.
 - HTTP response compression is enabled through `tower-http` content negotiation. Clients can request compressed FHIR responses with standard `Accept-Encoding` values such as `gzip`, `br`, or `deflate`.
 - Create and update requests validate both the FHIR envelope (`resourceType`, `id`) and the resource-specific JSON Schema definition.
 - Invalid JSON, schema failures, auth failures, and missing resources return FHIR-shaped `OperationOutcome` bodies.
@@ -261,3 +261,62 @@ predicate is expressed directly in the `DELETE` statement's `WHERE` clause
 version mismatch from a missing resource. The same semantics apply to
 standalone endpoints and to Bundle `transaction`/`batch` entries, so both
 paths behave consistently.
+
+## Sorted search (`_sort`)
+
+`GET /fhir/{type}` accepts an optional `_sort` result parameter: a
+comma-separated list of sort keys, each optionally prefixed with `-` for
+descending order, applied in the order given (e.g.
+`_sort=status,-_lastUpdated`). Omitting `_sort` keeps today's default order —
+ascending by `id` — unchanged.
+
+### Sortable keys
+
+Only `_id` and `_lastUpdated` are sortable. Both map directly to `NOT NULL`
+columns on `fhir_resources` (`id`, `last_updated`), so there is no null
+handling to define — every resource has a value for both, and neither
+repeats. Extending `_sort` to registry-backed search parameters (e.g.
+`status`, `subject`) is an explicit, documented non-goal of this feature:
+those paths can be absent, repeated, or backed by an index that does not
+support ordering, none of which is true of the two storage columns. A key
+outside this set — unknown, unindexed, or otherwise unsupported — returns a
+privacy-safe `400` rather than being silently ignored or substituted, per the
+same fail-closed rule as unsupported filter parameters. A repeated `_sort`
+parameter, or more sort keys than the server allows in one request, is also
+rejected with `400`. The CapabilityStatement advertises the accepted keys for
+each resource type as a repeating `sortParameter` extension (there is no
+standard CapabilityStatement field for this) on `rest.resource`, verified by
+a test that cross-checks the advertised set against what parsing actually
+accepts.
+
+### Ordering and pagination
+
+Every sort order is total and deterministic: the `id` column is appended as a
+final tiebreak whenever it is not already one of the requested keys, so
+resources with equal sort values still have a stable relative order across
+pages.
+
+Sorting and paging are one design because the pagination cursor's meaning
+depends on the sort order the page was generated under. When `_sort` is
+present, `_after_id` carries an opaque, versioned cursor encoding the sort
+column values of the last row on the page (not just its id) together with a
+fingerprint of the `_sort` value and filters it was minted under. Replaying
+that cursor against a different `_sort` or a different filter set is
+rejected with `400` — a cursor is never silently reinterpreted. Without
+`_sort`, `_after_id` keeps behaving exactly as it does today (the last row's
+plain id), so existing clients are unaffected.
+
+`_sort` is preserved unchanged in the generated `self` and `next` Bundle
+links, so following `next` repeatedly never requires the client to re-supply
+it. A composite B-tree index on `(tenant_id, last_updated, id)` supports
+`_sort=_lastUpdated` keyset pagination the same way the existing
+`(tenant_id, id)` index already supports the default and `_sort=_id` orders,
+so a sorted page is always served by an index scan.
+
+### Out of scope
+
+`_sort` is only implemented for `GET /fhir/{type}`. AuditEvent search
+(`GET /fhir/AuditEvent`) and instance history
+(`GET /fhir/{type}/{id}/_history`) do not accept it — both already fail
+closed on any parameter they do not recognize, so passing `_sort` to either
+returns a clear `400` rather than being accepted and silently ignored.

@@ -66,6 +66,13 @@ pub async fn read_audit_event(
 
 /// Deliberately narrow audit-log search. Search values are never persisted,
 /// and unsupported filters are rejected rather than silently ignored.
+///
+/// `_sort` is explicitly not supported here (task 040): AuditEvent search
+/// already orders by `id` only and does not go through
+/// [`crate::search::parse_search_params`] or [`crate::sort`]. Passing `_sort`
+/// falls through to the catch-all `_ =>` arm below and is rejected with a
+/// `400`, the same as any other unrecognized AuditEvent parameter, rather
+/// than being silently accepted and ignored.
 pub async fn search_audit_events(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -177,11 +184,11 @@ pub async fn search_audit_events(
         .await?;
     let base_url = state.fhir_base_url.trim_end_matches('/');
     let mut link = vec![
-        json!({"relation":"self","url":crate::search::build_search_url(base_url, "AuditEvent", count, after_id.as_deref(), &canonical_filters)}),
+        json!({"relation":"self","url":crate::search::build_search_url(base_url, "AuditEvent", count, None, after_id.as_deref(), &canonical_filters)}),
     ];
     if let Some(next) = next {
         let next_id = next.to_string();
-        link.push(json!({"relation":"next","url":crate::search::build_search_url(base_url, "AuditEvent", count, Some(&next_id), &canonical_filters)}));
+        link.push(json!({"relation":"next","url":crate::search::build_search_url(base_url, "AuditEvent", count, None, Some(&next_id), &canonical_filters)}));
     }
     let mut response = (StatusCode::OK, Json(json!({"resourceType":"Bundle","type":"searchset","total":total,"link":link,"entry":events.into_iter().map(|e| json!({"resource":crate::audit::as_fhir(e)})).collect::<Vec<_>>() }))).into_response();
     response
@@ -291,27 +298,55 @@ pub async fn search_resources(
 
     let query = crate::search::parse_query_pairs(query.as_deref().unwrap_or(""));
     let params = crate::search::parse_search_params(&resource_type, query, state.search)?;
-    let results = state
-        .store
-        .search(
-            &access.tenant_id,
-            &resource_type,
-            &params.filters,
-            i64::from(params.count),
-            params.after_id.as_deref(),
-        )
-        .await?;
+
+    let (total, resources, next_after_id) = if let Some(sort) = &params.sort {
+        let results = state
+            .store
+            .search_sorted(
+                &access.tenant_id,
+                &resource_type,
+                &params.filters,
+                i64::from(params.count),
+                sort,
+                params.sort_cursor.as_deref(),
+            )
+            .await?;
+        let next_after_id = results.next_cursor_values.map(|values| {
+            crate::sort::encode_cursor(
+                params
+                    .sort_raw
+                    .as_deref()
+                    .expect("params.sort implies params.sort_raw"),
+                &params.canonical_filters,
+                &values,
+            )
+        });
+        (results.total, results.resources, next_after_id)
+    } else {
+        let results = state
+            .store
+            .search(
+                &access.tenant_id,
+                &resource_type,
+                &params.filters,
+                i64::from(params.count),
+                params.after_id.as_deref(),
+            )
+            .await?;
+        (results.total, results.resources, results.next_after_id)
+    };
 
     let response = Json(crate::search::build_search_bundle(
         &state.fhir_base_url,
         &resource_type,
         crate::search::SearchPage {
             count: params.count,
-            after_id: params.after_id.as_deref(),
-            next_after_id: results.next_after_id.as_deref(),
+            sort: params.sort_raw.clone(),
+            after_id: params.after_id.clone(),
+            next_after_id,
         },
-        results.total,
-        results.resources,
+        total,
+        resources,
         &params.canonical_filters,
     ));
 
@@ -319,7 +354,7 @@ pub async fn search_resources(
     response
         .extensions_mut()
         .insert(crate::audit::AuditResponseMetadata {
-            result_count: results.total,
+            result_count: total,
         });
     Ok(response)
 }

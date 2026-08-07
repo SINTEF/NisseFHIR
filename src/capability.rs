@@ -9,6 +9,22 @@ use crate::search_params::{RESOURCE_TYPES, SearchParamType, search_params_for};
 pub const CAPABILITY_STATEMENT_CANONICAL_URL: &str =
     "https://sintef.github.io/NisseFHIR/CapabilityStatement/nissefhir";
 
+/// FHIR's CapabilityStatement.rest.resource backbone element has no
+/// first-class way to advertise which parameters `_sort` accepts, so this is
+/// carried as a repeating extension — one `valueCode` per accepted sort key —
+/// rather than as an ad hoc top-level field the JSON Schema would reject.
+const SORT_PARAMETER_EXTENSION_URL: &str =
+    "https://sintef.github.io/NisseFHIR/StructureDefinition/sort-parameter";
+
+/// Build the `sortParameter` extension array for a resource that accepts
+/// `_sort` with the given keys. Returns an empty `Vec` (omit the field
+/// entirely) for a resource that does not support `_sort` at all.
+fn sort_parameter_extensions(keys: &[&str]) -> Vec<Value> {
+    keys.iter()
+        .map(|key| json!({"url": SORT_PARAMETER_EXTENSION_URL, "valueCode": key}))
+        .collect()
+}
+
 pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
     let generic_interactions = json!([
         {"code": "create"},
@@ -31,6 +47,11 @@ pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
             "type": "string",
             "documentation": "Returns resources that sort after the supplied resource id cursor."
         }),
+        json!({
+            "name": "_sort",
+            "type": "string",
+            "documentation": "Comma-separated list of sort keys, each optionally prefixed with '-' for descending order, applied in the order given. See this resource's sortParameter for the keys accepted; an unsupported, unknown, or unindexed key is rejected with a 400."
+        }),
     ];
 
     // Build concrete resource entries dynamically from the schema-derived
@@ -38,6 +59,16 @@ pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
     let mut resource_entries: Vec<Value> = Vec::with_capacity(RESOURCE_TYPES.len());
 
     for &rt in RESOURCE_TYPES {
+        // AuditEvent has a registry entry (for `PARAMS_AUDITEVENT`) but is
+        // served exclusively by the dedicated, read-only
+        // `search_audit_events` / `read_audit_event` handlers, not the
+        // generic resource CRUD path this loop describes. Its accurate
+        // entry is appended separately below; building one here too would
+        // produce two conflicting "AuditEvent" entries in `rest.resource`.
+        if rt == "AuditEvent" {
+            continue;
+        }
+
         let mut search_params: Vec<Value> = pagination_params.clone();
         let executable_params = search_params_for(rt)
             .iter()
@@ -67,11 +98,16 @@ pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
             "conditionalCreate": !executable_params.is_empty(),
             "updateCreate": true,
             "searchParam": search_params,
+            "extension": sort_parameter_extensions(crate::sort::SORTABLE_KEYS),
         }));
     }
+    // AuditEvent search does not support `_sort` (task 040): it is strictly
+    // ordered by id (see `search_audit_events`), so no sort-parameter
+    // extension is emitted here.
     resource_entries.push(json!({
         "type": "AuditEvent",
         "interaction": [{"code":"read"}, {"code":"search-type"}],
+        "updateCreate": false,
         "searchParam": [
             {"name":"_id","type":"token"}, {"name":"action","type":"token"},
             {"name":"code","type":"token"}, {"name":"outcome","type":"token"},
@@ -203,6 +239,59 @@ mod tests {
         assert!(names.contains(&"_after_id"));
     }
 
+    /// Extract the `sortParameter` extension's `valueCode`s from one resource
+    /// entry (see `sort_parameter_extensions`), preserving order.
+    fn sort_parameter_values(resource: &serde_json::Value) -> Vec<&str> {
+        resource["extension"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|ext| ext["url"] == super::SORT_PARAMETER_EXTENSION_URL)
+            .map(|ext| ext["valueCode"].as_str().unwrap())
+            .collect()
+    }
+
+    /// Cross-checks the CapabilityStatement's advertised sort-parameter
+    /// extension against what `_sort` parsing actually accepts, so the two
+    /// can never drift: every generic resource type must advertise exactly
+    /// `crate::sort::SORTABLE_KEYS`, each advertised key must parse, and
+    /// AuditEvent — which does not implement `_sort` (see
+    /// `search_audit_events`) — must advertise none.
+    #[test]
+    fn capability_sort_parameters_match_accepted_sort_keys() {
+        let value = capability_statement("http://localhost:8080/fhir");
+        let resources = value["rest"][0]["resource"].as_array().unwrap();
+        assert!(!resources.is_empty());
+
+        // AuditEvent is pushed last, after the generic per-resource-type
+        // loop (which always advertises SORTABLE_KEYS for everything else).
+        let (audit_event, generic) = resources.split_last().unwrap();
+        assert_eq!(audit_event["type"], "AuditEvent");
+        assert!(
+            sort_parameter_values(audit_event).is_empty(),
+            "AuditEvent must not advertise any sort keys, it does not support _sort"
+        );
+
+        for resource in generic {
+            let advertised = sort_parameter_values(resource);
+            assert_eq!(
+                advertised,
+                crate::sort::SORTABLE_KEYS,
+                "resource {} advertises a sort key set that does not match crate::sort::SORTABLE_KEYS",
+                resource["type"]
+            );
+            for &key in &advertised {
+                crate::sort::parse_sort_param(key)
+                    .unwrap_or_else(|_| panic!("advertised sort key '{key}' must be accepted"));
+            }
+        }
+
+        assert!(
+            crate::sort::parse_sort_param("status").is_err(),
+            "a key outside the advertised set must not be accepted"
+        );
+    }
+
     #[test]
     fn capability_lists_patient_and_observation_search_parameters() {
         let value = capability_statement("http://localhost:8080/fhir");
@@ -243,12 +332,15 @@ mod tests {
         let value = capability_statement("http://localhost:8080/fhir");
         let resources = value["rest"][0]["resource"].as_array().unwrap();
 
-        assert_eq!(
-            resources.len(),
-            crate::search_params::RESOURCE_TYPES.len() + 1
-        );
+        // One entry per schema-derived resource type, including AuditEvent
+        // (whose accurate, hand-written entry replaces the generic one the
+        // per-resource-type loop would otherwise produce for it).
+        assert_eq!(resources.len(), crate::search_params::RESOURCE_TYPES.len());
         assert!(resources.iter().all(|resource| resource["type"] != "*"));
 
+        // AuditEvent's searchParam list is hand-written, not derived from
+        // the registry, so it is intentionally excluded from this
+        // registry-vs-advertised comparison.
         for resource in resources
             .iter()
             .filter(|resource| resource["type"] != "AuditEvent")

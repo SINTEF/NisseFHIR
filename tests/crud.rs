@@ -686,13 +686,24 @@ async fn metadata_returns_capability_statement() {
             .iter()
             .all(|resource| resource["type"] != "*")
     );
+    // AuditEvent is read-only (see `search_audit_events`) and truthfully
+    // advertises `updateCreate: false`; every other, generically-CRUD-able
+    // resource type advertises `true`.
     assert!(
         rest["resource"]
             .as_array()
             .unwrap()
             .iter()
+            .filter(|resource| resource["type"] != "AuditEvent")
             .all(|resource| resource["updateCreate"] == true)
     );
+    let audit_event = rest["resource"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|resource| resource["type"] == "AuditEvent")
+        .expect("AuditEvent entry must be present");
+    assert_eq!(audit_event["updateCreate"], false);
 
     let patient = rest["resource"]
         .as_array()

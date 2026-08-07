@@ -72,6 +72,15 @@ pub struct SearchResults {
     pub next_after_id: Option<String>,
 }
 
+/// Result of a `_sort`-driven search. Kept separate from [`SearchResults`]
+/// because the pagination cursor for a sorted page is a vector of typed
+/// column values (see [`crate::sort::SortCursorValue`]), not a single id.
+pub struct SortedSearchResults {
+    pub total: i64,
+    pub resources: Vec<StoredResource>,
+    pub next_cursor_values: Option<Vec<crate::sort::SortCursorValue>>,
+}
+
 pub struct HistoricalResource {
     pub id: String,
     pub version_id: i64,
@@ -767,6 +776,92 @@ impl PgStore {
         })
     }
 
+    /// Search under a client-requested `_sort` order. Kept as a separate
+    /// method from [`PgStore::search`] rather than unifying the two: the
+    /// default (no `_sort`) path is unchanged by task 040 by design, so its
+    /// well-exercised query stays untouched, and this path owns the keyset
+    /// predicate and multi-column `ORDER BY` a sorted page needs instead.
+    ///
+    /// `sort` must be the *effective* sort (see [`crate::sort::effective_sort`]),
+    /// i.e. already including the `_id` tiebreak. `after` is the decoded
+    /// cursor from the previous page, with one value per entry in `sort`.
+    pub async fn search_sorted(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        filters: &[SearchFilter],
+        limit: i64,
+        sort: &[crate::sort::SortKey],
+        after: Option<&[crate::sort::SortCursorValue]>,
+    ) -> Result<SortedSearchResults, AppError> {
+        let mut total_query: QueryBuilder<Postgres> =
+            QueryBuilder::new("SELECT count(*) FROM fhir_resources WHERE tenant_id = ");
+        total_query.push_bind(tenant_id);
+        total_query.push(" AND resource_type = ");
+        total_query.push_bind(resource_type);
+        crate::search_params::sql::push_search_filters(&mut total_query, filters, self.geo_mode)?;
+
+        let total = total_query
+            .build_query_scalar::<i64>()
+            .fetch_one(&self.pool)
+            .await?;
+
+        if limit <= 0 {
+            return Ok(SortedSearchResults {
+                total,
+                resources: Vec::new(),
+                next_cursor_values: None,
+            });
+        }
+
+        let mut resource_query: QueryBuilder<Postgres> = QueryBuilder::new(
+            "SELECT id, version_id, last_updated, resource FROM fhir_resources WHERE tenant_id = ",
+        );
+        resource_query.push_bind(tenant_id);
+        resource_query.push(" AND resource_type = ");
+        resource_query.push_bind(resource_type);
+        crate::search_params::sql::push_search_filters(
+            &mut resource_query,
+            filters,
+            self.geo_mode,
+        )?;
+
+        if let Some(after) = after {
+            crate::sort::push_keyset_predicate(&mut resource_query, sort, after);
+        }
+
+        crate::sort::push_order_by(&mut resource_query, sort);
+        resource_query.push(" LIMIT ");
+        resource_query.push_bind(limit.saturating_add(1));
+
+        let rows = resource_query.build().fetch_all(&self.pool).await?;
+
+        let mut resources = rows
+            .into_iter()
+            .map(|row| StoredResource {
+                id: row.get::<String, _>("id"),
+                version_id: row.get::<i64, _>("version_id"),
+                last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
+                resource: row.get::<Value, _>("resource"),
+            })
+            .collect::<Vec<_>>();
+
+        let next_cursor_values = if resources.len() > limit as usize {
+            resources.truncate(limit as usize);
+            resources
+                .last()
+                .map(|resource| crate::sort::cursor_values_for(sort, resource))
+        } else {
+            None
+        };
+
+        Ok(SortedSearchResults {
+            total,
+            resources,
+            next_cursor_values,
+        })
+    }
+
     /// Begin a database transaction for Bundle transaction processing.
     pub async fn begin_tx(&self) -> Result<TxExecutor<'_>, AppError> {
         Ok(self.pool.begin().await?)
@@ -862,6 +957,7 @@ impl PgStore {
     /// Conditional create plus its success audit row in one transaction.  The
     /// one-match path commits its audit row too, despite making no resource
     /// change, so the 200 result is durably evidenced before it is returned.
+    #[allow(clippy::too_many_arguments)] // mirrors conditional_create_atomic + audit context
     pub async fn conditional_create_with_audit(
         &self,
         tenant_id: &str,

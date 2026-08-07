@@ -10,6 +10,7 @@ pub mod media_type;
 pub mod metrics;
 pub mod search;
 pub mod search_params;
+pub mod sort;
 pub mod store;
 pub mod validation;
 

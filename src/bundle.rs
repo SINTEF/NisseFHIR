@@ -81,6 +81,7 @@ fn fact_with_response_identity(mut fact: EntryAuditFact, response: &Value) -> En
     fact
 }
 
+#[allow(clippy::too_many_arguments)] // params map 1:1 onto NewAuditEvent columns
 fn entry_audit_event(
     audit: &MutationAuditContext,
     parent_id: Uuid,
@@ -108,7 +109,7 @@ fn entry_audit_event(
         result_count,
         resource_version,
         conditional_create_disposition: (outcome == "success" && fact.conditional_create)
-            .then(|| if status == 201 { "created" } else { "existing" }),
+            .then_some(if status == 201 { "created" } else { "existing" }),
         reason_code,
     }
 }

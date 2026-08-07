@@ -26,6 +26,7 @@ pub struct AuditResponseMetadata {
 }
 
 impl MutationAuditContext {
+    #[allow(clippy::too_many_arguments)] // params map 1:1 onto NewAuditEvent columns
     pub fn success_event(
         &self,
         interaction: &'static str,
