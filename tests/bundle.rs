@@ -885,7 +885,7 @@ async fn read_only_batch_rejects_write_entry_inline() {
 async fn bundle_empty_entries_returns_empty_response() {
     let pool = setup_test_db().await;
     let app = build_test_app(pool);
-    let token = tenant_token("bundle-empty");
+    let token = read_only_token("bundle-empty");
 
     let body = json!({
         "resourceType": "Bundle",
@@ -903,7 +903,7 @@ async fn bundle_empty_entries_returns_empty_response() {
 async fn batch_empty_entries_returns_empty_response() {
     let pool = setup_test_db().await;
     let app = build_test_app(pool);
-    let token = tenant_token("bundle-empty-batch");
+    let token = read_only_token("bundle-empty-batch");
 
     let body = json!({
         "resourceType": "Bundle",

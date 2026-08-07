@@ -69,6 +69,16 @@ pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
             "searchParam": search_params,
         }));
     }
+    resource_entries.push(json!({
+        "type": "AuditEvent",
+        "interaction": [{"code":"read"}, {"code":"search-type"}],
+        "searchParam": [
+            {"name":"_id","type":"token"}, {"name":"action","type":"token"},
+            {"name":"code","type":"token"}, {"name":"outcome","type":"token"},
+            {"name":"agent","type":"reference"}, {"name":"entity","type":"reference"},
+            {"name":"_count","type":"number"}, {"name":"_after_id","type":"string"}
+        ]
+    }));
 
     let version = env!("CARGO_PKG_VERSION");
 
@@ -98,7 +108,7 @@ pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
                         "text": "JWT Bearer token authentication"
                     }
                 ],
-                "description": "JWTs are verified with a configured static key or JWKS provider. A tenant or sub claim selects the tenant. The scope claim recognizes whitespace-separated read and write tokens; missing, empty, or unrecognized scopes grant no permission. Bundle entries are authorized individually according to their HTTP interaction. An optional resource_types claim restricts resource types. SMART discovery, launch contexts, and SMART clinical scopes are not implemented."
+                "description": "JWTs are verified with a configured static key or JWKS provider. A tenant claim selects the tenant; without one, sub is used. A subject claim is always required. The scope claim recognizes whitespace-separated read, write, and NisseFHIR-specific auditlog tokens; auditlog alone grants tenant-scoped access only to the read-only server AuditEvent API. missing, empty, or unrecognized scopes grant no permission. Bundle entries are authorized individually according to their HTTP interaction. An optional resource_types claim restricts clinical resource types. SMART discovery, launch contexts, and SMART clinical scopes are not implemented."
             },
             "resource": resource_entries,
             "interaction": [
@@ -233,10 +243,16 @@ mod tests {
         let value = capability_statement("http://localhost:8080/fhir");
         let resources = value["rest"][0]["resource"].as_array().unwrap();
 
-        assert_eq!(resources.len(), crate::search_params::RESOURCE_TYPES.len());
+        assert_eq!(
+            resources.len(),
+            crate::search_params::RESOURCE_TYPES.len() + 1
+        );
         assert!(resources.iter().all(|resource| resource["type"] != "*"));
 
-        for resource in resources {
+        for resource in resources
+            .iter()
+            .filter(|resource| resource["type"] != "AuditEvent")
+        {
             let resource_type = resource["type"].as_str().unwrap();
             let advertised = resource["searchParam"]
                 .as_array()

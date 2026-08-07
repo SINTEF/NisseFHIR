@@ -158,6 +158,11 @@ fn describe_all() {
         metrics::Unit::Count,
         "Requests currently executing, including requests that eventually fail"
     );
+    metrics::describe_counter!(
+        "nissefhir_audit_persistence_failures_total",
+        metrics::Unit::Count,
+        "Audit persistence failures; intentionally has no request-derived labels"
+    );
     metrics::describe_gauge!(
         "nissefhir_db_pool_connections",
         metrics::Unit::Count,

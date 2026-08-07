@@ -121,6 +121,8 @@ enum EntryError {
     Conflict(String),
     /// 412 Precondition Failed — If-Match did not match.
     PreconditionFailed(String),
+    /// 405 Method Not Allowed — server-reserved AuditEvent interaction.
+    MethodNotAllowed(String),
     /// 400 Bad Request with structured OperationOutcome issues.
     Validation(Vec<OperationIssue>),
     /// 500 Internal Server Error — internal/DB failure. No message is exposed.
@@ -152,6 +154,10 @@ impl EntryError {
             AppError::NotFound => {
                 EntryError::NotFound("requested resource was not found".to_owned())
             }
+            AppError::MethodNotAllowed => EntryError::MethodNotAllowed(
+                "interaction is not supported for AuditEvent".to_owned(),
+            ),
+            AppError::ServiceUnavailable => EntryError::Internal,
             // Database errors and internal errors never expose their message.
             AppError::Database(_) | AppError::Internal(_) => EntryError::Internal,
         }
@@ -165,6 +171,7 @@ impl EntryError {
             EntryError::NotFound(_) => "404 Not Found",
             EntryError::Conflict(_) => "409 Conflict",
             EntryError::PreconditionFailed(_) => "412 Precondition Failed",
+            EntryError::MethodNotAllowed(_) => "405 Method Not Allowed",
             EntryError::Internal => "500 Internal Server Error",
         }
     }
@@ -203,6 +210,7 @@ impl EntryError {
             EntryError::NotFound(msg) => issue_outcome("not-found", msg),
             EntryError::Conflict(msg) => issue_outcome("conflict", msg),
             EntryError::PreconditionFailed(msg) => issue_outcome("conflict", msg),
+            EntryError::MethodNotAllowed(msg) => issue_outcome("not-supported", msg),
         }
     }
 
@@ -214,6 +222,7 @@ impl EntryError {
             EntryError::NotFound(_) => AppError::NotFound,
             EntryError::Conflict(msg) => AppError::Conflict(msg),
             EntryError::PreconditionFailed(msg) => AppError::PreconditionFailed(msg),
+            EntryError::MethodNotAllowed(_) => AppError::MethodNotAllowed,
             EntryError::Validation(issues) => AppError::Validation(issues),
             EntryError::Internal => AppError::Internal("bundle entry processing failed".to_owned()),
         }
@@ -246,6 +255,14 @@ impl From<&str> for EntryError {
 /// Apply the same resource-type and interaction authorization used by the
 /// standalone CRUD handlers to a single Bundle entry.
 fn authorize_entry(access: &AccessContext, req: &EntryRequest) -> Result<(), EntryError> {
+    if req.resource_type.eq_ignore_ascii_case("AuditEvent") {
+        let message = if req.method == "GET" {
+            "AuditEvent reads inside Bundles are not supported"
+        } else {
+            "AuditEvent is a server-reserved read-only resource"
+        };
+        return Err(EntryError::MethodNotAllowed(message.to_owned()));
+    }
     let interaction_allowed = match req.method.as_str() {
         "GET" => access.can_read,
         // Unknown methods are rejected later as a bad request, not as an

@@ -131,8 +131,12 @@ pub struct Claims {
 #[derive(Clone, Debug)]
 pub struct AccessContext {
     pub tenant_id: String,
+    /// The authenticated JWT subject. This is deliberately distinct from the
+    /// tenant: one subject may act in a shared tenant.
+    pub subject_id: String,
     pub can_read: bool,
     pub can_write: bool,
+    pub can_auditlog: bool,
     pub resource_allow_list: Option<Vec<String>>,
 }
 
@@ -168,7 +172,11 @@ pub fn extract_access_context(
         AuthConfig::Jwks(jc) => verify_with_jwks(token, jc)?,
     };
 
-    let tenant_id = claims.tenant.or(claims.sub).ok_or(AppError::Unauthorized)?;
+    // A subject is required for every protected request.  Tenant-less tokens
+    // retain the historical single-tenant behaviour, but tenant-only tokens
+    // are not attributable and must not be accepted.
+    let subject_id = claims.sub.ok_or(AppError::Unauthorized)?;
+    let tenant_id = claims.tenant.unwrap_or_else(|| subject_id.clone());
     let scope = claims.scope.as_deref().unwrap_or("");
     let can_read = scope
         .split_whitespace()
@@ -176,11 +184,16 @@ pub fn extract_access_context(
     let can_write = scope
         .split_whitespace()
         .any(|s| s.eq_ignore_ascii_case("write"));
+    let can_auditlog = scope
+        .split_whitespace()
+        .any(|s| s.eq_ignore_ascii_case("auditlog"));
 
     Ok(AccessContext {
         tenant_id,
+        subject_id,
         can_read,
         can_write,
+        can_auditlog,
         resource_allow_list: claims.resource_types,
     })
 }

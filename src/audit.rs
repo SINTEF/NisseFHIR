@@ -1,0 +1,258 @@
+//! Durable, privacy-minimised server audit evidence.
+use chrono::{DateTime, Utc};
+use serde_json::{Value, json};
+use sqlx::{Row, postgres::PgRow};
+use uuid::Uuid;
+
+use crate::error::AppError;
+use crate::store::PgStore;
+
+/// The privacy-minimised request identity carried from the audit middleware
+/// into a successful standalone mutation.  It deliberately contains no
+/// caller-controlled request material.
+#[derive(Clone, Debug)]
+pub struct MutationAuditContext {
+    pub tenant_id: String,
+    pub subject_id: String,
+    pub correlation_id: Uuid,
+}
+
+impl MutationAuditContext {
+    pub fn success_event(
+        &self,
+        interaction: &'static str,
+        action: char,
+        resource_type: &str,
+        resource_id: &str,
+        http_status: u16,
+        resource_version: Option<i64>,
+    ) -> NewAuditEvent {
+        NewAuditEvent {
+            tenant_id: self.tenant_id.clone(),
+            subject_id: self.subject_id.clone(),
+            correlation_id: self.correlation_id,
+            interaction,
+            action,
+            resource_type: Some(resource_type.to_owned()),
+            resource_id: Some(resource_id.to_owned()),
+            http_status,
+            outcome: "success",
+            row_kind: "standalone",
+            result_count: None,
+            resource_version,
+            reason_code: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NewAuditEvent {
+    pub tenant_id: String,
+    pub subject_id: String,
+    pub correlation_id: Uuid,
+    pub interaction: &'static str,
+    pub action: char,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub http_status: u16,
+    pub outcome: &'static str,
+    pub row_kind: &'static str,
+    pub result_count: Option<i64>,
+    pub resource_version: Option<i64>,
+    pub reason_code: Option<&'static str>,
+}
+
+#[derive(Debug)]
+pub struct AuditEvent {
+    pub id: Uuid,
+    pub occurred_at: DateTime<Utc>,
+    pub recorded_at: DateTime<Utc>,
+    pub tenant_id: String,
+    pub subject_id: String,
+    pub correlation_id: Uuid,
+    pub interaction: String,
+    pub action: String,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub http_status: i16,
+    pub outcome: String,
+    pub row_kind: String,
+    pub result_count: Option<i64>,
+    pub resource_version: Option<i64>,
+    pub reason_code: Option<String>,
+}
+
+#[derive(Default)]
+pub struct AuditSearch {
+    pub id: Option<Uuid>,
+    pub action: Option<String>,
+    pub outcome: Option<String>,
+    pub agent: Option<String>,
+    pub entity_type: Option<String>,
+    pub entity_id: Option<String>,
+    pub date_from: Option<DateTime<Utc>>,
+    pub date_to: Option<DateTime<Utc>>,
+}
+
+impl PgStore {
+    pub async fn append_audit(&self, event: NewAuditEvent) -> Result<Uuid, AppError> {
+        let id = Uuid::new_v4();
+        sqlx::query(r#"INSERT INTO audit_events (id, occurred_at, tenant_id, subject_id, correlation_id, interaction, action, resource_type, resource_id, http_status, outcome, row_kind, result_count, resource_version, reason_code)
+            VALUES ($1, now(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#)
+            .bind(id).bind(event.tenant_id).bind(event.subject_id).bind(event.correlation_id)
+            .bind(event.interaction).bind(event.action.to_string()).bind(event.resource_type).bind(event.resource_id)
+            .bind(i16::try_from(event.http_status).unwrap_or(500)).bind(event.outcome).bind(event.row_kind)
+            .bind(event.result_count).bind(event.resource_version).bind(event.reason_code).execute(self.pool()).await?;
+        Ok(id)
+    }
+
+    pub(crate) async fn append_audit_in_tx(
+        tx: &mut crate::store::TxExecutor<'_>,
+        event: NewAuditEvent,
+    ) -> Result<Uuid, AppError> {
+        let id = Uuid::new_v4();
+        sqlx::query(r#"INSERT INTO audit_events (id, occurred_at, tenant_id, subject_id, correlation_id, interaction, action, resource_type, resource_id, http_status, outcome, row_kind, result_count, resource_version, reason_code)
+            VALUES ($1, now(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#)
+            .bind(id).bind(event.tenant_id).bind(event.subject_id).bind(event.correlation_id)
+            .bind(event.interaction).bind(event.action.to_string()).bind(event.resource_type).bind(event.resource_id)
+            .bind(i16::try_from(event.http_status).unwrap_or(500)).bind(event.outcome).bind(event.row_kind)
+            .bind(event.result_count).bind(event.resource_version).bind(event.reason_code).execute(&mut **tx).await?;
+        Ok(id)
+    }
+
+    pub async fn audit_read(&self, tenant: &str, id: Uuid) -> Result<Option<AuditEvent>, AppError> {
+        let row = sqlx::query("SELECT * FROM audit_events WHERE tenant_id = $1 AND id = $2")
+            .bind(tenant)
+            .bind(id)
+            .fetch_optional(self.pool())
+            .await?;
+        Ok(row.map(audit_from_row))
+    }
+    pub async fn audit_search(
+        &self,
+        tenant: &str,
+        limit: i64,
+        after: Option<Uuid>,
+        filter: AuditSearch,
+    ) -> Result<(i64, Vec<AuditEvent>, Option<Uuid>), AppError> {
+        let mut total_query =
+            sqlx::QueryBuilder::new("SELECT count(*) FROM audit_events WHERE tenant_id = ");
+        total_query.push_bind(tenant);
+        push_audit_filters(&mut total_query, &filter);
+        let total = total_query
+            .build_query_scalar::<i64>()
+            .fetch_one(self.pool())
+            .await?;
+        let mut query = sqlx::QueryBuilder::new("SELECT * FROM audit_events WHERE tenant_id = ");
+        query.push_bind(tenant);
+        push_audit_filters(&mut query, &filter);
+        if let Some(after) = after {
+            query.push(" AND id > ");
+            query.push_bind(after);
+        }
+        query.push(" ORDER BY id LIMIT ");
+        query.push_bind(limit + 1);
+        let rows = query.build().fetch_all(self.pool()).await?;
+        let mut events: Vec<_> = rows.into_iter().map(audit_from_row).collect();
+        let next = if events.len() > limit as usize {
+            events.truncate(limit as usize);
+            events.last().map(|x| x.id)
+        } else {
+            None
+        };
+        Ok((total, events, next))
+    }
+}
+
+fn push_audit_filters(query: &mut sqlx::QueryBuilder<sqlx::Postgres>, filter: &AuditSearch) {
+    if let Some(id) = filter.id {
+        query.push(" AND id = ");
+        query.push_bind(id);
+    }
+    if let Some(action) = &filter.action {
+        query.push(" AND action = ");
+        query.push_bind(action);
+    }
+    if let Some(outcome) = &filter.outcome {
+        query.push(" AND outcome = ");
+        query.push_bind(outcome);
+    }
+    if let Some(agent) = &filter.agent {
+        query.push(" AND subject_id = ");
+        query.push_bind(agent);
+    }
+    if let Some(entity_type) = &filter.entity_type {
+        query.push(" AND resource_type = ");
+        query.push_bind(entity_type);
+    }
+    if let Some(entity_id) = &filter.entity_id {
+        query.push(" AND resource_id = ");
+        query.push_bind(entity_id);
+    }
+    if let Some(date_from) = filter.date_from {
+        query.push(" AND recorded_at >= ");
+        query.push_bind(date_from);
+    }
+    if let Some(date_to) = filter.date_to {
+        query.push(" AND recorded_at < ");
+        query.push_bind(date_to);
+    }
+}
+fn audit_from_row(row: PgRow) -> AuditEvent {
+    AuditEvent {
+        id: row.get("id"),
+        occurred_at: row.get("occurred_at"),
+        recorded_at: row.get("recorded_at"),
+        tenant_id: row.get("tenant_id"),
+        subject_id: row.get("subject_id"),
+        correlation_id: row.get("correlation_id"),
+        interaction: row.get("interaction"),
+        action: row.get("action"),
+        resource_type: row.get("resource_type"),
+        resource_id: row.get("resource_id"),
+        http_status: row.get("http_status"),
+        outcome: row.get("outcome"),
+        row_kind: row.get("row_kind"),
+        result_count: row.get("result_count"),
+        resource_version: row.get("resource_version"),
+        reason_code: row.get("reason_code"),
+    }
+}
+
+pub fn as_fhir(event: AuditEvent) -> Value {
+    let mut entities = Vec::new();
+    if let (Some(rt), Some(id)) = (&event.resource_type, &event.resource_id) {
+        entities.push(json!({"what": {"reference": format!("{rt}/{id}")}}));
+    }
+    json!({"resourceType":"AuditEvent", "id": event.id, "recorded": event.recorded_at.to_rfc3339(), "occurredDateTime": event.occurred_at.to_rfc3339(), "action": event.action, "outcome": {"code":{"system":"http://terminology.hl7.org/CodeSystem/audit-event-outcome","code":event.outcome}}, "type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/audit-event-type","code":"rest"}]}, "source":{"observer":{"display":"NisseFHIR"}}, "agent":[{"who":{"identifier":{"value":event.subject_id}},"requestor":true},{"who":{"display":"NisseFHIR"},"requestor":false}], "entity":entities, "extension":[{"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-correlation-id","valueString":event.correlation_id.to_string()},{"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-http-status","valueInteger":event.http_status},{"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-interaction","valueCode":event.interaction}]})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn generated_audit_event_is_valid_fhir() {
+        let value = as_fhir(AuditEvent {
+            id: Uuid::new_v4(),
+            occurred_at: Utc::now(),
+            recorded_at: Utc::now(),
+            tenant_id: "tenant".into(),
+            subject_id: "subject".into(),
+            correlation_id: Uuid::new_v4(),
+            interaction: "read".into(),
+            action: "R".into(),
+            resource_type: Some("Patient".into()),
+            resource_id: Some("p1".into()),
+            http_status: 200,
+            outcome: "success".into(),
+            row_kind: "standalone".into(),
+            result_count: None,
+            resource_version: None,
+            reason_code: None,
+        });
+        crate::validation::FhirSchemaValidator::new()
+            .unwrap()
+            .validate_resource("AuditEvent", &value)
+            .unwrap();
+    }
+}

@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, RawQuery, State, rejection::JsonRejection},
+    extract::{Extension, Path, RawQuery, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    AppState, auth::extract_access_context, capability::capability_statement, error::AppError,
-    media_type::BodyKind, search_params,
+    AppState, AtomicAuditRecorded, audit::MutationAuditContext, auth::extract_access_context,
+    capability::capability_statement, error::AppError, media_type::BodyKind, search_params,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -23,6 +23,10 @@ pub fn routes() -> Router<AppState> {
         // `[base]/metadata`, which is `/fhir/metadata` for the built-in base.
         .route("/metadata", get(get_metadata))
         .route("/fhir", axum::routing::post(process_bundle))
+        // AuditEvent is a server-reserved, read-only view over audit_events;
+        // it is intentionally not handled by the generic FHIR resource store.
+        .route("/fhir/AuditEvent", get(search_audit_events))
+        .route("/fhir/AuditEvent/{id}", get(read_audit_event))
         .route(
             "/fhir/{resource_type}",
             get(search_resources).post(create_resource),
@@ -38,6 +42,154 @@ pub fn routes() -> Router<AppState> {
             "/fhir/{resource_type}/{id}/_history",
             get(read_resource_history),
         )
+}
+
+/// Read a generated server audit record. Client-authored AuditEvent rows in
+/// fhir_resources are intentionally never visible through this endpoint.
+pub async fn read_audit_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let access = extract_access_context(&headers, &state.auth)?;
+    if !access.can_auditlog {
+        return Err(AppError::Forbidden);
+    }
+    let id = Uuid::parse_str(&id).map_err(|_| AppError::NotFound)?;
+    let event = state
+        .store
+        .audit_read(&access.tenant_id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok((StatusCode::OK, Json(crate::audit::as_fhir(event))).into_response())
+}
+
+/// Deliberately narrow audit-log search. Search values are never persisted;
+/// this first surface accepts only pagination controls to avoid quietly
+/// accepting unsupported filters.
+pub async fn search_audit_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Result<Response, AppError> {
+    let access = extract_access_context(&headers, &state.auth)?;
+    if !access.can_auditlog {
+        return Err(AppError::Forbidden);
+    }
+    let mut count = state.search.default_count;
+    let mut after = None;
+    let mut filter = crate::audit::AuditSearch::default();
+    for (key, value) in url::form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes()) {
+        match key.as_ref() {
+            "_count" => {
+                count = value.parse::<u32>().map_err(|_| {
+                    AppError::BadRequest("_count must be a positive integer".to_owned())
+                })?
+            }
+            "_after_id" => {
+                after = Some(Uuid::parse_str(&value).map_err(|_| {
+                    AppError::BadRequest("_after_id must be an audit event UUID".to_owned())
+                })?)
+            }
+            "_id" => {
+                filter.id = Some(Uuid::parse_str(&value).map_err(|_| {
+                    AppError::BadRequest("_id must be an audit event UUID".to_owned())
+                })?)
+            }
+            "action" => {
+                if !matches!(value.as_ref(), "C" | "R" | "U" | "D" | "E") {
+                    return Err(AppError::BadRequest(
+                        "action must be one of C, R, U, D, or E".to_owned(),
+                    ));
+                }
+                filter.action = Some(value.into_owned());
+            }
+            "outcome" => {
+                if !matches!(
+                    value.as_ref(),
+                    "success" | "minor-failure" | "serious-failure"
+                ) {
+                    return Err(AppError::BadRequest(
+                        "unsupported AuditEvent outcome".to_owned(),
+                    ));
+                }
+                filter.outcome = Some(value.into_owned());
+            }
+            "agent" => filter.agent = Some(value.into_owned()),
+            "entity" => {
+                let (resource_type, resource_id) = value.split_once('/').ok_or_else(|| {
+                    AppError::BadRequest("entity must be ResourceType/id".to_owned())
+                })?;
+                if resource_type.is_empty() || resource_id.is_empty() {
+                    return Err(AppError::BadRequest(
+                        "entity must be ResourceType/id".to_owned(),
+                    ));
+                }
+                filter.entity_type = Some(resource_type.to_owned());
+                filter.entity_id = Some(resource_id.to_owned());
+            }
+            "code" => {
+                if !value.eq_ignore_ascii_case("rest") {
+                    return Err(AppError::BadRequest("code must be 'rest'".to_owned()));
+                }
+            }
+            "date" => parse_audit_date(&value, &mut filter)?,
+            "" => {}
+            _ => {
+                return Err(AppError::BadRequest(format!(
+                    "unsupported AuditEvent search parameter '{key}'"
+                )));
+            }
+        }
+    }
+    if count == 0 || count > state.search.max_count {
+        return Err(AppError::BadRequest(
+            "_count is outside the configured bounds".to_owned(),
+        ));
+    }
+    let (total, events, next) = state
+        .store
+        .audit_search(&access.tenant_id, i64::from(count), after, filter)
+        .await?;
+    let mut link = vec![
+        json!({"relation":"self","url":format!("{}/AuditEvent", state.fhir_base_url.trim_end_matches('/'))}),
+    ];
+    if let Some(next) = next {
+        link.push(json!({"relation":"next","url":format!("{}/AuditEvent?_count={count}&_after_id={next}", state.fhir_base_url.trim_end_matches('/'))}));
+    }
+    Ok((StatusCode::OK, Json(json!({"resourceType":"Bundle","type":"searchset","total":total,"link":link,"entry":events.into_iter().map(|e| json!({"resource":crate::audit::as_fhir(e)})).collect::<Vec<_>>() }))).into_response())
+}
+
+fn parse_audit_date(value: &str, filter: &mut crate::audit::AuditSearch) -> Result<(), AppError> {
+    let (prefix, timestamp) = if let Some(rest) = value.strip_prefix("ge") {
+        ("ge", rest)
+    } else if let Some(rest) = value.strip_prefix("gt") {
+        ("gt", rest)
+    } else if let Some(rest) = value.strip_prefix("le") {
+        ("le", rest)
+    } else if let Some(rest) = value.strip_prefix("lt") {
+        ("lt", rest)
+    } else {
+        ("eq", value)
+    };
+    let parsed = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map_err(|_| {
+            AppError::BadRequest(
+                "date must be an RFC3339 timestamp with optional ge, gt, le, or lt prefix"
+                    .to_owned(),
+            )
+        })?
+        .with_timezone(&chrono::Utc);
+    match prefix {
+        "ge" | "gt" => filter.date_from = Some(parsed),
+        "le" | "lt" => filter.date_to = Some(parsed),
+        "eq" => {
+            filter.date_from = Some(parsed);
+            filter.date_to = Some(parsed + chrono::Duration::seconds(1));
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
 }
 
 #[utoipa::path(get, path = "/healthz", responses((status = 200, description = "Server is healthy")))]
@@ -116,11 +268,15 @@ pub async fn search_resources(
     security(("bearer_auth" = [])))]
 pub async fn create_resource(
     State(state): State<AppState>,
+    audit: Option<Extension<MutationAuditContext>>,
     headers: HeaderMap,
     Path(resource_type): Path<String>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    let audit = audit
+        .ok_or_else(|| AppError::Internal("missing mutation audit context".to_owned()))?
+        .0;
     validate_path_resource_type(&resource_type)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
@@ -164,13 +320,14 @@ pub async fn create_resource(
         );
         let outcome = state
             .store
-            .conditional_create_atomic(
+            .conditional_create_with_audit(
                 &access.tenant_id,
                 &resource_type,
                 &params.filters,
                 lock_key,
                 &id,
                 body,
+                &audit,
             )
             .await?;
 
@@ -188,9 +345,9 @@ pub async fn create_resource(
                         AppError::Internal(format!("invalid Last-Modified header: {e}"))
                     })?,
                 );
-                return Ok(
-                    (StatusCode::OK, response_headers, Json(existing.resource)).into_response()
-                );
+                return Ok(atomic_audit_response(
+                    (StatusCode::OK, response_headers, Json(existing.resource)).into_response(),
+                ));
             }
             crate::store::ConditionalCreateOutcome::MultipleMatches => {
                 return Err(AppError::PreconditionFailed(
@@ -219,9 +376,9 @@ pub async fn create_resource(
                     ))
                     .map_err(|e| AppError::Internal(format!("invalid Location header: {e}")))?,
                 );
-                return Ok(
+                return Ok(atomic_audit_response(
                     (StatusCode::CREATED, response_headers, Json(stored.resource)).into_response(),
-                );
+                ));
             }
         }
     }
@@ -229,7 +386,7 @@ pub async fn create_resource(
     // Non-conditional create path.
     let stored = state
         .store
-        .create(&access.tenant_id, &resource_type, &id, body)
+        .create_with_audit(&access.tenant_id, &resource_type, &id, body, &audit)
         .await?
         .ok_or_else(|| {
             AppError::Conflict("a resource with the generated id already exists".to_owned())
@@ -256,7 +413,9 @@ pub async fn create_resource(
         .map_err(|e| AppError::Internal(format!("invalid Location header: {e}")))?,
     );
 
-    Ok((StatusCode::CREATED, response_headers, Json(stored.resource)).into_response())
+    Ok(atomic_audit_response(
+        (StatusCode::CREATED, response_headers, Json(stored.resource)).into_response(),
+    ))
 }
 
 #[utoipa::path(get, path = "/fhir/{resource_type}/{id}",
@@ -355,11 +514,15 @@ pub async fn read_resource_history(
     security(("bearer_auth" = [])))]
 pub async fn update_resource(
     State(state): State<AppState>,
+    audit: Option<Extension<MutationAuditContext>>,
     headers: HeaderMap,
     Path((resource_type, id)): Path<(String, String)>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    let audit = audit
+        .ok_or_else(|| AppError::Internal("missing mutation audit context".to_owned()))?
+        .0;
     validate_path_resource_type(&resource_type)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
@@ -377,7 +540,14 @@ pub async fn update_resource(
         Some(version) => {
             let updated = state
                 .store
-                .update_if_version_matches(&access.tenant_id, &resource_type, &id, version, body)
+                .update_if_version_matches_with_audit(
+                    &access.tenant_id,
+                    &resource_type,
+                    &id,
+                    version,
+                    body,
+                    &audit,
+                )
                 .await?;
 
             let stored = match updated {
@@ -402,7 +572,7 @@ pub async fn update_resource(
         None => {
             let result = state
                 .store
-                .upsert(&access.tenant_id, &resource_type, &id, body)
+                .upsert_with_audit(&access.tenant_id, &resource_type, &id, body, &audit)
                 .await?;
             (result.stored, result.created)
         }
@@ -436,7 +606,9 @@ pub async fn update_resource(
     } else {
         StatusCode::OK
     };
-    Ok((status, response_headers, Json(stored.resource)).into_response())
+    Ok(atomic_audit_response(
+        (status, response_headers, Json(stored.resource)).into_response(),
+    ))
 }
 
 /// Delete a resource.
@@ -453,40 +625,35 @@ pub async fn update_resource(
     security(("bearer_auth" = [])))]
 pub async fn delete_resource(
     State(state): State<AppState>,
+    audit: Option<Extension<MutationAuditContext>>,
     headers: HeaderMap,
     Path((resource_type, id)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    let audit = audit
+        .ok_or_else(|| AppError::Internal("missing mutation audit context".to_owned()))?
+        .0;
     validate_path_resource_type(&resource_type)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
     let expected_version = parse_if_match_version(&headers)?;
 
-    let outcome = match expected_version {
-        Some(version) => {
-            state
-                .store
-                .delete_if_version_matches(&access.tenant_id, &resource_type, &id, version)
-                .await?
-        }
-        None => {
-            // No If-Match header: unconditional delete (removes the current version).
-            let deleted = state
-                .store
-                .delete(&access.tenant_id, &resource_type, &id)
-                .await?;
-            if !deleted {
-                return Err(AppError::NotFound);
-            }
-            return Ok(StatusCode::NO_CONTENT.into_response());
-        }
-    };
+    let outcome = state
+        .store
+        .delete_with_audit(
+            &access.tenant_id,
+            &resource_type,
+            &id,
+            expected_version,
+            &audit,
+        )
+        .await?;
 
     match outcome {
-        crate::store::DeleteIfMatchOutcome::Deleted { .. } => {
-            Ok(StatusCode::NO_CONTENT.into_response())
-        }
+        crate::store::DeleteIfMatchOutcome::Deleted { .. } => Ok(atomic_audit_response(
+            StatusCode::NO_CONTENT.into_response(),
+        )),
         crate::store::DeleteIfMatchOutcome::VersionMismatch => Err(AppError::PreconditionFailed(
             "If-Match version mismatch: resource was updated by another writer".to_owned(),
         )),
@@ -500,11 +667,15 @@ pub async fn delete_resource(
     security(("bearer_auth" = [])))]
 pub async fn patch_resource(
     State(state): State<AppState>,
+    audit: Option<Extension<MutationAuditContext>>,
     headers: HeaderMap,
     Path((resource_type, id)): Path<(String, String)>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    let audit = audit
+        .ok_or_else(|| AppError::Internal("missing mutation audit context".to_owned()))?
+        .0;
     validate_path_resource_type(&resource_type)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
@@ -556,19 +727,26 @@ pub async fn patch_resource(
         Some(version) => {
             state
                 .store
-                .update_if_version_matches(
+                .update_if_version_matches_with_audit(
                     &access.tenant_id,
                     &resource_type,
                     &id,
                     version,
                     resource,
+                    &audit,
                 )
                 .await?
         }
         None => {
             state
                 .store
-                .update_existing(&access.tenant_id, &resource_type, &id, resource)
+                .update_existing_with_audit(
+                    &access.tenant_id,
+                    &resource_type,
+                    &id,
+                    resource,
+                    &audit,
+                )
                 .await?
         }
     };
@@ -604,7 +782,14 @@ pub async fn patch_resource(
             .map_err(|e| AppError::Internal(format!("invalid Last-Modified header: {e}")))?,
     );
 
-    Ok((StatusCode::OK, response_headers, Json(stored.resource)).into_response())
+    Ok(atomic_audit_response(
+        (StatusCode::OK, response_headers, Json(stored.resource)).into_response(),
+    ))
+}
+
+fn atomic_audit_response(mut response: Response) -> Response {
+    response.extensions_mut().insert(AtomicAuditRecorded);
+    response
 }
 
 /// Process a FHIR Bundle of type `transaction` or `batch`.

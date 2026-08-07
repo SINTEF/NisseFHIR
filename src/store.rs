@@ -4,6 +4,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
+use crate::audit::MutationAuditContext;
 use crate::error::AppError;
 use crate::search_params::sql::{GeoSearchMode, SearchFilter};
 
@@ -87,6 +88,21 @@ pub struct HistoryResults {
 }
 
 impl PgStore {
+    async fn record_success_and_commit(
+        mut tx: TxExecutor<'_>,
+        event: crate::audit::NewAuditEvent,
+    ) -> Result<(), AppError> {
+        if Self::append_audit_in_tx(&mut tx, event).await.is_err() {
+            // The resource and history writes share this transaction with the
+            // audit insert.  Do not surface 503 until rollback has completed.
+            tx.rollback().await?;
+            ::metrics::counter!("nissefhir_audit_persistence_failures_total").increment(1);
+            return Err(AppError::ServiceUnavailable);
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub fn new(pool: PgPool, geo_mode: GeoSearchMode) -> Self {
         Self { pool, geo_mode }
     }
@@ -262,6 +278,133 @@ impl PgStore {
             last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
             resource: row.get::<Value, _>("resource"),
         }))
+    }
+
+    /// Create a resource and its successful audit evidence atomically.
+    pub async fn create_with_audit(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+        audit: &MutationAuditContext,
+    ) -> Result<Option<StoredResource>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let stored = Self::create_in_tx(&mut tx, tenant_id, resource_type, id, resource).await?;
+        let Some(stored) = stored else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        Self::record_success_and_commit(
+            tx,
+            audit.success_event(
+                "create",
+                'C',
+                resource_type,
+                id,
+                201,
+                Some(stored.version_id),
+            ),
+        )
+        .await?;
+        Ok(Some(stored))
+    }
+
+    /// Upsert a resource and its successful audit evidence atomically.
+    pub async fn upsert_with_audit(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+        audit: &MutationAuditContext,
+    ) -> Result<UpsertResult, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let result = Self::upsert_in_tx(&mut tx, tenant_id, resource_type, id, resource).await?;
+        let status = if result.created { 201 } else { 200 };
+        Self::record_success_and_commit(
+            tx,
+            audit.success_event(
+                "update",
+                'U',
+                resource_type,
+                id,
+                status,
+                Some(result.stored.version_id),
+            ),
+        )
+        .await?;
+        Ok(result)
+    }
+
+    /// Update conditionally and persist success evidence in the same
+    /// transaction. A non-match is intentionally not audited as success.
+    pub async fn update_if_version_matches_with_audit(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: i64,
+        resource: Value,
+        audit: &MutationAuditContext,
+    ) -> Result<Option<StoredResource>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let stored = Self::update_if_version_matches_in_tx(
+            &mut tx,
+            tenant_id,
+            resource_type,
+            id,
+            expected_version,
+            resource,
+        )
+        .await?;
+        let Some(stored) = stored else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        Self::record_success_and_commit(
+            tx,
+            audit.success_event(
+                "update",
+                'U',
+                resource_type,
+                id,
+                200,
+                Some(stored.version_id),
+            ),
+        )
+        .await?;
+        Ok(Some(stored))
+    }
+
+    /// Update an existing resource and persist success evidence atomically.
+    pub async fn update_existing_with_audit(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        resource: Value,
+        audit: &MutationAuditContext,
+    ) -> Result<Option<StoredResource>, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let stored = Self::update_in_tx(&mut tx, tenant_id, resource_type, id, resource).await?;
+        let Some(stored) = stored else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        Self::record_success_and_commit(
+            tx,
+            audit.success_event(
+                "update",
+                'U',
+                resource_type,
+                id,
+                200,
+                Some(stored.version_id),
+            ),
+        )
+        .await?;
+        Ok(Some(stored))
     }
 
     pub async fn update_if_version_matches(
@@ -492,6 +635,56 @@ impl PgStore {
         Ok(true)
     }
 
+    /// Delete (optionally version-checked) and write its successful audit row
+    /// in the same transaction as the tombstone history row.
+    pub async fn delete_with_audit(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        expected_version: Option<i64>,
+        audit: &MutationAuditContext,
+    ) -> Result<DeleteIfMatchOutcome, AppError> {
+        let mut tx = self.pool.begin().await?;
+        let outcome = match expected_version {
+            Some(version) => {
+                Self::delete_if_version_matches_in_tx(
+                    &mut tx,
+                    tenant_id,
+                    resource_type,
+                    id,
+                    version,
+                )
+                .await?
+            }
+            None => {
+                if Self::delete_in_tx(&mut tx, tenant_id, resource_type, id).await? {
+                    // The tombstone version is the prior current version + 1.
+                    let version = sqlx::query_scalar::<_, i64>(
+                        "SELECT MAX(version_id) FROM fhir_resource_history WHERE tenant_id = $1 AND resource_type = $2 AND id = $3",
+                    )
+                    .bind(tenant_id).bind(resource_type).bind(id)
+                    .fetch_one(&mut *tx).await?;
+                    DeleteIfMatchOutcome::Deleted {
+                        new_version_id: version,
+                    }
+                } else {
+                    DeleteIfMatchOutcome::NotFound
+                }
+            }
+        };
+        let DeleteIfMatchOutcome::Deleted { new_version_id } = outcome else {
+            tx.rollback().await?;
+            return Ok(outcome);
+        };
+        Self::record_success_and_commit(
+            tx,
+            audit.success_event("delete", 'D', resource_type, id, 204, Some(new_version_id)),
+        )
+        .await?;
+        Ok(outcome)
+    }
+
     pub async fn search(
         &self,
         tenant_id: &str,
@@ -656,6 +849,74 @@ impl PgStore {
         tx.commit().await?;
 
         Ok(ConditionalCreateOutcome::Created(created))
+    }
+
+    /// Conditional create plus its success audit row in one transaction.  The
+    /// one-match path commits its audit row too, despite making no resource
+    /// change, so the 200 result is durably evidenced before it is returned.
+    pub async fn conditional_create_with_audit(
+        &self,
+        tenant_id: &str,
+        resource_type: &str,
+        filters: &[SearchFilter],
+        lock_key: i64,
+        id: &str,
+        resource: Value,
+        audit: &MutationAuditContext,
+    ) -> Result<ConditionalCreateOutcome, AppError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new(
+            "SELECT id, version_id, last_updated, resource FROM fhir_resources WHERE tenant_id = ",
+        );
+        query.push_bind(tenant_id);
+        query.push(" AND resource_type = ");
+        query.push_bind(resource_type);
+        crate::search_params::sql::push_search_filters(&mut query, filters, self.geo_mode)?;
+        query.push(" ORDER BY id ASC LIMIT ");
+        query.push_bind(2_i64);
+        let rows = query.build().fetch_all(&mut *tx).await?;
+        if rows.len() > 1 {
+            tx.rollback().await?;
+            return Ok(ConditionalCreateOutcome::MultipleMatches);
+        }
+        let (outcome, event) = if let Some(row) = rows.into_iter().next() {
+            let stored = StoredResource {
+                id: row.get("id"),
+                version_id: row.get("version_id"),
+                last_updated: row.get("last_updated"),
+                resource: row.get("resource"),
+            };
+            let event = audit.success_event(
+                "create",
+                'C',
+                resource_type,
+                &stored.id,
+                200,
+                Some(stored.version_id),
+            );
+            (ConditionalCreateOutcome::Existing(stored), event)
+        } else {
+            let stored = Self::create_in_tx(&mut tx, tenant_id, resource_type, id, resource)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Conflict("a resource with the generated id already exists".to_owned())
+                })?;
+            let event = audit.success_event(
+                "create",
+                'C',
+                resource_type,
+                id,
+                201,
+                Some(stored.version_id),
+            );
+            (ConditionalCreateOutcome::Created(stored), event)
+        };
+        Self::record_success_and_commit(tx, event).await?;
+        Ok(outcome)
     }
 
     /// Create a resource inside an existing transaction without overwriting.

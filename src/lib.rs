@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod auth;
 pub mod bundle;
 pub mod capability;
@@ -65,6 +66,16 @@ pub struct AppState {
     pub cors_allowed_origins: Vec<header::HeaderValue>,
     pub serve_docs: bool,
 }
+
+/// Server-generated request identifier shared by tracing and persisted audit
+/// records. It is deliberately never accepted from caller-controlled headers.
+#[derive(Clone, Copy, Debug)]
+pub struct CorrelationId(pub Uuid);
+
+/// Marks a response whose successful audit event was inserted by the same
+/// transaction as the resource mutation.
+#[derive(Clone, Copy, Debug)]
+pub struct AtomicAuditRecorded;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -140,8 +151,151 @@ pub fn build_router(state: AppState) -> Router {
         // to the metrics-rs global recorder; when the recorder is not
         // installed (metrics disabled) these are harmless no-ops.
         .layer(middleware::from_fn(metrics::http_metrics_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            audit_middleware,
+        ))
+        .layer(middleware::from_fn(correlation_id_middleware))
         .layer(cors)
         .with_state(state)
+}
+
+async fn correlation_id_middleware(
+    mut request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    request
+        .extensions_mut()
+        .insert(CorrelationId(Uuid::new_v4()));
+    next.run(request).await
+}
+
+/// Append one privacy-minimised record for every authenticated FHIR API
+/// interaction. Authentication failures are deliberately excluded because no
+/// trustworthy subject/tenant exists. Audit failures on error responses are
+/// best effort; a successful response is withheld if its audit write fails.
+async fn audit_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    mut request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let access = crate::auth::extract_access_context(request.headers(), &state.auth).ok();
+    let correlation = request
+        .extensions()
+        .get::<CorrelationId>()
+        .copied()
+        .unwrap_or(CorrelationId(Uuid::new_v4()));
+    if let Some(access) = &access {
+        request
+            .extensions_mut()
+            .insert(crate::audit::MutationAuditContext {
+                tenant_id: access.tenant_id.clone(),
+                subject_id: access.subject_id.clone(),
+                correlation_id: correlation.0,
+            });
+    }
+    let method = request.method().as_str().to_owned();
+    let path = request.uri().path().to_owned();
+    let (interaction, action, resource_type, resource_id, row_kind) =
+        audit_request_shape(&method, &path);
+    let response = next.run(request).await;
+    if let Some(access) = access.filter(|_| path.starts_with("/fhir")) {
+        let status = response.status().as_u16();
+        let outcome = if status < 400 {
+            "success"
+        } else if status < 500 {
+            "minor-failure"
+        } else {
+            "serious-failure"
+        };
+        let reason = normalized_reason(status);
+        let event = crate::audit::NewAuditEvent {
+            tenant_id: access.tenant_id,
+            subject_id: access.subject_id,
+            correlation_id: correlation.0,
+            interaction,
+            action,
+            resource_type,
+            resource_id,
+            http_status: status,
+            outcome,
+            row_kind,
+            result_count: None,
+            resource_version: None,
+            reason_code: reason,
+        };
+        let already_recorded_atomically =
+            status < 400 && response.extensions().get::<AtomicAuditRecorded>().is_some();
+        if !already_recorded_atomically && state.store.append_audit(event).await.is_err() {
+            ::metrics::counter!("nissefhir_audit_persistence_failures_total").increment(1);
+            tracing::error!(correlation_id = %correlation.0, status, reason_code = reason.unwrap_or("unknown"), "audit persistence failed");
+            if status < 400 {
+                return crate::error::AppError::ServiceUnavailable.into_response();
+            }
+        }
+    }
+    response
+}
+
+fn audit_request_shape(
+    method: &str,
+    path: &str,
+) -> (
+    &'static str,
+    char,
+    Option<String>,
+    Option<String>,
+    &'static str,
+) {
+    if path == "/fhir" {
+        return (
+            "bundle",
+            'E',
+            Some("Bundle".to_owned()),
+            None,
+            "bundle-parent",
+        );
+    }
+    let parts: Vec<_> = path.trim_start_matches("/fhir/").split('/').collect();
+    let resource_type = parts
+        .first()
+        .filter(|s| !s.is_empty())
+        .map(|s| (*s).to_owned());
+    let resource_id = if parts.len() >= 2 && parts[1] != "_history" {
+        Some(parts[1].to_owned())
+    } else {
+        None
+    };
+    let (interaction, action) = match method {
+        "POST" => ("create", 'C'),
+        "PUT" | "PATCH" => ("update", 'U'),
+        "DELETE" => ("delete", 'D'),
+        "GET" if parts.last() == Some(&"_history") => ("history", 'R'),
+        "GET" if resource_id.is_some() => ("read", 'R'),
+        "GET" => ("search", 'E'),
+        _ => ("operation", 'E'),
+    };
+    (
+        interaction,
+        action,
+        resource_type,
+        resource_id,
+        "standalone",
+    )
+}
+fn normalized_reason(status: u16) -> Option<&'static str> {
+    match status {
+        400 => Some("bad-request"),
+        403 => Some("forbidden"),
+        404 => Some("not-found"),
+        405 => Some("method-not-allowed"),
+        409 => Some("conflict"),
+        412 => Some("precondition-failed"),
+        413 => Some("payload-too-large"),
+        415 => Some("unsupported-media-type"),
+        500..=599 => Some("server-error"),
+        _ => None,
+    }
 }
 
 /// Privacy-safe request span.
@@ -167,7 +321,11 @@ impl<B> MakeSpan<B> for PrivacyMakeSpan {
             .get::<MatchedPath>()
             .map(|p| p.as_str().to_owned())
             .unwrap_or_else(|| "<unmatched>".to_owned());
-        let correlation_id = Uuid::new_v4().to_string();
+        let correlation_id = request
+            .extensions()
+            .get::<CorrelationId>()
+            .map(|id| id.0.to_string())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         tracing::info_span!(
             "http_request",
             method = %method,

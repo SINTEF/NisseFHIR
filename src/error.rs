@@ -30,6 +30,10 @@ pub enum AppError {
     Forbidden,
     #[error("not found")]
     NotFound,
+    #[error("method not allowed")]
+    MethodNotAllowed,
+    #[error("service unavailable")]
+    ServiceUnavailable,
     #[error("bad request: {0}")]
     BadRequest(String),
     #[error("precondition failed: {0}")]
@@ -79,6 +83,20 @@ impl IntoResponse for AppError {
                 vec![OperationIssue::error(
                     "not-found",
                     "requested resource was not found",
+                )],
+            ),
+            AppError::MethodNotAllowed => (
+                StatusCode::METHOD_NOT_ALLOWED,
+                vec![OperationIssue::error(
+                    "not-supported",
+                    "interaction is not supported",
+                )],
+            ),
+            AppError::ServiceUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                vec![OperationIssue::error(
+                    "transient",
+                    "service temporarily unavailable",
                 )],
             ),
             AppError::BadRequest(message) => (
