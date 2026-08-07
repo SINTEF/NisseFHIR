@@ -1,0 +1,6 @@
+# Pinned Rust toolchain for reproducible builds across local dev, CI, and Docker.
+# Bump the channel below (and the Dockerfile `rust:` tag) together when refreshing.
+[toolchain]
+channel = "1.96.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
