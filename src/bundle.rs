@@ -27,6 +27,7 @@ struct EntryAuditFact {
     action: char,
     resource_type: Option<String>,
     resource_id: Option<String>,
+    conditional_create: bool,
 }
 
 fn entry_audit_fact(index: usize, entry: &Value) -> EntryAuditFact {
@@ -50,6 +51,7 @@ fn entry_audit_fact(index: usize, entry: &Value) -> EntryAuditFact {
         action,
         resource_type,
         resource_id,
+        conditional_create: entry["request"]["ifNoneExist"].is_string(),
     }
 }
 
@@ -105,6 +107,8 @@ fn entry_audit_event(
         entry_index: Some(fact.index),
         result_count,
         resource_version,
+        conditional_create_disposition: (outcome == "success" && fact.conditional_create)
+            .then(|| if status == 201 { "created" } else { "existing" }),
         reason_code,
     }
 }
@@ -112,7 +116,7 @@ fn entry_audit_event(
 fn parent_audit_event(
     audit: &MutationAuditContext,
     parent_id: Uuid,
-    entries: usize,
+    _entries: usize,
 ) -> NewAuditEvent {
     NewAuditEvent {
         id: parent_id,
@@ -128,8 +132,11 @@ fn parent_audit_event(
         row_kind: "bundle-parent",
         parent_audit_id: None,
         entry_index: None,
-        result_count: Some(i64::try_from(entries).unwrap_or(i64::MAX)),
+        // A Bundle is neither a search result nor a resource version. Its
+        // entry count is structural bookkeeping, not result metadata.
+        result_count: None,
         resource_version: None,
+        conditional_create_disposition: None,
         reason_code: None,
     }
 }
@@ -1165,7 +1172,9 @@ pub(crate) async fn process_transaction(
                 }
                 let fact = fact_with_response_identity(fact, &resp);
                 let status = response_status(&resp);
-                let result_count = (fact.action == 'R').then_some(1);
+                let resource_version = matches!(fact.action, 'C' | 'U' | 'D')
+                    .then(|| response_version(&resp))
+                    .flatten();
                 if crate::store::PgStore::append_audit_in_tx(
                     &mut executor.tx,
                     entry_audit_event(
@@ -1175,8 +1184,8 @@ pub(crate) async fn process_transaction(
                         status,
                         "success",
                         None,
-                        result_count,
-                        response_version(&resp),
+                        None,
+                        resource_version,
                     ),
                 )
                 .await
@@ -1275,7 +1284,9 @@ pub(crate) async fn process_batch(
             Ok(resp) => {
                 let fact = fact_with_response_identity(fact, &resp);
                 let status = response_status(&resp);
-                let result_count = (fact.action == 'R').then_some(1);
+                let resource_version = matches!(fact.action, 'C' | 'U' | 'D')
+                    .then(|| response_version(&resp))
+                    .flatten();
                 let audit_result = crate::store::PgStore::append_audit_in_tx(
                     &mut executor.tx,
                     entry_audit_event(
@@ -1285,8 +1296,8 @@ pub(crate) async fn process_batch(
                         status,
                         "success",
                         None,
-                        result_count,
-                        response_version(&resp),
+                        None,
+                        resource_version,
                     ),
                 )
                 .await;

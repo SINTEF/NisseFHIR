@@ -183,7 +183,13 @@ pub async fn search_audit_events(
         let next_id = next.to_string();
         link.push(json!({"relation":"next","url":crate::search::build_search_url(base_url, "AuditEvent", count, Some(&next_id), &canonical_filters)}));
     }
-    Ok((StatusCode::OK, Json(json!({"resourceType":"Bundle","type":"searchset","total":total,"link":link,"entry":events.into_iter().map(|e| json!({"resource":crate::audit::as_fhir(e)})).collect::<Vec<_>>() }))).into_response())
+    let mut response = (StatusCode::OK, Json(json!({"resourceType":"Bundle","type":"searchset","total":total,"link":link,"entry":events.into_iter().map(|e| json!({"resource":crate::audit::as_fhir(e)})).collect::<Vec<_>>() }))).into_response();
+    response
+        .extensions_mut()
+        .insert(crate::audit::AuditResponseMetadata {
+            result_count: total,
+        });
+    Ok(response)
 }
 
 /// Apply one `date` search value to the audit filter.
@@ -309,7 +315,13 @@ pub async fn search_resources(
         &params.canonical_filters,
     ));
 
-    Ok((StatusCode::OK, response).into_response())
+    let mut response = (StatusCode::OK, response).into_response();
+    response
+        .extensions_mut()
+        .insert(crate::audit::AuditResponseMetadata {
+            result_count: results.total,
+        });
+    Ok(response)
 }
 
 #[utoipa::path(post, path = "/fhir/{resource_type}",

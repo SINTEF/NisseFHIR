@@ -304,6 +304,7 @@ impl PgStore {
                 id,
                 201,
                 Some(stored.version_id),
+                None,
             ),
         )
         .await?;
@@ -331,6 +332,7 @@ impl PgStore {
                 id,
                 status,
                 Some(result.stored.version_id),
+                None,
             ),
         )
         .await?;
@@ -371,6 +373,7 @@ impl PgStore {
                 id,
                 200,
                 Some(stored.version_id),
+                None,
             ),
         )
         .await?;
@@ -401,6 +404,7 @@ impl PgStore {
                 id,
                 200,
                 Some(stored.version_id),
+                None,
             ),
         )
         .await?;
@@ -675,7 +679,15 @@ impl PgStore {
         };
         Self::record_success_and_commit(
             tx,
-            audit.success_event("delete", 'D', resource_type, id, 204, Some(new_version_id)),
+            audit.success_event(
+                "delete",
+                'D',
+                resource_type,
+                id,
+                204,
+                Some(new_version_id),
+                None,
+            ),
         )
         .await?;
         Ok(outcome)
@@ -893,6 +905,7 @@ impl PgStore {
                 &stored.id,
                 200,
                 Some(stored.version_id),
+                Some("existing"),
             );
             (ConditionalCreateOutcome::Existing(stored), event)
         } else {
@@ -908,6 +921,7 @@ impl PgStore {
                 id,
                 201,
                 Some(stored.version_id),
+                Some("created"),
             );
             (ConditionalCreateOutcome::Created(stored), event)
         };

@@ -209,6 +209,10 @@ async fn audit_middleware(
             "serious-failure"
         };
         let reason = normalized_reason(status);
+        let metadata = response
+            .extensions()
+            .get::<crate::audit::AuditResponseMetadata>()
+            .copied();
         let event = crate::audit::NewAuditEvent {
             id: Uuid::new_v4(),
             tenant_id: access.tenant_id,
@@ -221,8 +225,11 @@ async fn audit_middleware(
             http_status: status,
             outcome,
             row_kind,
-            result_count: None,
+            result_count: (status < 400)
+                .then_some(metadata.map(|facts| facts.result_count))
+                .flatten(),
             resource_version: None,
+            conditional_create_disposition: None,
             reason_code: reason,
             parent_audit_id: None,
             entry_index: None,

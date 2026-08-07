@@ -17,6 +17,14 @@ pub struct MutationAuditContext {
     pub correlation_id: Uuid,
 }
 
+/// Small, server-derived response facts handed from a read handler to the
+/// audit middleware.  This intentionally cannot carry request or resource
+/// content.
+#[derive(Clone, Copy, Debug)]
+pub struct AuditResponseMetadata {
+    pub result_count: i64,
+}
+
 impl MutationAuditContext {
     pub fn success_event(
         &self,
@@ -26,6 +34,7 @@ impl MutationAuditContext {
         resource_id: &str,
         http_status: u16,
         resource_version: Option<i64>,
+        conditional_create_disposition: Option<&'static str>,
     ) -> NewAuditEvent {
         NewAuditEvent {
             id: Uuid::new_v4(),
@@ -41,6 +50,7 @@ impl MutationAuditContext {
             row_kind: "standalone",
             result_count: None,
             resource_version,
+            conditional_create_disposition,
             reason_code: None,
             parent_audit_id: None,
             entry_index: None,
@@ -65,6 +75,8 @@ pub struct NewAuditEvent {
     pub row_kind: &'static str,
     pub result_count: Option<i64>,
     pub resource_version: Option<i64>,
+    /// Bounded outcome for conditional creates; never the condition itself.
+    pub conditional_create_disposition: Option<&'static str>,
     pub reason_code: Option<&'static str>,
     pub parent_audit_id: Option<Uuid>,
     pub entry_index: Option<i32>,
@@ -89,6 +101,7 @@ pub struct AuditEvent {
     pub entry_index: Option<i32>,
     pub result_count: Option<i64>,
     pub resource_version: Option<i64>,
+    pub conditional_create_disposition: Option<String>,
     pub reason_code: Option<String>,
 }
 
@@ -144,12 +157,12 @@ impl AuditSearch {
 impl PgStore {
     pub async fn append_audit(&self, event: NewAuditEvent) -> Result<Uuid, AppError> {
         let id = event.id;
-        sqlx::query(r#"INSERT INTO audit_events (id, occurred_at, tenant_id, subject_id, correlation_id, interaction, action, resource_type, resource_id, http_status, outcome, row_kind, parent_audit_id, entry_index, result_count, resource_version, reason_code)
-            VALUES ($1, now(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#)
+        sqlx::query(r#"INSERT INTO audit_events (id, occurred_at, tenant_id, subject_id, correlation_id, interaction, action, resource_type, resource_id, http_status, outcome, row_kind, parent_audit_id, entry_index, result_count, resource_version, conditional_create_disposition, reason_code)
+            VALUES ($1, now(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"#)
             .bind(id).bind(event.tenant_id).bind(event.subject_id).bind(event.correlation_id)
             .bind(event.interaction).bind(event.action.to_string()).bind(event.resource_type).bind(event.resource_id)
             .bind(i16::try_from(event.http_status).unwrap_or(500)).bind(event.outcome).bind(event.row_kind)
-            .bind(event.parent_audit_id).bind(event.entry_index).bind(event.result_count).bind(event.resource_version).bind(event.reason_code).execute(self.pool()).await?;
+            .bind(event.parent_audit_id).bind(event.entry_index).bind(event.result_count).bind(event.resource_version).bind(event.conditional_create_disposition).bind(event.reason_code).execute(self.pool()).await?;
         Ok(id)
     }
 
@@ -158,12 +171,12 @@ impl PgStore {
         event: NewAuditEvent,
     ) -> Result<Uuid, AppError> {
         let id = event.id;
-        sqlx::query(r#"INSERT INTO audit_events (id, occurred_at, tenant_id, subject_id, correlation_id, interaction, action, resource_type, resource_id, http_status, outcome, row_kind, parent_audit_id, entry_index, result_count, resource_version, reason_code)
-            VALUES ($1, now(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#)
+        sqlx::query(r#"INSERT INTO audit_events (id, occurred_at, tenant_id, subject_id, correlation_id, interaction, action, resource_type, resource_id, http_status, outcome, row_kind, parent_audit_id, entry_index, result_count, resource_version, conditional_create_disposition, reason_code)
+            VALUES ($1, now(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"#)
             .bind(id).bind(event.tenant_id).bind(event.subject_id).bind(event.correlation_id)
             .bind(event.interaction).bind(event.action.to_string()).bind(event.resource_type).bind(event.resource_id)
             .bind(i16::try_from(event.http_status).unwrap_or(500)).bind(event.outcome).bind(event.row_kind)
-            .bind(event.parent_audit_id).bind(event.entry_index).bind(event.result_count).bind(event.resource_version).bind(event.reason_code).execute(&mut **tx).await?;
+            .bind(event.parent_audit_id).bind(event.entry_index).bind(event.result_count).bind(event.resource_version).bind(event.conditional_create_disposition).bind(event.reason_code).execute(&mut **tx).await?;
         Ok(id)
     }
 
@@ -268,6 +281,7 @@ fn audit_from_row(row: PgRow) -> AuditEvent {
         entry_index: row.get("entry_index"),
         result_count: row.get("result_count"),
         resource_version: row.get("resource_version"),
+        conditional_create_disposition: row.get("conditional_create_disposition"),
         reason_code: row.get("reason_code"),
     }
 }
@@ -277,7 +291,21 @@ pub fn as_fhir(event: AuditEvent) -> Value {
     if let (Some(rt), Some(id)) = (&event.resource_type, &event.resource_id) {
         entities.push(json!({"what": {"reference": format!("{rt}/{id}")}}));
     }
-    json!({"resourceType":"AuditEvent", "id": event.id, "recorded": event.recorded_at.to_rfc3339(), "occurredDateTime": event.occurred_at.to_rfc3339(), "action": event.action, "outcome": {"code":{"system":"http://terminology.hl7.org/CodeSystem/audit-event-outcome","code":event.outcome}}, "type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/audit-event-type","code":"rest"}]}, "source":{"observer":{"display":"NisseFHIR"}}, "agent":[{"who":{"identifier":{"value":event.subject_id}},"requestor":true},{"who":{"display":"NisseFHIR"},"requestor":false}], "entity":entities, "extension":[{"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-correlation-id","valueString":event.correlation_id.to_string()},{"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-http-status","valueInteger":event.http_status},{"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-interaction","valueCode":event.interaction}]})
+    let mut extensions = vec![
+        json!({"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-correlation-id","valueString":event.correlation_id.to_string()}),
+        json!({"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-http-status","valueInteger":event.http_status}),
+        json!({"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-interaction","valueCode":event.interaction}),
+    ];
+    if let Some(result_count) = event.result_count {
+        extensions.push(json!({"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-result-count","valueInteger":result_count}));
+    }
+    if let Some(resource_version) = event.resource_version {
+        extensions.push(json!({"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-resource-version","valueInteger":resource_version}));
+    }
+    if let Some(disposition) = event.conditional_create_disposition {
+        extensions.push(json!({"url":"https://sintef.github.io/NisseFHIR/StructureDefinition/audit-conditional-create-disposition","valueCode":disposition}));
+    }
+    json!({"resourceType":"AuditEvent", "id": event.id, "recorded": event.recorded_at.to_rfc3339(), "occurredDateTime": event.occurred_at.to_rfc3339(), "action": event.action, "outcome": {"code":{"system":"http://terminology.hl7.org/CodeSystem/audit-event-outcome","code":event.outcome}}, "type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/audit-event-type","code":"rest"}]}, "source":{"observer":{"display":"NisseFHIR"}}, "agent":[{"who":{"identifier":{"value":event.subject_id}},"requestor":true},{"who":{"display":"NisseFHIR"},"requestor":false}], "entity":entities, "extension":extensions})
 }
 
 #[cfg(test)]
@@ -301,13 +329,22 @@ mod tests {
             row_kind: "standalone".into(),
             parent_audit_id: None,
             entry_index: None,
-            result_count: None,
-            resource_version: None,
+            result_count: Some(2),
+            resource_version: Some(3),
+            conditional_create_disposition: Some("created".into()),
             reason_code: None,
         });
         crate::validation::FhirSchemaValidator::new()
             .unwrap()
             .validate_resource("AuditEvent", &value)
             .unwrap();
+        assert!(
+            value["extension"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|extension| extension["url"]
+                    == "https://sintef.github.io/NisseFHIR/StructureDefinition/audit-result-count")
+        );
     }
 }
