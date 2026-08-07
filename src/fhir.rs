@@ -64,9 +64,8 @@ pub async fn read_audit_event(
     Ok((StatusCode::OK, Json(crate::audit::as_fhir(event))).into_response())
 }
 
-/// Deliberately narrow audit-log search. Search values are never persisted;
-/// this first surface accepts only pagination controls to avoid quietly
-/// accepting unsupported filters.
+/// Deliberately narrow audit-log search. Search values are never persisted,
+/// and unsupported filters are rejected rather than silently ignored.
 pub async fn search_audit_events(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -79,8 +78,15 @@ pub async fn search_audit_events(
     let mut count = state.search.default_count;
     let mut after = None;
     let mut filter = crate::audit::AuditSearch::default();
+    // Keep the accepted filters separately from their database representation
+    // so Bundle links can faithfully replay the effective search. In
+    // particular, the database representation of `entity` and `date` splits
+    // one query parameter across multiple columns.
+    let mut canonical_filters = Vec::new();
     for (key, value) in url::form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes()) {
-        match key.as_ref() {
+        let key = key.into_owned();
+        let value = value.into_owned();
+        match key.as_str() {
             "_count" => {
                 count = value.parse::<u32>().map_err(|_| {
                     AppError::BadRequest("_count must be a positive integer".to_owned())
@@ -94,28 +100,34 @@ pub async fn search_audit_events(
             "_id" => {
                 filter.id = Some(Uuid::parse_str(&value).map_err(|_| {
                     AppError::BadRequest("_id must be an audit event UUID".to_owned())
-                })?)
+                })?);
+                canonical_filters.push((key, value));
             }
             "action" => {
-                if !matches!(value.as_ref(), "C" | "R" | "U" | "D" | "E") {
+                if !matches!(value.as_str(), "C" | "R" | "U" | "D" | "E") {
                     return Err(AppError::BadRequest(
                         "action must be one of C, R, U, D, or E".to_owned(),
                     ));
                 }
-                filter.action = Some(value.into_owned());
+                filter.action = Some(value.clone());
+                canonical_filters.push((key, value));
             }
             "outcome" => {
                 if !matches!(
-                    value.as_ref(),
+                    value.as_str(),
                     "success" | "minor-failure" | "serious-failure"
                 ) {
                     return Err(AppError::BadRequest(
                         "unsupported AuditEvent outcome".to_owned(),
                     ));
                 }
-                filter.outcome = Some(value.into_owned());
+                filter.outcome = Some(value.clone());
+                canonical_filters.push((key, value));
             }
-            "agent" => filter.agent = Some(value.into_owned()),
+            "agent" => {
+                filter.agent = Some(value.clone());
+                canonical_filters.push((key, value));
+            }
             "entity" => {
                 let (resource_type, resource_id) = value.split_once('/').ok_or_else(|| {
                     AppError::BadRequest("entity must be ResourceType/id".to_owned())
@@ -127,13 +139,18 @@ pub async fn search_audit_events(
                 }
                 filter.entity_type = Some(resource_type.to_owned());
                 filter.entity_id = Some(resource_id.to_owned());
+                canonical_filters.push((key, value));
             }
             "code" => {
                 if !value.eq_ignore_ascii_case("rest") {
                     return Err(AppError::BadRequest("code must be 'rest'".to_owned()));
                 }
+                canonical_filters.push((key, value));
             }
-            "date" => parse_audit_date(&value, &mut filter)?,
+            "date" => {
+                parse_audit_date(&value, &mut filter)?;
+                canonical_filters.push((key, value));
+            }
             "" => {}
             _ => {
                 return Err(AppError::BadRequest(format!(
@@ -147,15 +164,18 @@ pub async fn search_audit_events(
             "_count is outside the configured bounds".to_owned(),
         ));
     }
+    let after_id = after.map(|id| id.to_string());
     let (total, events, next) = state
         .store
         .audit_search(&access.tenant_id, i64::from(count), after, filter)
         .await?;
+    let base_url = state.fhir_base_url.trim_end_matches('/');
     let mut link = vec![
-        json!({"relation":"self","url":format!("{}/AuditEvent", state.fhir_base_url.trim_end_matches('/'))}),
+        json!({"relation":"self","url":crate::search::build_search_url(base_url, "AuditEvent", count, after_id.as_deref(), &canonical_filters)}),
     ];
     if let Some(next) = next {
-        link.push(json!({"relation":"next","url":format!("{}/AuditEvent?_count={count}&_after_id={next}", state.fhir_base_url.trim_end_matches('/'))}));
+        let next_id = next.to_string();
+        link.push(json!({"relation":"next","url":crate::search::build_search_url(base_url, "AuditEvent", count, Some(&next_id), &canonical_filters)}));
     }
     Ok((StatusCode::OK, Json(json!({"resourceType":"Bundle","type":"searchset","total":total,"link":link,"entry":events.into_iter().map(|e| json!({"resource":crate::audit::as_fhir(e)})).collect::<Vec<_>>() }))).into_response())
 }

@@ -351,7 +351,7 @@ fn parse_u32_query_param(name: &str, value: &str) -> Result<u32, AppError> {
         .map_err(|_| AppError::BadRequest(format!("{name} must be an unsigned integer")))
 }
 
-fn build_search_url(
+pub(crate) fn build_search_url(
     base_url: &str,
     resource_type: &str,
     count: u32,
