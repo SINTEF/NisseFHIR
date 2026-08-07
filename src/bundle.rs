@@ -10,11 +10,244 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
+    audit::{MutationAuditContext, NewAuditEvent},
     auth::AccessContext,
     error::{AppError, OperationIssue},
     fhir::{assign_resource_id, parse_if_match_value, validate_resource_payload},
     validation::FhirSchemaValidator,
 };
+
+/// A deliberately small, server-derived description of an attempted entry.
+/// In particular it never contains a body, query/search values, or the raw
+/// URL supplied by the caller.
+#[derive(Clone)]
+struct EntryAuditFact {
+    index: i32,
+    interaction: &'static str,
+    action: char,
+    resource_type: Option<String>,
+    resource_id: Option<String>,
+}
+
+fn entry_audit_fact(index: usize, entry: &Value) -> EntryAuditFact {
+    let parsed = parse_entry_request(entry).ok();
+    let (interaction, action, resource_type, resource_id) = match parsed {
+        Some(req) => {
+            let (interaction, action) = match req.method.as_str() {
+                "POST" => ("create", 'C'),
+                "PUT" => ("update", 'U'),
+                "DELETE" => ("delete", 'D'),
+                "GET" => ("read", 'R'),
+                _ => ("operation", 'E'),
+            };
+            (interaction, action, Some(req.resource_type), req.id)
+        }
+        None => ("operation", 'E', None, None),
+    };
+    EntryAuditFact {
+        index: i32::try_from(index).unwrap_or(i32::MAX),
+        interaction,
+        action,
+        resource_type,
+        resource_id,
+    }
+}
+
+fn response_status(response: &Value) -> u16 {
+    response["response"]["status"]
+        .as_str()
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(500)
+}
+
+fn response_version(response: &Value) -> Option<i64> {
+    response["response"]["etag"].as_str().and_then(|etag| {
+        etag.trim_start_matches("W/\"")
+            .trim_end_matches('"')
+            .parse()
+            .ok()
+    })
+}
+
+fn fact_with_response_identity(mut fact: EntryAuditFact, response: &Value) -> EntryAuditFact {
+    // POST entries receive a server-assigned identity. Persist that identity,
+    // never the caller's provisional resource id.
+    if let Some(id) = response["resource"]["id"].as_str() {
+        fact.resource_id = Some(id.to_owned());
+    }
+    fact
+}
+
+fn entry_audit_event(
+    audit: &MutationAuditContext,
+    parent_id: Uuid,
+    fact: &EntryAuditFact,
+    status: u16,
+    outcome: &'static str,
+    reason_code: Option<&'static str>,
+    result_count: Option<i64>,
+    resource_version: Option<i64>,
+) -> NewAuditEvent {
+    NewAuditEvent {
+        id: Uuid::new_v4(),
+        tenant_id: audit.tenant_id.clone(),
+        subject_id: audit.subject_id.clone(),
+        correlation_id: audit.correlation_id,
+        interaction: fact.interaction,
+        action: fact.action,
+        resource_type: fact.resource_type.clone(),
+        resource_id: fact.resource_id.clone(),
+        http_status: status,
+        outcome,
+        row_kind: "bundle-entry",
+        parent_audit_id: Some(parent_id),
+        entry_index: Some(fact.index),
+        result_count,
+        resource_version,
+        reason_code,
+    }
+}
+
+fn parent_audit_event(
+    audit: &MutationAuditContext,
+    parent_id: Uuid,
+    entries: usize,
+) -> NewAuditEvent {
+    NewAuditEvent {
+        id: parent_id,
+        tenant_id: audit.tenant_id.clone(),
+        subject_id: audit.subject_id.clone(),
+        correlation_id: audit.correlation_id,
+        interaction: "bundle",
+        action: 'E',
+        resource_type: Some("Bundle".to_owned()),
+        resource_id: None,
+        http_status: 200,
+        outcome: "success",
+        row_kind: "bundle-parent",
+        parent_audit_id: None,
+        entry_index: None,
+        result_count: Some(i64::try_from(entries).unwrap_or(i64::MAX)),
+        resource_version: None,
+        reason_code: None,
+    }
+}
+
+async fn append_failed_transaction_audit(
+    state: &AppState,
+    audit: &MutationAuditContext,
+    parent_id: Uuid,
+    successful: &[EntryAuditFact],
+    failed: &EntryAuditFact,
+    err: &EntryError,
+) {
+    let status = response_status(&error_entry(err));
+    let outcome = if status < 500 {
+        "minor-failure"
+    } else {
+        "serious-failure"
+    };
+    // These are intentionally best effort: the original database transaction
+    // has already been rolled back and must never be resurrected by auditing.
+    if state
+        .store
+        .append_audit(NewAuditEvent {
+            http_status: status,
+            outcome,
+            reason_code: Some("bundle-failed"),
+            ..parent_audit_event(audit, parent_id, successful.len() + 1)
+        })
+        .await
+        .is_err()
+    {
+        note_audit_persistence_failure(audit.correlation_id, "transaction-failed-parent");
+    }
+    for fact in successful {
+        if state
+            .store
+            .append_audit(entry_audit_event(
+                audit,
+                parent_id,
+                fact,
+                409,
+                "minor-failure",
+                Some("rolled-back"),
+                None,
+                None,
+            ))
+            .await
+            .is_err()
+        {
+            note_audit_persistence_failure(audit.correlation_id, "transaction-rolled-back-child");
+        }
+    }
+    if state
+        .store
+        .append_audit(entry_audit_event(
+            audit,
+            parent_id,
+            failed,
+            status,
+            outcome,
+            Some(reason_for_status(status)),
+            None,
+            None,
+        ))
+        .await
+        .is_err()
+    {
+        note_audit_persistence_failure(audit.correlation_id, "transaction-failed-child");
+    }
+}
+
+fn reason_for_status(status: u16) -> &'static str {
+    match status {
+        400 => "bad-request",
+        403 => "forbidden",
+        404 => "not-found",
+        405 => "method-not-allowed",
+        409 => "conflict",
+        412 => "precondition-failed",
+        _ => "server-error",
+    }
+}
+
+fn note_audit_persistence_failure(correlation_id: Uuid, stage: &'static str) {
+    ::metrics::counter!("nissefhir_audit_persistence_failures_total").increment(1);
+    tracing::error!(%correlation_id, stage, "bundle audit persistence failed");
+}
+
+async fn append_failed_batch_child(
+    state: &AppState,
+    audit: &MutationAuditContext,
+    parent_id: Uuid,
+    fact: &EntryAuditFact,
+    status: u16,
+) {
+    let outcome = if status < 500 {
+        "minor-failure"
+    } else {
+        "serious-failure"
+    };
+    if state
+        .store
+        .append_audit(entry_audit_event(
+            audit,
+            parent_id,
+            fact,
+            status,
+            outcome,
+            Some(reason_for_status(status)),
+            None,
+            None,
+        ))
+        .await
+        .is_err()
+    {
+        note_audit_persistence_failure(audit.correlation_id, "batch-failed-child");
+    }
+}
 
 /// Parse a Bundle entry's `request` into method + url parts.
 struct EntryRequest {
@@ -597,8 +830,16 @@ where
                     .await
                     .map_err(EntryError::from_app)?
                 {
-                    crate::store::DeleteIfMatchOutcome::Deleted { .. } => {
-                        Ok(success_entry("204 No Content", None, None, None, None))
+                    crate::store::DeleteIfMatchOutcome::Deleted { new_version_id } => {
+                        // Keep the tombstone version available to the audit
+                        // fact (and clients) rather than discarding it.
+                        Ok(success_entry(
+                            "204 No Content",
+                            None,
+                            None,
+                            Some(format!("W/\"{new_version_id}\"")),
+                            None,
+                        ))
                     }
                     crate::store::DeleteIfMatchOutcome::VersionMismatch => {
                         Err(EntryError::PreconditionFailed(
@@ -615,8 +856,14 @@ where
                     .await
                     .map_err(EntryError::from_app)?;
 
-                if deleted {
-                    Ok(success_entry("204 No Content", None, None, None, None))
+                if let Some(new_version_id) = deleted {
+                    Ok(success_entry(
+                        "204 No Content",
+                        None,
+                        None,
+                        Some(format!("W/\"{new_version_id}\"")),
+                        None,
+                    ))
                 } else {
                     Err(EntryError::NotFound("resource not found".to_owned()))
                 }
@@ -669,7 +916,7 @@ trait BundleExecutor {
         tenant_id: &str,
         resource_type: &str,
         id: &str,
-    ) -> Result<bool, AppError>;
+    ) -> Result<Option<i64>, AppError>;
 
     async fn exec_delete_if_version_matches(
         &mut self,
@@ -741,7 +988,7 @@ impl BundleExecutor for TxBundleExecutor<'_> {
         tenant_id: &str,
         resource_type: &str,
         id: &str,
-    ) -> Result<bool, AppError> {
+    ) -> Result<Option<i64>, AppError> {
         crate::store::PgStore::delete_in_tx(&mut self.tx, tenant_id, resource_type, id).await
     }
 
@@ -764,6 +1011,7 @@ impl BundleExecutor for TxBundleExecutor<'_> {
 }
 
 /// Executor that uses independent pool connections (for batch mode).
+#[allow(dead_code)]
 struct PoolBundleExecutor<'a> {
     store: &'a crate::store::PgStore,
 }
@@ -820,7 +1068,7 @@ impl BundleExecutor for PoolBundleExecutor<'_> {
         tenant_id: &str,
         resource_type: &str,
         id: &str,
-    ) -> Result<bool, AppError> {
+    ) -> Result<Option<i64>, AppError> {
         self.store.delete(tenant_id, resource_type, id).await
     }
 
@@ -841,22 +1089,66 @@ impl BundleExecutor for PoolBundleExecutor<'_> {
 pub(crate) async fn process_transaction(
     state: &AppState,
     access: &AccessContext,
+    audit: &MutationAuditContext,
     mut entries: Vec<Value>,
 ) -> Result<Response, AppError> {
     // Plan before touching the database, so every entry knows the identity of
     // every other entry regardless of the order they appear in.
-    let plan = plan_transaction(&entries).map_err(EntryError::into_app_error)?;
+    let parent_id = Uuid::new_v4();
+    let plan = match plan_transaction(&entries) {
+        Ok(plan) => plan,
+        Err(error) => {
+            // Planning is an attempted transaction, even though no entry was
+            // executed. It therefore has a parent but no child rows.
+            let _ = state
+                .store
+                .append_audit(NewAuditEvent {
+                    http_status: 400,
+                    outcome: "minor-failure",
+                    reason_code: Some("bad-request"),
+                    ..parent_audit_event(audit, parent_id, 0)
+                })
+                .await;
+            return Err(error.into_app_error());
+        }
+    };
     resolve_entry_links(&mut entries, &plan.identities);
 
     let base_url = state.fhir_base_url.trim_end_matches('/');
     let mut executor = TxBundleExecutor {
         tx: state.store.begin_tx().await?,
     };
+    if crate::store::PgStore::append_audit_in_tx(
+        &mut executor.tx,
+        parent_audit_event(audit, parent_id, entries.len()),
+    )
+    .await
+    .is_err()
+    {
+        drop(executor);
+        note_audit_persistence_failure(audit.correlation_id, "transaction-parent");
+        let _ = state
+            .store
+            .append_audit(NewAuditEvent {
+                http_status: 500,
+                outcome: "serious-failure",
+                reason_code: Some("server-error"),
+                ..parent_audit_event(audit, parent_id, 0)
+            })
+            .await;
+        return Err(AppError::ServiceUnavailable);
+    }
 
     let mut response_entries = Vec::with_capacity(entries.len());
+    let mut successful_facts = Vec::with_capacity(entries.len());
 
-    for ((entry, assigned_id), target) in entries.iter().zip(&plan.assigned_ids).zip(&plan.targets)
+    for (index, ((entry, assigned_id), target)) in entries
+        .iter()
+        .zip(&plan.assigned_ids)
+        .zip(&plan.targets)
+        .enumerate()
     {
+        let fact = entry_audit_fact(index, entry);
         match process_single_entry(
             &mut executor,
             &access.tenant_id,
@@ -871,6 +1163,39 @@ pub(crate) async fn process_transaction(
                 if let Some(target) = target {
                     resp["fullUrl"] = Value::String(format!("{base_url}/{target}"));
                 }
+                let fact = fact_with_response_identity(fact, &resp);
+                let status = response_status(&resp);
+                let result_count = (fact.action == 'R').then_some(1);
+                if crate::store::PgStore::append_audit_in_tx(
+                    &mut executor.tx,
+                    entry_audit_event(
+                        audit,
+                        parent_id,
+                        &fact,
+                        status,
+                        "success",
+                        None,
+                        result_count,
+                        response_version(&resp),
+                    ),
+                )
+                .await
+                .is_err()
+                {
+                    drop(executor);
+                    note_audit_persistence_failure(audit.correlation_id, "transaction-child");
+                    append_failed_transaction_audit(
+                        state,
+                        audit,
+                        parent_id,
+                        &successful_facts,
+                        &fact,
+                        &EntryError::Internal,
+                    )
+                    .await;
+                    return Err(AppError::ServiceUnavailable);
+                }
+                successful_facts.push(fact);
                 response_entries.push(resp);
             }
             Err(entry_err) => {
@@ -878,6 +1203,16 @@ pub(crate) async fn process_transaction(
                 // The transaction is dropped (rolled back) automatically, and
                 // we return a top-level OperationOutcome with the entry's
                 // appropriate HTTP status.
+                drop(executor);
+                append_failed_transaction_audit(
+                    state,
+                    audit,
+                    parent_id,
+                    &successful_facts,
+                    &fact,
+                    &entry_err,
+                )
+                .await;
                 return Err(entry_err.into_app_error());
             }
         }
@@ -903,15 +1238,28 @@ pub(crate) async fn process_transaction(
 pub(crate) async fn process_batch(
     state: &AppState,
     access: &AccessContext,
+    audit: &MutationAuditContext,
     entries: Vec<Value>,
 ) -> Result<Response, AppError> {
-    let mut executor = PoolBundleExecutor {
-        store: &state.store,
-    };
-
+    // Children commit independently. The parent is deliberately appended only
+    // once every attempted entry has its final disposition.
+    let parent_id = Uuid::new_v4();
     let mut response_entries = Vec::with_capacity(entries.len());
+    let mut had_failure = false;
+    let mut had_serious_failure = false;
 
-    for entry in &entries {
+    for (index, entry) in entries.iter().enumerate() {
+        let fact = entry_audit_fact(index, entry);
+        let mut executor = match state.store.begin_tx().await {
+            Ok(tx) => TxBundleExecutor { tx },
+            Err(_) => {
+                had_failure = true;
+                had_serious_failure = true;
+                append_failed_batch_child(state, audit, parent_id, &fact, 500).await;
+                response_entries.push(error_entry(&EntryError::Internal));
+                continue;
+            }
+        };
         match process_single_entry(
             &mut executor,
             &access.tenant_id,
@@ -924,11 +1272,73 @@ pub(crate) async fn process_batch(
         )
         .await
         {
-            Ok(resp) => response_entries.push(resp),
+            Ok(resp) => {
+                let fact = fact_with_response_identity(fact, &resp);
+                let status = response_status(&resp);
+                let result_count = (fact.action == 'R').then_some(1);
+                let audit_result = crate::store::PgStore::append_audit_in_tx(
+                    &mut executor.tx,
+                    entry_audit_event(
+                        audit,
+                        parent_id,
+                        &fact,
+                        status,
+                        "success",
+                        None,
+                        result_count,
+                        response_version(&resp),
+                    ),
+                )
+                .await;
+                let commit_result = match audit_result {
+                    Ok(_) => executor.tx.commit().await.map_err(AppError::from),
+                    Err(error) => Err(error),
+                };
+                match commit_result {
+                    Ok(()) => response_entries.push(resp),
+                    Err(_) => {
+                        // The resource transaction has rolled back. Record a
+                        // replacement failure child outside it; that insert is
+                        // best effort but never changes another entry's result.
+                        had_failure = true;
+                        had_serious_failure = true;
+                        append_failed_batch_child(state, audit, parent_id, &fact, 500).await;
+                        response_entries.push(error_entry(&EntryError::Internal));
+                    }
+                }
+            }
             // Batch mode: report the structured error inline and continue. The
             // OperationOutcome is placed in entry.response.outcome.
-            Err(entry_err) => response_entries.push(error_entry(&entry_err)),
+            Err(entry_err) => {
+                drop(executor);
+                let status = response_status(&error_entry(&entry_err));
+                had_failure = true;
+                had_serious_failure |= status >= 500;
+                append_failed_batch_child(state, audit, parent_id, &fact, status).await;
+                response_entries.push(error_entry(&entry_err));
+            }
         }
+    }
+
+    let parent_outcome = if had_serious_failure {
+        "serious-failure"
+    } else if had_failure {
+        "minor-failure"
+    } else {
+        "success"
+    };
+    let parent_reason = had_failure.then_some("bundle-entry-failed");
+    if state
+        .store
+        .append_audit(NewAuditEvent {
+            outcome: parent_outcome,
+            reason_code: parent_reason,
+            ..parent_audit_event(audit, parent_id, entries.len())
+        })
+        .await
+        .is_err()
+    {
+        note_audit_persistence_failure(audit.correlation_id, "batch-parent");
     }
 
     let bundle = json!({

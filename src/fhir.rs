@@ -808,10 +808,14 @@ fn atomic_audit_response(mut response: Response) -> Response {
     security(("bearer_auth" = [])))]
 pub async fn process_bundle(
     State(state): State<AppState>,
+    audit: Option<Extension<MutationAuditContext>>,
     headers: HeaderMap,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
+    let audit = audit
+        .ok_or_else(|| AppError::Internal("missing mutation audit context".to_owned()))?
+        .0;
 
     crate::media_type::validate_request_content_type(&headers, BodyKind::FhirResource)?;
 
@@ -844,11 +848,17 @@ pub async fn process_bundle(
         .cloned()
         .unwrap_or_default();
 
-    if is_transaction {
-        crate::bundle::process_transaction(&state, &access, entries).await
+    let result = if is_transaction {
+        crate::bundle::process_transaction(&state, &access, &audit, entries).await
     } else {
-        crate::bundle::process_batch(&state, &access, entries).await
-    }
+        crate::bundle::process_batch(&state, &access, &audit, entries).await
+    };
+    // Bundle handling owns both parent and entry evidence, including failed
+    // transactions. Suppress the generic middleware row for this response.
+    Ok(atomic_audit_response(match result {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    }))
 }
 
 fn parse_json_payload(

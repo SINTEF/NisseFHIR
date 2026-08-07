@@ -210,6 +210,7 @@ async fn audit_middleware(
         };
         let reason = normalized_reason(status);
         let event = crate::audit::NewAuditEvent {
+            id: Uuid::new_v4(),
             tenant_id: access.tenant_id,
             subject_id: access.subject_id,
             correlation_id: correlation.0,
@@ -223,9 +224,11 @@ async fn audit_middleware(
             result_count: None,
             resource_version: None,
             reason_code: reason,
+            parent_audit_id: None,
+            entry_index: None,
         };
         let already_recorded_atomically =
-            status < 400 && response.extensions().get::<AtomicAuditRecorded>().is_some();
+            response.extensions().get::<AtomicAuditRecorded>().is_some();
         if !already_recorded_atomically && state.store.append_audit(event).await.is_err() {
             ::metrics::counter!("nissefhir_audit_persistence_failures_total").increment(1);
             tracing::error!(correlation_id = %correlation.0, status, reason_code = reason.unwrap_or("unknown"), "audit persistence failed");

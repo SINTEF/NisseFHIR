@@ -586,7 +586,7 @@ impl PgStore {
         tenant_id: &str,
         resource_type: &str,
         id: &str,
-    ) -> Result<bool, AppError> {
+    ) -> Result<Option<i64>, AppError> {
         let mut tx = self.pool.begin().await?;
         let deleted = sqlx::query(
             r#"
@@ -603,7 +603,7 @@ impl PgStore {
 
         let Some(row) = deleted else {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(None);
         };
 
         let version_id = row.get::<i64, _>("version_id") + 1;
@@ -632,7 +632,7 @@ impl PgStore {
         .await?;
 
         tx.commit().await?;
-        Ok(true)
+        Ok(Some(version_id))
     }
 
     /// Delete (optionally version-checked) and write its successful audit row
@@ -658,13 +658,9 @@ impl PgStore {
                 .await?
             }
             None => {
-                if Self::delete_in_tx(&mut tx, tenant_id, resource_type, id).await? {
-                    // The tombstone version is the prior current version + 1.
-                    let version = sqlx::query_scalar::<_, i64>(
-                        "SELECT MAX(version_id) FROM fhir_resource_history WHERE tenant_id = $1 AND resource_type = $2 AND id = $3",
-                    )
-                    .bind(tenant_id).bind(resource_type).bind(id)
-                    .fetch_one(&mut *tx).await?;
+                if let Some(version) =
+                    Self::delete_in_tx(&mut tx, tenant_id, resource_type, id).await?
+                {
                     DeleteIfMatchOutcome::Deleted {
                         new_version_id: version,
                     }
@@ -1254,7 +1250,7 @@ impl PgStore {
         tenant_id: &str,
         resource_type: &str,
         id: &str,
-    ) -> Result<bool, AppError> {
+    ) -> Result<Option<i64>, AppError> {
         let deleted = sqlx::query(
             r#"
             DELETE FROM fhir_resources
@@ -1269,7 +1265,7 @@ impl PgStore {
         .await?;
 
         let Some(row) = deleted else {
-            return Ok(false);
+            return Ok(None);
         };
 
         let version_id = row.get::<i64, _>("version_id") + 1;
@@ -1291,7 +1287,7 @@ impl PgStore {
         .execute(&mut **tx)
         .await?;
 
-        Ok(true)
+        Ok(Some(version_id))
     }
 
     pub async fn read_history(
