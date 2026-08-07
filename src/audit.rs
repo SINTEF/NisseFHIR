@@ -100,8 +100,45 @@ pub struct AuditSearch {
     pub agent: Option<String>,
     pub entity_type: Option<String>,
     pub entity_id: Option<String>,
+    /// Inclusive lower bound of the half-open `[date_from, date_to)`
+    /// `recorded_at` interval. Set by `ge` (to the search value's `start`)
+    /// or `gt` (to its exclusive `end`); tightened to the latest bound when
+    /// several lower-bound prefixes are supplied.
     pub date_from: Option<DateTime<Utc>>,
+    /// Exclusive upper bound of the half-open `[date_from, date_to)`
+    /// `recorded_at` interval. Set by `le` (to the search value's `end`) or
+    /// `lt` (to its `start`); tightened to the earliest bound when several
+    /// upper-bound prefixes are supplied.
     pub date_to: Option<DateTime<Utc>>,
+}
+
+impl AuditSearch {
+    /// Intersect the recorded_at interval with a new inclusive lower bound,
+    /// keeping the latest (most restrictive) one. See [`AuditSearch`].
+    pub(crate) fn tighten_date_lower(&mut self, lower: DateTime<Utc>) {
+        self.date_from = Some(match self.date_from {
+            Some(existing) if existing > lower => existing,
+            _ => lower,
+        });
+    }
+
+    /// Intersect the recorded_at interval with a new exclusive upper bound,
+    /// keeping the earliest (most restrictive) one. See [`AuditSearch`].
+    pub(crate) fn tighten_date_upper(&mut self, upper: DateTime<Utc>) {
+        self.date_to = Some(match self.date_to {
+            Some(existing) if existing < upper => existing,
+            _ => upper,
+        });
+    }
+
+    /// A half-open `[date_from, date_to)` interval is empty as soon as the
+    /// inclusive lower bound meets or crosses the exclusive upper bound.
+    pub(crate) fn date_range_is_empty(&self) -> bool {
+        match (self.date_from, self.date_to) {
+            (Some(lower), Some(upper)) => lower >= upper,
+            _ => false,
+        }
+    }
 }
 
 impl PgStore {
@@ -174,6 +211,10 @@ impl PgStore {
     }
 }
 
+/// Append the SQL translation of an [`AuditSearch`]. The date filter is a
+/// single half-open interval: `recorded_at >= date_from AND recorded_at <
+/// date_to`; the parser picks the bound instant per prefix so `gt`/`le`
+/// honour their strict/inclusive boundary.
 fn push_audit_filters(query: &mut sqlx::QueryBuilder<sqlx::Postgres>, filter: &AuditSearch) {
     if let Some(id) = filter.id {
         query.push(" AND id = ");

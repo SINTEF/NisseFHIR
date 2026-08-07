@@ -159,6 +159,12 @@ pub async fn search_audit_events(
             }
         }
     }
+
+    if filter.date_range_is_empty() {
+        return Err(AppError::BadRequest(
+            "AuditEvent date range is empty or contradictory".to_owned(),
+        ));
+    }
     if count == 0 || count > state.search.max_count {
         return Err(AppError::BadRequest(
             "_count is outside the configured bounds".to_owned(),
@@ -180,34 +186,58 @@ pub async fn search_audit_events(
     Ok((StatusCode::OK, Json(json!({"resourceType":"Bundle","type":"searchset","total":total,"link":link,"entry":events.into_iter().map(|e| json!({"resource":crate::audit::as_fhir(e)})).collect::<Vec<_>>() }))).into_response())
 }
 
+/// Apply one `date` search value to the audit filter.
+///
+/// AuditEvent `date` targets the server-generated `recorded_at` instant. The
+/// value is parsed by the shared FHIR date parser
+/// ([`crate::search_params::parse_fhir_date_value`]), which honours optional
+/// comparator prefixes and expands the value into a half-open UTC
+/// `[bounds.start, bounds.end)` period according to its precision (year,
+/// month, day, minute, or second; fractional seconds are accepted but
+/// compared at whole-second precision).
+///
+/// Each prefix tightens the half-open `[date_from, date_to)` recorded_at
+/// interval kept by [`crate::audit::AuditSearch`]:
+///
+/// | Prefix | Inclusive lower (`>=`) at | Exclusive upper (`<`) at |
+/// | ------ | ------------------------- | ------------------------- |
+/// | `eq`   | `bounds.start`            | `bounds.end`              |
+/// | `ge`   | `bounds.start`            | —                         |
+/// | `gt`   | `bounds.end`              | —                         |
+/// | `lt`   | —                         | `bounds.start`            |
+/// | `le`   | —                         | `bounds.end`              |
+///
+/// Because `gt` advances the lower bound to the exclusive `bounds.end`
+/// while `ge` keeps it at `bounds.start`, an event recorded exactly at the
+/// supplied timestamp is included for `ge`/`le` and excluded for `gt`/`lt`
+/// — the strict/inclusive distinction FHIR requires. Repeated bounds are
+/// intersected (latest lower, earliest upper); the caller rejects an empty
+/// resulting interval.
+///
+/// `ne`, `sa`, `eb`, and `ap` have OR-style range semantics that cannot be
+/// merged into a single interval and are rejected with a privacy-safe `400`.
 fn parse_audit_date(value: &str, filter: &mut crate::audit::AuditSearch) -> Result<(), AppError> {
-    let (prefix, timestamp) = if let Some(rest) = value.strip_prefix("ge") {
-        ("ge", rest)
-    } else if let Some(rest) = value.strip_prefix("gt") {
-        ("gt", rest)
-    } else if let Some(rest) = value.strip_prefix("le") {
-        ("le", rest)
-    } else if let Some(rest) = value.strip_prefix("lt") {
-        ("lt", rest)
-    } else {
-        ("eq", value)
-    };
-    let parsed = chrono::DateTime::parse_from_rfc3339(timestamp)
-        .map_err(|_| {
-            AppError::BadRequest(
-                "date must be an RFC3339 timestamp with optional ge, gt, le, or lt prefix"
-                    .to_owned(),
-            )
-        })?
-        .with_timezone(&chrono::Utc);
+    use crate::search_params::{DatePrefix, parse_fhir_date_value};
+
+    let (prefix, bounds) = parse_fhir_date_value(value).map_err(|message| {
+        AppError::BadRequest(format!("invalid AuditEvent date search value: {message}"))
+    })?;
+
     match prefix {
-        "ge" | "gt" => filter.date_from = Some(parsed),
-        "le" | "lt" => filter.date_to = Some(parsed),
-        "eq" => {
-            filter.date_from = Some(parsed);
-            filter.date_to = Some(parsed + chrono::Duration::seconds(1));
+        DatePrefix::Eq => {
+            filter.tighten_date_lower(bounds.start);
+            filter.tighten_date_upper(bounds.end);
         }
-        _ => unreachable!(),
+        DatePrefix::Ge => filter.tighten_date_lower(bounds.start),
+        DatePrefix::Gt => filter.tighten_date_lower(bounds.end),
+        DatePrefix::Le => filter.tighten_date_upper(bounds.end),
+        DatePrefix::Lt => filter.tighten_date_upper(bounds.start),
+        DatePrefix::Ne | DatePrefix::Sa | DatePrefix::Eb | DatePrefix::Ap => {
+            return Err(AppError::BadRequest(format!(
+                "unsupported AuditEvent date prefix '{}' (supported: eq, gt, ge, lt, le)",
+                prefix.as_str()
+            )));
+        }
     }
     Ok(())
 }

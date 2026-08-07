@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Authorization is now fail-closed when a JWT has no `scope` claim. Previously a valid token lacking `scope` was implicitly granted `read write`, giving full data access by default. Missing, empty, or unrecognized scopes now grant no read or write permission.
 - Read-only JWTs can now submit batch and transaction Bundles containing `GET` entries. Each Bundle entry is authorized by its interaction instead of requiring write access for the Bundle envelope.
+- AuditEvent `date` search now honours the strict/inclusive boundary of `gt`, `ge`, `lt`, and `le` prefixes. Previously `gt` was treated as `ge` and `le` as `lt`, so an event recorded exactly at the supplied timestamp was wrongly included for `gt` and excluded for `le`. Date parsing now shares the generic FHIR date-search implementation (precision-aware intervals, timezone offsets, fractional seconds); repeated lower/upper bounds are intersected rather than overwritten, and contradictory or unsupported ranges fail closed with a `400` response.
 
 ### Added
 
