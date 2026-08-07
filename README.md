@@ -70,7 +70,7 @@ You can read the [PROMPTS.md](./PROMPTS.md) file for the list of prompts used du
 
 The time gain with this method of development is huge, but it still requires a lot of human guidance and expertise. NisseFHIR reached an acceptable state after a few days, with good testing and a good base of features. The AI agents were able to find improvements on their own with minimal guidance.
 
-A few months later, newer agents found shortcomings, a security issue, and important missing features.
+A few months later, newer agents found shortcomings, a security issue, and important missing features. The human author thinks that while a first prototype was very easy to spin, a proper trustable server still takes a lot of offerts using AI agents.
 
 ## Software Stack and Architecture
 
@@ -79,6 +79,8 @@ NisseFHIR is written in Rust, and uses PostgreSQL as the database. It is statele
 ## Security
 
 NisseFHIR supports JWT-based authentication and authorization. It follows best practices and uses a memory safe programming language. It is not perfect, but it should be good enough.
+
+⚠️ **This server has NOT be audited by third-party humans.** Use at your own risks.
 
 Importantly, the data is *not* encrypted at the application level. It is the responsability of the system administrator to configure encryption at rest and encryption in transit.
 
@@ -92,7 +94,7 @@ The data is also validated extensively using the official FHIR 6 JSON Schema.
 
 ## License
 
-This project is open-source, dual licensed under the WTFPL and CeCILL-B licenses. See [LICENSE](./LICENSE) for details.
+This project is open-source, dual licensed under the WTFPL+ and CeCILL-B licenses. See [LICENSE](./LICENSE) for details.
 
 ## Acknowledgements
 
