@@ -14,8 +14,17 @@ use super::registry::{JsonPath, SearchParam, SearchParamType};
 pub struct SearchFilter {
     /// The search parameter definition this filter applies.
     pub param: &'static SearchParam,
+    /// Optional FHIR modifier accepted for this parameter occurrence.
+    pub modifier: Option<SearchModifier>,
     /// Values in one parameter occurrence. Multiple values are FHIR OR terms.
     pub values: Vec<String>,
+}
+
+/// String search modifiers implemented by the generic search engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchModifier {
+    Exact,
+    Contains,
 }
 
 /// How geospatial `near` filtering is computed.
@@ -175,7 +184,9 @@ fn push_search_filter_value(
     geo_mode: GeoSearchMode,
 ) {
     match filter.param.param_type {
-        SearchParamType::String => push_string_filter(query, &filter.param.path, value),
+        SearchParamType::String => {
+            push_string_filter(query, &filter.param.path, value, filter.modifier)
+        }
         SearchParamType::Token => push_token_filter(query, &filter.param.path, value),
         SearchParamType::Reference => push_reference_filter(query, &filter.param.path, value),
         SearchParamType::Date => push_date_filter(query, &filter.param.path, value),
@@ -192,9 +203,47 @@ fn push_search_filter_value(
 // String search: case-insensitive prefix match (FHIR default for string)
 // ---------------------------------------------------------------------------
 
-fn push_string_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &str) {
+#[derive(Clone, Copy)]
+enum StringMatch {
+    Prefix,
+    Exact,
+    Contains,
+}
+
+impl StringMatch {
+    fn from_modifier(modifier: Option<SearchModifier>) -> Self {
+        match modifier {
+            None => Self::Prefix,
+            Some(SearchModifier::Exact) => Self::Exact,
+            Some(SearchModifier::Contains) => Self::Contains,
+        }
+    }
+
+    fn pattern(self, value: &str) -> String {
+        match self {
+            Self::Prefix => format!("{}%", value.to_lowercase()),
+            Self::Contains => format!("%{}%", value.to_lowercase()),
+            Self::Exact => value.to_owned(),
+        }
+    }
+
+    const fn operator(self) -> &'static str {
+        match self {
+            Self::Exact => " = ",
+            Self::Prefix | Self::Contains => " LIKE ",
+        }
+    }
+}
+
+fn push_string_filter(
+    query: &mut QueryBuilder<Postgres>,
+    path: &JsonPath,
+    value: &str,
+    modifier: Option<SearchModifier>,
+) {
     let value = crate::search::unescape_fhir_value(value);
-    let pattern = format!("{}%", value.to_lowercase());
+    let mode = StringMatch::from_modifier(modifier);
+    let pattern = mode.pattern(&value);
 
     match path {
         JsonPath::Field(segments) => {
@@ -208,12 +257,12 @@ fn push_string_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value
             if segments.len() == 1 {
                 // Single segment: could be an array of objects or a scalar.
                 // Use a broad search that handles both cases.
-                push_string_array_or_scalar(query, segments[0], &pattern);
+                push_string_array_or_scalar(query, segments[0], &pattern, mode);
             } else {
                 // Multi-segment path: navigate into nested objects.
                 // The parent segments may be arrays, so we use jsonb extraction
                 // and search within them.
-                push_string_nested_field(query, segments, &pattern);
+                push_string_nested_field(query, segments, &pattern, mode);
             }
         }
         JsonPath::WhereFilter {
@@ -222,7 +271,15 @@ fn push_string_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value
             filter_value,
             suffix,
         } => {
-            push_string_where_filter(query, base, filter_field, filter_value, suffix, &pattern);
+            push_string_where_filter(
+                query,
+                base,
+                filter_field,
+                filter_value,
+                suffix,
+                &pattern,
+                mode,
+            );
         }
         JsonPath::ResourceId
         | JsonPath::FieldAlternatives(_)
@@ -234,28 +291,70 @@ fn push_string_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value
     }
 }
 
-fn push_string_array_or_scalar(query: &mut QueryBuilder<Postgres>, field: &str, pattern: &str) {
+fn push_string_array_or_scalar(
+    query: &mut QueryBuilder<Postgres>,
+    field: &str,
+    pattern: &str,
+    mode: StringMatch,
+) {
     // Search scalar strings and the direct string members of complex array
     // elements (e.g. HumanName.family and HumanName.given).  Searching the
     // JSON serialization itself would make prefix semantics depend on JSON
     // key order instead of the FHIR string values.
-    query.push(" AND (lower(resource->>'");
+    query.push(" AND (");
+    if !matches!(mode, StringMatch::Exact) {
+        query.push("lower(");
+    }
+    query.push("resource->>'");
     query.push(field);
-    query.push("') LIKE ");
+    query.push("'");
+    if !matches!(mode, StringMatch::Exact) {
+        query.push(")");
+    }
+    query.push(mode.operator());
     query.push_bind(pattern.to_owned());
     let arr_expr = safe_array_elements(&format!("resource->'{field}'"));
     query.push(format!(
-        " OR EXISTS (SELECT 1 FROM {arr_expr} AS elem WHERE lower(elem #>> '{{}}') LIKE "
+        " OR EXISTS (SELECT 1 FROM {arr_expr} AS elem WHERE "
     ));
+    if !matches!(mode, StringMatch::Exact) {
+        query.push("lower(");
+    }
+    query.push("elem #>> '{}'");
+    if !matches!(mode, StringMatch::Exact) {
+        query.push(")");
+    }
+    query.push(mode.operator());
     query.push_bind(pattern.to_owned());
-    query.push(" OR EXISTS (SELECT 1 FROM jsonb_each_text(CASE WHEN jsonb_typeof(elem) = 'object' THEN elem ELSE '{}'::jsonb END) AS attr(key, value) WHERE lower(attr.value) LIKE ");
+    query.push(" OR EXISTS (SELECT 1 FROM jsonb_each_text(CASE WHEN jsonb_typeof(elem) = 'object' THEN elem ELSE '{}'::jsonb END) AS attr(key, value) WHERE ");
+    if !matches!(mode, StringMatch::Exact) {
+        query.push("lower(");
+    }
+    query.push("attr.value");
+    if !matches!(mode, StringMatch::Exact) {
+        query.push(")");
+    }
+    query.push(mode.operator());
     query.push_bind(pattern.to_owned());
-    query.push(" OR EXISTS (SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(elem) = 'object' THEN elem ELSE '{}'::jsonb END) AS attr(key, value), jsonb_array_elements_text(CASE WHEN jsonb_typeof(attr.value) = 'array' THEN attr.value ELSE '[]'::jsonb END) AS item(value) WHERE lower(item.value) LIKE ");
+    query.push(" OR EXISTS (SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(elem) = 'object' THEN elem ELSE '{}'::jsonb END) AS attr(key, value), jsonb_array_elements_text(CASE WHEN jsonb_typeof(attr.value) = 'array' THEN attr.value ELSE '[]'::jsonb END) AS item(value) WHERE ");
+    if !matches!(mode, StringMatch::Exact) {
+        query.push("lower(");
+    }
+    query.push("item.value");
+    if !matches!(mode, StringMatch::Exact) {
+        query.push(")");
+    }
+    query.push(mode.operator());
     query.push_bind(pattern.to_owned());
     query.push("))))");
 }
 
-fn push_string_nested_field(query: &mut QueryBuilder<Postgres>, segments: &[&str], pattern: &str) {
+fn push_string_nested_field(
+    query: &mut QueryBuilder<Postgres>,
+    segments: &[&str],
+    pattern: &str,
+    mode: StringMatch,
+) {
     // For nested paths like ["address", "city"], we need to handle the case
     // where the parent "address" is an array.
     // Strategy: treat first segment as potential array, drill into sub-fields.
@@ -264,17 +363,31 @@ fn push_string_nested_field(query: &mut QueryBuilder<Postgres>, segments: &[&str
         let child = segments[1];
         // Parent might be an array of objects
         let arr = safe_array_elements(&format!("resource->'{parent}'"));
-        query.push(format!(
-            " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE lower(elem->>'"
-        ));
+        query.push(format!(" AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE "));
+        if !matches!(mode, StringMatch::Exact) {
+            query.push("lower(");
+        }
+        query.push("elem->>'");
         query.push(child);
-        query.push("') LIKE ");
+        query.push("'");
+        if !matches!(mode, StringMatch::Exact) {
+            query.push(")");
+        }
+        query.push(mode.operator());
         query.push_bind(pattern.to_owned());
 
         // Also search in sub-arrays (e.g., name.given is an array of strings)
         query.push(" OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(elem->'");
         query.push(child);
-        query.push("', '[]'::jsonb)) AS subelem WHERE lower(subelem) LIKE ");
+        query.push("', '[]'::jsonb)) AS subelem WHERE ");
+        if !matches!(mode, StringMatch::Exact) {
+            query.push("lower(");
+        }
+        query.push("subelem");
+        if !matches!(mode, StringMatch::Exact) {
+            query.push(")");
+        }
+        query.push(mode.operator());
         query.push_bind(pattern.to_owned());
         query.push("))");
     } else if segments.len() >= 3 {
@@ -283,13 +396,19 @@ fn push_string_nested_field(query: &mut QueryBuilder<Postgres>, segments: &[&str
         let mid = segments[1];
         let child = segments[2];
         let arr = safe_array_elements(&format!("resource->'{parent}'"));
-        query.push(format!(
-            " AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE lower(elem->'"
-        ));
+        query.push(format!(" AND EXISTS (SELECT 1 FROM {arr} AS elem WHERE "));
+        if !matches!(mode, StringMatch::Exact) {
+            query.push("lower(");
+        }
+        query.push("elem->'");
         query.push(mid);
         query.push("'->>'");
         query.push(child);
-        query.push("') LIKE ");
+        query.push("'");
+        if !matches!(mode, StringMatch::Exact) {
+            query.push(")");
+        }
+        query.push(mode.operator());
         query.push_bind(pattern.to_owned());
         query.push(")");
     }
@@ -302,6 +421,7 @@ fn push_string_where_filter(
     filter_value: &str,
     suffix: &[&str],
     pattern: &str,
+    mode: StringMatch,
 ) {
     let base_path = build_jsonb_path("resource", base);
     let arr = safe_array_elements(&base_path);
@@ -313,13 +433,26 @@ fn push_string_where_filter(
     query.push(filter_value);
     query.push("'");
     if suffix.is_empty() {
-        query.push(" AND lower(elem::text) LIKE ");
+        query.push(" AND ");
+        if !matches!(mode, StringMatch::Exact) {
+            query.push("lower(");
+        }
+        query.push("elem::text");
+        if !matches!(mode, StringMatch::Exact) {
+            query.push(")");
+        }
     } else {
         let suffix_path = build_jsonb_text_path("elem", suffix);
-        query.push(" AND lower(");
+        query.push(" AND ");
+        if !matches!(mode, StringMatch::Exact) {
+            query.push("lower(");
+        }
         query.push(&suffix_path);
-        query.push(") LIKE ");
+        if !matches!(mode, StringMatch::Exact) {
+            query.push(")");
+        }
     }
+    query.push(mode.operator());
     query.push_bind(pattern.to_owned());
     query.push(")");
 }
@@ -1352,7 +1485,7 @@ mod tests {
     #[test]
     fn string_filter_single_field_produces_like() {
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_string_filter(&mut query, &JsonPath::Field(&["name"]), "peter");
+        push_string_filter(&mut query, &JsonPath::Field(&["name"]), "peter", None);
         let sql = query.into_sql().as_str().to_owned();
         assert!(
             sql.contains("lower(resource->>'name') LIKE"),
@@ -1367,7 +1500,12 @@ mod tests {
     #[test]
     fn string_filter_nested_field_drills_into_parent() {
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_string_filter(&mut query, &JsonPath::Field(&["address", "city"]), "boston");
+        push_string_filter(
+            &mut query,
+            &JsonPath::Field(&["address", "city"]),
+            "boston",
+            None,
+        );
         let sql = query.into_sql().as_str().to_owned();
         assert!(
             sql.contains("elem->>'city'"),
@@ -1382,6 +1520,7 @@ mod tests {
             &mut query,
             &JsonPath::Field(&["contact", "name", "family"]),
             "smith",
+            None,
         );
         let sql = query.into_sql().as_str().to_owned();
         assert!(
@@ -1402,6 +1541,7 @@ mod tests {
                 suffix: &["value"],
             },
             "john",
+            None,
         );
         let sql = query.into_sql().as_str().to_owned();
         assert!(
@@ -1417,7 +1557,7 @@ mod tests {
     #[test]
     fn string_filter_exists_and_position_are_noop() {
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_string_filter(&mut query, &JsonPath::Exists(&["deceased"]), "test");
+        push_string_filter(&mut query, &JsonPath::Exists(&["deceased"]), "test", None);
         let sql = query.into_sql().as_str().to_owned();
         assert_eq!(
             sql, "SELECT 1 FROM t WHERE 1=1",
@@ -1425,7 +1565,7 @@ mod tests {
         );
 
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
-        push_string_filter(&mut query, &JsonPath::Position(&["position"]), "test");
+        push_string_filter(&mut query, &JsonPath::Position(&["position"]), "test", None);
         let sql = query.into_sql().as_str().to_owned();
         assert_eq!(
             sql, "SELECT 1 FROM t WHERE 1=1",
@@ -1930,10 +2070,12 @@ mod tests {
         let filters = vec![
             SearchFilter {
                 param: &PARAMS[0],
+                modifier: None,
                 values: vec!["active".to_owned()],
             },
             SearchFilter {
                 param: &PARAMS[1],
+                modifier: None,
                 values: vec!["Patient/123".to_owned()],
             },
         ];
@@ -1962,6 +2104,7 @@ mod tests {
         };
         let filters = vec![SearchFilter {
             param: &PARAM,
+            modifier: None,
             values: vec!["active".to_owned(), "draft".to_owned()],
         }];
 
@@ -1985,6 +2128,7 @@ mod tests {
 
         let filters = vec![SearchFilter {
             param: &PARAMS[0],
+            modifier: None,
             values: vec!["value".to_owned()],
         }];
 
@@ -2008,6 +2152,7 @@ mod tests {
         };
         let filters = vec![SearchFilter {
             param: &PARAM,
+            modifier: None,
             values: vec!["value".to_owned()],
         }];
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 WHERE TRUE");
@@ -2040,6 +2185,7 @@ mod tests {
             .iter()
             .map(|param| SearchFilter {
                 param,
+                modifier: None,
                 values: vec![payload.to_owned()],
             })
             .collect::<Vec<_>>();
@@ -2069,6 +2215,7 @@ mod tests {
         let payload = "x' OR TRUE; DROP TABLE fhir_resources; --";
         let filters = vec![SearchFilter {
             param: &PARAM,
+            modifier: None,
             values: vec![payload.to_owned()],
         }];
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 WHERE TRUE");
@@ -2095,6 +2242,7 @@ mod tests {
         };
         let filters = vec![SearchFilter {
             param: &PARAM,
+            modifier: None,
             values: vec!["ge2020-01-01".to_owned()],
         }];
         let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 WHERE TRUE");

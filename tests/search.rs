@@ -270,7 +270,7 @@ async fn patient_search_filters_by_name() {
 }
 
 #[tokio::test]
-async fn patient_string_search_is_prefix_based_and_phonetic_or_modifiers_are_rejected() {
+async fn patient_string_search_has_prefix_exact_and_contains_modes() {
     let pool = setup_test_db().await;
     clean_tenant(&pool, "search-patient-string-contract").await;
     let token = tenant_token("search-patient-string-contract");
@@ -305,7 +305,26 @@ async fn patient_string_search_is_prefix_based_and_phonetic_or_modifiers_are_rej
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 0);
 
-    for query in ["phonetic=peter", "given:exact=Peter", "given:contains=eter"] {
+    for (query, expected_total) in [
+        ("given:exact=Peter", 1),
+        ("given:exact=peter", 0),
+        ("given:contains=eter", 1),
+    ] {
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, body) = send_request(
+            app,
+            search_resource_with_token("Patient", Some(query), &token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+        assert_eq!(body["total"], expected_total, "{query}: {body}");
+    }
+
+    for query in [
+        "phonetic=peter",
+        "gender:exact=male",
+        "given:unsupported=Peter",
+    ] {
         let app = build_test_app_auth_required(pool.clone());
         let (status, body) = send_request(
             app,
@@ -313,6 +332,40 @@ async fn patient_string_search_is_prefix_based_and_phonetic_or_modifiers_are_rej
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn string_modifiers_apply_to_other_registered_resource_types() {
+    let pool = setup_test_db().await;
+    clean_tenant(&pool, "search-organization-string-modifiers").await;
+    let token = tenant_token("search-organization-string-modifiers");
+
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, organization) = send_request(
+        app,
+        post_resource_with_token("Organization", &test_data::minimal_organization(), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let organization_id = organization["id"].as_str().unwrap().to_owned();
+
+    for query in [
+        "name:exact=Health%20Level%20Seven%20International",
+        "name:contains=Seven",
+    ] {
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, body) = send_request(
+            app,
+            search_resource_with_token("Organization", Some(query), &token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+        assert_eq!(
+            entry_ids(&body),
+            vec![organization_id.clone()],
+            "{query}: {body}"
+        );
     }
 }
 

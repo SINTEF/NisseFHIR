@@ -229,11 +229,19 @@ pub(crate) fn parse_search_params(
                 ));
             }
             param_code => {
+                let (param_code, modifier) = parse_search_parameter_name(param_code)?;
                 // Look up the parameter in the registry
                 if let Some(param) = (param_code == "_id")
                     .then_some(&search_params::RESOURCE_ID_SEARCH_PARAM)
                     .or_else(|| supported_params.iter().find(|p| p.code == param_code))
                 {
+                    if modifier.is_some()
+                        && param.param_type != search_params::SearchParamType::String
+                    {
+                        return Err(AppError::BadRequest(format!(
+                            "search modifier is not supported for parameter '{param_code}'"
+                        )));
+                    }
                     let values = split_fhir_or_values(&value).map_err(|message| {
                         AppError::BadRequest(format!(
                             "invalid value for search parameter '{param_code}': {message}"
@@ -290,7 +298,11 @@ pub(crate) fn parse_search_params(
                         }
                     }
 
-                    filters.push(search_params::SearchFilter { param, values });
+                    filters.push(search_params::SearchFilter {
+                        param,
+                        modifier,
+                        values,
+                    });
                     canonical_filters.push((key, value));
                 } else {
                     return Err(AppError::BadRequest(format!(
@@ -328,6 +340,29 @@ pub(crate) fn parse_search_params(
         sort,
         sort_cursor,
     })
+}
+
+fn parse_search_parameter_name(
+    name: &str,
+) -> Result<(&str, Option<search_params::sql::SearchModifier>), AppError> {
+    let Some((code, modifier)) = name.split_once(':') else {
+        return Ok((name, None));
+    };
+    if code.is_empty() || modifier.is_empty() || modifier.contains(':') {
+        return Err(AppError::BadRequest(format!(
+            "invalid search parameter name '{name}'"
+        )));
+    }
+    let modifier = match modifier {
+        "exact" => search_params::sql::SearchModifier::Exact,
+        "contains" => search_params::sql::SearchModifier::Contains,
+        _ => {
+            return Err(AppError::BadRequest(format!(
+                "unsupported search modifier ':{modifier}' for parameter '{code}'"
+            )));
+        }
+    };
+    Ok((code, Some(modifier)))
 }
 
 fn validate_identifier_value(value: &str) -> Result<(), AppError> {

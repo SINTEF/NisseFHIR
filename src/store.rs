@@ -1551,6 +1551,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no Patient search param for code '{code}'"));
         SearchFilter {
             param,
+            modifier: None,
             values: vec![value.to_owned()],
         }
     }

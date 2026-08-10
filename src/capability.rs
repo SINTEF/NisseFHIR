@@ -91,10 +91,16 @@ pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
                 SearchParamType::Composite => "composite",
                 SearchParamType::Special => "special",
             };
-            search_params.push(json!({
+            let mut parameter = json!({
                 "name": sp.code,
                 "type": type_str,
-            }));
+            });
+            if sp.param_type == SearchParamType::String {
+                parameter["documentation"] = json!(
+                    "Supports the :exact and :contains modifiers in addition to default prefix matching."
+                );
+            }
+            search_params.push(parameter);
         }
 
         resource_entries.push(json!({
