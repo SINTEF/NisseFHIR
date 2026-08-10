@@ -109,7 +109,7 @@ pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
             "conditionalCreate": !executable_params.is_empty(),
             "updateCreate": true,
             "searchParam": search_params,
-            "extension": sort_parameter_extensions(crate::sort::SORTABLE_KEYS),
+            "extension": sort_parameter_extensions(&crate::sort::sortable_keys_for(rt)),
         }));
     }
     // AuditEvent search does not support `_sort` (task 040): it is strictly
@@ -265,8 +265,8 @@ mod tests {
 
     /// Cross-checks the CapabilityStatement's advertised sort-parameter
     /// extension against what `_sort` parsing actually accepts, so the two
-    /// can never drift: every generic resource type must advertise exactly
-    /// `crate::sort::SORTABLE_KEYS`, each advertised key must parse, and
+    /// can never drift: every generic resource type must advertise its exact
+    /// resource-specific sortable key set, each advertised key must parse, and
     /// AuditEvent — which does not implement `_sort` (see
     /// `search_audit_events`) — must advertise none.
     #[test]
@@ -275,8 +275,7 @@ mod tests {
         let resources = value["rest"][0]["resource"].as_array().unwrap();
         assert!(!resources.is_empty());
 
-        // AuditEvent is pushed last, after the generic per-resource-type
-        // loop (which always advertises SORTABLE_KEYS for everything else).
+        // AuditEvent is pushed last, after the generic per-resource-type loop.
         let (audit_event, generic) = resources.split_last().unwrap();
         assert_eq!(audit_event["type"], "AuditEvent");
         assert!(
@@ -286,20 +285,20 @@ mod tests {
 
         for resource in generic {
             let advertised = sort_parameter_values(resource);
+            let resource_type = resource["type"].as_str().unwrap();
             assert_eq!(
                 advertised,
-                crate::sort::SORTABLE_KEYS,
-                "resource {} advertises a sort key set that does not match crate::sort::SORTABLE_KEYS",
-                resource["type"]
+                crate::sort::sortable_keys_for(resource_type),
+                "resource {resource_type} advertises a sort key set that does not match its accepted sort keys",
             );
             for &key in &advertised {
-                crate::sort::parse_sort_param(key)
+                crate::sort::parse_sort_param(resource_type, key)
                     .unwrap_or_else(|_| panic!("advertised sort key '{key}' must be accepted"));
             }
         }
 
         assert!(
-            crate::sort::parse_sort_param("status").is_err(),
+            crate::sort::parse_sort_param("Patient", "status").is_err(),
             "a key outside the advertised set must not be accepted"
         );
     }

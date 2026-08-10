@@ -12,6 +12,9 @@ pub mod resource_types;
 pub mod sql;
 
 pub use date::{DateBounds, DatePrefix, parse_fhir_date, parse_fhir_date_value};
-pub use registry::{RESOURCE_ID_SEARCH_PARAM, SearchParam, SearchParamType, search_params_for};
+pub use registry::{
+    RESOURCE_ID_SEARCH_PARAM, SearchParam, SearchParamType, search_params_for,
+    sortable_search_param_codes_for,
+};
 pub use resource_types::{RESOURCE_TYPES, is_valid_resource_type};
 pub use sql::SearchFilter;

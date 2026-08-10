@@ -314,9 +314,8 @@ pub(crate) fn parse_search_params(
     }
 
     let sort = match sort_raw.as_deref() {
-        Some(raw) => {
-            crate::sort::parse_sort_param(raw).map(|keys| crate::sort::effective_sort(&keys))?
-        }
+        Some(raw) => crate::sort::parse_sort_param(resource_type, raw)
+            .map(|keys| crate::sort::effective_sort(&keys))?,
         None => crate::sort::default_sort(),
     };
     let cursor_sort = sort_raw.as_deref().unwrap_or(crate::sort::DEFAULT_SORT);

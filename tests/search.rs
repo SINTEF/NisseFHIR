@@ -107,7 +107,7 @@ async fn search_uses_cursor_pagination() {
     let next_params: Vec<_> = url::form_urlencoded::parse(next_query.as_bytes()).collect();
     assert!(next_params.contains(&("_count".into(), "2".into())));
     assert!(next_params.iter().any(|(key, value)| {
-        key == "_after_id" && !value.is_empty() && value.starts_with("v1\u{1f}")
+        key == "_after_id" && !value.is_empty() && value.starts_with("v2\u{1f}")
     }));
 
     let app = build_test_app_auth_required(pool);
@@ -712,7 +712,7 @@ async fn search_preserves_filters_in_self_and_next_links() {
     assert!(next_params.contains(&("_count".into(), "2".into())));
     assert!(next_params.contains(&("name".into(), "smith".into())));
     assert!(next_params.iter().any(|(key, value)| {
-        key == "_after_id" && !value.is_empty() && value.starts_with("v1\u{1f}")
+        key == "_after_id" && !value.is_empty() && value.starts_with("v2\u{1f}")
     }));
 }
 

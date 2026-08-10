@@ -53,6 +53,33 @@ pub struct SearchParam {
     pub path: JsonPath,
 }
 
+/// Search parameters deliberately approved for result sorting.  This is kept
+/// separate from the generated filtering registry: a filter can match many
+/// values, while a sort needs one deterministic scalar value and a suitable
+/// index.  Each entry below is a singular JSON scalar.
+pub fn sortable_search_param_codes_for(resource_type: &str) -> &'static [&'static str] {
+    match resource_type {
+        "Patient" => &["birthdate", "death-date", "gender", "active"],
+        "Organization" => &["active", "name"],
+        "Observation" => &["status", "value-string"],
+        // A questionnaire definition is a catalogue resource. These are all
+        // singular scalars and support the usual title/name/status views.
+        "Questionnaire" => &["date", "name", "status", "title"],
+        // A response's authored value is the clinically meaningful form
+        // timeline; never sort on answers because each response can have many.
+        "QuestionnaireResponse" => &["authored", "status"],
+        "Task" => &["authored-on", "modified", "status"],
+        "Composition" => &["date", "status", "title"],
+        "CommunicationRequest" => &["authored", "status"],
+        "MedicationRequest" => &["authoredon", "status"],
+        "Condition" => &["recorded-date"],
+        "Immunization" => &["date", "status"],
+        "DocumentReference" => &["date", "status"],
+        "ServiceRequest" => &["authored", "status"],
+        _ => &[],
+    }
+}
+
 /// The standard `_id` search parameter, available for every resource type.
 pub static RESOURCE_ID_SEARCH_PARAM: SearchParam = SearchParam {
     code: "_id",

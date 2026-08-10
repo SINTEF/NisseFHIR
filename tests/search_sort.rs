@@ -27,6 +27,15 @@ fn entry_ids(body: &Value) -> Vec<String> {
         .collect()
 }
 
+fn entry_strings(body: &Value, field: &str) -> Vec<String> {
+    body["entry"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["resource"][field].as_str().map(ToOwned::to_owned))
+        .collect()
+}
+
 fn next_link_query(body: &Value) -> Option<String> {
     let next_url = body["link"].as_array()?.iter().find_map(|link| {
         (link["relation"].as_str() == Some("next"))
@@ -57,6 +66,32 @@ fn self_link_url(body: &Value) -> &str {
 async fn create_patient(pool: &sqlx::PgPool, token: &str, id: &str) -> String {
     let mut patient = test_data::minimal_patient();
     patient["id"] = serde_json::json!(id);
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, created) =
+        send_request(app, post_resource_with_token("Patient", &patient, token)).await;
+    assert_eq!(status, StatusCode::CREATED, "setup: create {id}");
+    created["id"].as_str().unwrap().to_owned()
+}
+
+async fn create_patient_with_sort_fields(
+    pool: &sqlx::PgPool,
+    token: &str,
+    id: &str,
+    birth_date: Option<&str>,
+    gender: Option<&str>,
+    active: Option<bool>,
+) -> String {
+    let mut patient = test_data::minimal_patient();
+    patient["id"] = serde_json::json!(id);
+    if let Some(birth_date) = birth_date {
+        patient["birthDate"] = serde_json::json!(birth_date);
+    }
+    if let Some(gender) = gender {
+        patient["gender"] = serde_json::json!(gender);
+    }
+    if let Some(active) = active {
+        patient["active"] = serde_json::json!(active);
+    }
     let app = build_test_app_auth_required(pool.clone());
     let (status, created) =
         send_request(app, post_resource_with_token("Patient", &patient, token)).await;
@@ -214,6 +249,204 @@ async fn sort_multi_key_orders_primary_then_explicit_secondary_key() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(entry_ids(&body), [tied_asc, vec![z]].concat());
+}
+
+#[tokio::test]
+async fn patient_scalar_search_parameters_sort_with_nulls_last_and_keyset_paging() {
+    let pool = setup_test_db().await;
+    clean_tenant(&pool, "sort-patient-scalars").await;
+    let token = tenant_token("sort-patient-scalars");
+
+    let ids = [
+        create_patient_with_sort_fields(
+            &pool,
+            &token,
+            "patient-1980",
+            Some("1980-01-01"),
+            Some("female"),
+            Some(true),
+        )
+        .await,
+        create_patient_with_sort_fields(
+            &pool,
+            &token,
+            "patient-1990-a",
+            Some("1990-01-01"),
+            Some("male"),
+            Some(false),
+        )
+        .await,
+        create_patient_with_sort_fields(
+            &pool,
+            &token,
+            "patient-1990-b",
+            Some("1990-01-01"),
+            Some("female"),
+            Some(true),
+        )
+        .await,
+        create_patient_with_sort_fields(&pool, &token, "patient-no-birthdate", None, None, None)
+            .await,
+    ];
+
+    // Null birth dates are intentionally last; the two 1990 values are
+    // ordered by the automatically appended `_id` tiebreaker.
+    let mut query = Some("_sort=birthdate&_count=1".to_owned());
+    let mut collected = Vec::new();
+    while let Some(q) = query {
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, body) =
+            send_request(app, search_resource_with_token("Patient", Some(&q), &token)).await;
+        assert_eq!(status, StatusCode::OK);
+        collected.extend(entry_ids(&body));
+        query = next_link_query(&body).map(|url| url.split_once('?').unwrap().1.to_owned());
+    }
+    let tied_1990 = ids_ordered_by_id(&pool, "sort-patient-scalars", &ids[1..3], false).await;
+    assert_eq!(
+        collected,
+        [vec![ids[0].clone()], tied_1990, vec![ids[3].clone()]].concat()
+    );
+
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, body) = send_request(
+        app,
+        search_resource_with_token("Patient", Some("_sort=-gender,active"), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 4);
+
+    // `gender` and `active` are accepted because they are registered search
+    // parameters with explicitly-defined scalar sort behavior.
+    let app = build_test_app_auth_required(pool);
+    let (status, _) = send_request(
+        app,
+        search_resource_with_token("Patient", Some("_sort=gender,active"), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn organization_and_observation_scalar_sort_parameters_are_supported() {
+    let pool = setup_test_db().await;
+    clean_tenant(&pool, "sort-other-scalar-types").await;
+    let token = tenant_token("sort-other-scalar-types");
+
+    for name in ["Zulu Clinic", "alpha clinic"] {
+        let mut organization = test_data::minimal_organization();
+        organization["name"] = serde_json::json!(name);
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, _) = send_request(
+            app,
+            post_resource_with_token("Organization", &organization, &token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, organizations) = send_request(
+        app,
+        search_resource_with_token("Organization", Some("_sort=name"), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        entry_strings(&organizations, "name"),
+        ["alpha clinic", "Zulu Clinic"]
+    );
+
+    for (status_value, value_string) in [("final", "Zulu"), ("preliminary", "alpha")] {
+        let mut observation = test_data::minimal_observation();
+        observation["status"] = serde_json::json!(status_value);
+        observation["valueString"] = serde_json::json!(value_string);
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, _) = send_request(
+            app,
+            post_resource_with_token("Observation", &observation, &token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, observations) = send_request(
+        app,
+        search_resource_with_token("Observation", Some("_sort=value-string"), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        entry_strings(&observations, "valueString"),
+        ["alpha", "Zulu"]
+    );
+
+    let app = build_test_app_auth_required(pool);
+    let (status, observations) = send_request(
+        app,
+        search_resource_with_token("Observation", Some("_sort=status"), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        entry_strings(&observations, "status"),
+        ["final", "preliminary"]
+    );
+}
+
+#[tokio::test]
+async fn questionnaire_response_sorts_by_authored_with_keyset_paging() {
+    let pool = setup_test_db().await;
+    clean_tenant(&pool, "sort-questionnaire-response").await;
+    let token = tenant_token("sort-questionnaire-response");
+
+    let mut created_ids = Vec::new();
+    for (id, authored) in [
+        ("questionnaire-response-early", "2026-01-01T08:00:00Z"),
+        ("questionnaire-response-late", "2026-01-02T08:00:00Z"),
+    ] {
+        let response = serde_json::json!({
+            "resourceType": "QuestionnaireResponse",
+            "id": id,
+            "status": "completed",
+            "questionnaire": "https://example.test/fhir/Questionnaire/example",
+            "authored": authored,
+        });
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, body) = send_request(
+            app,
+            post_resource_with_token("QuestionnaireResponse", &response, &token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "setup failed: {body}");
+        created_ids.push(body["id"].as_str().unwrap().to_owned());
+    }
+
+    let first = {
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, body) = send_request(
+            app,
+            search_resource_with_token(
+                "QuestionnaireResponse",
+                Some("_sort=-authored&_count=1"),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "search failed: {body}");
+        body
+    };
+    assert_eq!(entry_ids(&first), [created_ids[1].clone()]);
+
+    let next = next_link_query(&first).expect("first page must have a next link");
+    let (_, next_query) = next.split_once('?').expect("next link must have a query");
+    let app = build_test_app_auth_required(pool);
+    let (status, second) = send_request(
+        app,
+        search_resource_with_token("QuestionnaireResponse", Some(next_query), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "next-page search failed: {second}");
+    assert_eq!(entry_ids(&second), [created_ids[0].clone()]);
 }
 
 #[tokio::test]
