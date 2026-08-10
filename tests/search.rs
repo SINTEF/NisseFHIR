@@ -892,9 +892,12 @@ async fn near_search_filters_by_proximity(pool: sqlx::PgPool, geo_mode: GeoSearc
 }
 
 #[tokio::test]
-async fn near_search_filters_by_proximity_in_earthdistance_mode() {
+async fn near_search_filters_by_proximity_in_detected_geo_mode() {
     let pool = setup_test_db().await;
-    near_search_filters_by_proximity(pool, GeoSearchMode::EarthDistance).await;
+    let geo_mode = fhir_server::search_params::sql::detect_geo_search_mode(&pool)
+        .await
+        .expect("detect geospatial search mode");
+    near_search_filters_by_proximity(pool, geo_mode).await;
 }
 
 #[tokio::test]
@@ -906,6 +909,16 @@ async fn near_search_filters_by_proximity_in_haversine_mode() {
 #[tokio::test]
 async fn near_search_earthdistance_predicate_uses_gist_index() {
     let pool = setup_test_db().await;
+    if fhir_server::search_params::sql::detect_geo_search_mode(&pool)
+        .await
+        .expect("detect geospatial search mode")
+        != GeoSearchMode::EarthDistance
+    {
+        // earthdistance is optional; the haversine integration test above
+        // verifies near search on databases where it is unavailable or hidden
+        // outside the connection's search_path.
+        return;
+    }
     let mut tx = pool.begin().await.expect("begin planner-test transaction");
 
     // Small test tables normally favor a sequential scan. Disabling it only

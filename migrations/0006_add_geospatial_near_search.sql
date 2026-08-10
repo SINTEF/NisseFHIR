@@ -22,6 +22,11 @@
 
 DO $$
 BEGIN
+    -- The extension is database-wide while integration tests migrate separate
+    -- schemas concurrently. Serialize this optional installation so parallel
+    -- migrators never race while PostgreSQL updates extension catalogs.
+    PERFORM pg_advisory_xact_lock(hashtext('fhir:earthdistance-extension'));
+
     -- Best-effort install. Only the errors that mean "this role cannot
     -- install the extension" are swallowed, so an optional side feature can
     -- never break the mandatory startup migration path.
@@ -38,8 +43,11 @@ BEGIN
     END;
 
     -- GiST index for proximity queries on Location.position, only when
-    -- earthdistance is actually present (`ll_to_earth` is defined by it).
-    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'earthdistance') THEN
+    -- earthdistance's function is callable through this connection's
+    -- search_path. An extension may be installed into a non-public schema,
+    -- in which case pg_extension contains it but an unqualified
+    -- ll_to_earth(...) call would still fail.
+    IF to_regprocedure('ll_to_earth(double precision, double precision)') IS NOT NULL THEN
         CREATE INDEX idx_fhir_res_location_position
             ON fhir_res_location USING gist (
                 ll_to_earth(

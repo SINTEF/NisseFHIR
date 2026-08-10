@@ -43,15 +43,17 @@ pub enum GeoSearchMode {
 
 /// Detect which geospatial mode the connected database supports.
 ///
-/// Returns [`GeoSearchMode::EarthDistance`] when the `earthdistance` extension
-/// is present and [`GeoSearchMode::Haversine`] otherwise, so `near` search
-/// keeps working — and is always advertised — on every database.
+/// Returns [`GeoSearchMode::EarthDistance`] when `ll_to_earth` is callable
+/// through the connection's `search_path` and [`GeoSearchMode::Haversine`]
+/// otherwise, so `near` search keeps working — and is always advertised — on
+/// every database. Checking the callable function rather than only
+/// `pg_extension` also handles extensions installed in a non-public schema.
 pub async fn detect_geo_search_mode<'e, E>(executor: E) -> Result<GeoSearchMode, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
     let has_earthdistance: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'earthdistance')",
+        "SELECT to_regprocedure('ll_to_earth(double precision, double precision)') IS NOT NULL",
     )
     .fetch_one(executor)
     .await?;
