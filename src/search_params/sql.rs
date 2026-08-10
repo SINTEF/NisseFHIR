@@ -88,11 +88,15 @@ pub fn push_search_filters(
 /// SQL construction so fail-closed behavior does not depend on one caller.
 pub fn validate_search_filter(param: &SearchParam, values: &[String]) -> Result<(), AppError> {
     let executable_path = match (&param.param_type, &param.path) {
+        (SearchParamType::Token, JsonPath::ResourceId) => true,
         (SearchParamType::String, JsonPath::Field(segments)) => !segments.is_empty(),
         (SearchParamType::String, JsonPath::WhereFilter { .. }) => true,
         (SearchParamType::Token, JsonPath::Field(segments)) => !segments.is_empty(),
         (SearchParamType::Token, JsonPath::WhereFilter { .. }) => true,
         (SearchParamType::Token, JsonPath::Exists(segments)) => !segments.is_empty(),
+        (SearchParamType::Token, JsonPath::ExistsAlternatives(paths)) => {
+            !paths.is_empty() && paths.iter().all(|segments| !segments.is_empty())
+        }
         (SearchParamType::Reference, JsonPath::Field(segments)) => !segments.is_empty(),
         (SearchParamType::Reference, JsonPath::WhereFilter { .. }) => true,
         (SearchParamType::Date, JsonPath::Field(segments)) => !segments.is_empty(),
@@ -185,12 +189,12 @@ fn push_search_filter_value(
 }
 
 // ---------------------------------------------------------------------------
-// String search: case-insensitive partial match (FHIR default for string)
+// String search: case-insensitive prefix match (FHIR default for string)
 // ---------------------------------------------------------------------------
 
 fn push_string_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &str) {
     let value = crate::search::unescape_fhir_value(value);
-    let pattern = format!("%{}%", value.to_lowercase());
+    let pattern = format!("{}%", value.to_lowercase());
 
     match path {
         JsonPath::Field(segments) => {
@@ -220,27 +224,35 @@ fn push_string_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value
         } => {
             push_string_where_filter(query, base, filter_field, filter_value, suffix, &pattern);
         }
-        JsonPath::FieldAlternatives(_) | JsonPath::Exists(_) | JsonPath::Position(_) => {
+        JsonPath::ResourceId
+        | JsonPath::FieldAlternatives(_)
+        | JsonPath::Exists(_)
+        | JsonPath::ExistsAlternatives(_)
+        | JsonPath::Position(_) => {
             // Exists/Position don't apply to string search, skip.
         }
     }
 }
 
 fn push_string_array_or_scalar(query: &mut QueryBuilder<Postgres>, field: &str, pattern: &str) {
-    // Search within arrays or scalar values. This handles:
-    // - Scalar strings: resource->>'field' ILIKE pattern
-    // - Arrays of strings: any element matches
-    // - Arrays of objects: search all text values within
+    // Search scalar strings and the direct string members of complex array
+    // elements (e.g. HumanName.family and HumanName.given).  Searching the
+    // JSON serialization itself would make prefix semantics depend on JSON
+    // key order instead of the FHIR string values.
     query.push(" AND (lower(resource->>'");
     query.push(field);
     query.push("') LIKE ");
     query.push_bind(pattern.to_owned());
     let arr_expr = safe_array_elements(&format!("resource->'{field}'"));
     query.push(format!(
-        " OR EXISTS (SELECT 1 FROM {arr_expr} AS elem WHERE lower(elem::text) LIKE "
+        " OR EXISTS (SELECT 1 FROM {arr_expr} AS elem WHERE lower(elem #>> '{{}}') LIKE "
     ));
     query.push_bind(pattern.to_owned());
-    query.push("))");
+    query.push(" OR EXISTS (SELECT 1 FROM jsonb_each_text(CASE WHEN jsonb_typeof(elem) = 'object' THEN elem ELSE '{}'::jsonb END) AS attr(key, value) WHERE lower(attr.value) LIKE ");
+    query.push_bind(pattern.to_owned());
+    query.push(" OR EXISTS (SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(elem) = 'object' THEN elem ELSE '{}'::jsonb END) AS attr(key, value), jsonb_array_elements_text(CASE WHEN jsonb_typeof(attr.value) = 'array' THEN attr.value ELSE '[]'::jsonb END) AS item(value) WHERE lower(item.value) LIKE ");
+    query.push_bind(pattern.to_owned());
+    query.push("))))");
 }
 
 fn push_string_nested_field(query: &mut QueryBuilder<Postgres>, segments: &[&str], pattern: &str) {
@@ -324,6 +336,10 @@ fn push_token_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value:
     let (system, code) = parse_token_value(value);
 
     match path {
+        JsonPath::ResourceId => {
+            query.push(" AND id = ");
+            query.push_bind(code);
+        }
         JsonPath::Field(segments) => {
             if segments.len() == 1 {
                 let field = segments[0];
@@ -352,6 +368,27 @@ fn push_token_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value:
             // For exists-type tokens (e.g., deceased), check if the field
             // exists and is not false/null
             push_exists_filter(query, segments, &code);
+        }
+        JsonPath::ExistsAlternatives(paths) => {
+            if code == "false" {
+                // Both choice representations must satisfy the false
+                // predicate. Otherwise, a missing boolean alternative would
+                // incorrectly mask an entered deceasedDateTime.
+                query.push(" AND (TRUE");
+                for segments in *paths {
+                    query.push(" AND (TRUE");
+                    push_exists_filter(query, segments, &code);
+                    query.push(")");
+                }
+            } else {
+                query.push(" AND (FALSE");
+                for segments in *paths {
+                    query.push(" OR (TRUE");
+                    push_exists_filter(query, segments, &code);
+                    query.push(")");
+                }
+            }
+            query.push(")");
         }
         JsonPath::FieldAlternatives(_) | JsonPath::Position(_) => {}
     }
@@ -652,7 +689,11 @@ fn push_reference_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, va
             query.push_bind(value);
             query.push(")");
         }
-        JsonPath::FieldAlternatives(_) | JsonPath::Exists(_) | JsonPath::Position(_) => {}
+        JsonPath::ResourceId
+        | JsonPath::FieldAlternatives(_)
+        | JsonPath::Exists(_)
+        | JsonPath::ExistsAlternatives(_)
+        | JsonPath::Position(_) => {}
     }
 }
 
@@ -704,7 +745,10 @@ fn push_date_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: 
             super::date::push_date_predicate(query, "date_value", prefix, bounds);
             query.push(")");
         }
-        JsonPath::Exists(_) | JsonPath::Position(_) => {}
+        JsonPath::ResourceId
+        | JsonPath::Exists(_)
+        | JsonPath::ExistsAlternatives(_)
+        | JsonPath::Position(_) => {}
     }
 }
 
@@ -748,9 +792,11 @@ fn push_uri_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value: &
             query.push(" = ");
             query.push_bind(value);
         }
-        JsonPath::FieldAlternatives(_)
+        JsonPath::ResourceId
+        | JsonPath::FieldAlternatives(_)
         | JsonPath::WhereFilter { .. }
         | JsonPath::Exists(_)
+        | JsonPath::ExistsAlternatives(_)
         | JsonPath::Position(_) => {}
     }
 }
@@ -771,9 +817,11 @@ fn push_number_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, value
             query.push_bind(value);
             query.push("::numeric");
         }
-        JsonPath::FieldAlternatives(_)
+        JsonPath::ResourceId
+        | JsonPath::FieldAlternatives(_)
         | JsonPath::WhereFilter { .. }
         | JsonPath::Exists(_)
+        | JsonPath::ExistsAlternatives(_)
         | JsonPath::Position(_) => {}
     }
 }
@@ -829,9 +877,11 @@ fn push_quantity_filter(query: &mut QueryBuilder<Postgres>, path: &JsonPath, val
 
             query.push(")");
         }
-        JsonPath::FieldAlternatives(_)
+        JsonPath::ResourceId
+        | JsonPath::FieldAlternatives(_)
         | JsonPath::WhereFilter { .. }
         | JsonPath::Exists(_)
+        | JsonPath::ExistsAlternatives(_)
         | JsonPath::Position(_) => {}
     }
 }

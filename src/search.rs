@@ -230,7 +230,10 @@ pub(crate) fn parse_search_params(
             }
             param_code => {
                 // Look up the parameter in the registry
-                if let Some(param) = supported_params.iter().find(|p| p.code == param_code) {
+                if let Some(param) = (param_code == "_id")
+                    .then_some(&search_params::RESOURCE_ID_SEARCH_PARAM)
+                    .or_else(|| supported_params.iter().find(|p| p.code == param_code))
+                {
                     let values = split_fhir_or_values(&value).map_err(|message| {
                         AppError::BadRequest(format!(
                             "invalid value for search parameter '{param_code}': {message}"
@@ -266,7 +269,19 @@ pub(crate) fn parse_search_params(
                     search_params::sql::validate_search_filter(param, &values)?;
 
                     // Validate token-type parameters with pipe syntax
-                    if param.param_type == search_params::SearchParamType::Token
+                    if param_code == "_id" {
+                        for value in &values {
+                            crate::fhir::validate_fhir_id(value)?;
+                        }
+                    } else if param_code == "deceased" {
+                        for value in &values {
+                            if !matches!(value.as_str(), "true" | "false") {
+                                return Err(AppError::BadRequest(
+                                    "deceased must be 'true' or 'false'".to_owned(),
+                                ));
+                            }
+                        }
+                    } else if param.param_type == search_params::SearchParamType::Token
                         && param_code == "identifier"
                     {
                         // Special validation for identifier tokens

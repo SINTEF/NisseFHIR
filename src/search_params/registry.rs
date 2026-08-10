@@ -22,6 +22,8 @@ pub enum SearchParamType {
 /// How to extract the search value from the JSONB resource document.
 #[derive(Debug, Clone)]
 pub enum JsonPath {
+    /// The logical id stored in the `fhir_resources.id` column.
+    ResourceId,
     /// Simple path segments: resource->'field' or resource->'field'->'subfield'
     Field(&'static [&'static str]),
     /// Alternative field paths from a FHIR choice element.
@@ -35,6 +37,8 @@ pub enum JsonPath {
     },
     /// Existence check (e.g. deceased.exists())
     Exists(&'static [&'static str]),
+    /// Existence check across the JSON representations of a choice element.
+    ExistsAlternatives(&'static [&'static [&'static str]]),
     /// Geospatial position for `near` searches.
     /// Segments point to the parent object containing `latitude` and
     /// `longitude` decimal fields (e.g. ["position"]).
@@ -48,6 +52,13 @@ pub struct SearchParam {
     pub param_type: SearchParamType,
     pub path: JsonPath,
 }
+
+/// The standard `_id` search parameter, available for every resource type.
+pub static RESOURCE_ID_SEARCH_PARAM: SearchParam = SearchParam {
+    code: "_id",
+    param_type: SearchParamType::Token,
+    path: JsonPath::ResourceId,
+};
 
 /// Look up the search parameters defined for a given resource type.
 ///
@@ -4814,7 +4825,7 @@ static PARAMS_INSURANCEPLAN: [SearchParam; 5] = [
     },
 ];
 
-static PARAMS_INSURANCEPRODUCT: [SearchParam; 14] = [
+static PARAMS_INSURANCEPRODUCT: [SearchParam; 13] = [
     SearchParam {
         code: "administered-by",
         param_type: SearchParamType::Reference,
@@ -4869,11 +4880,6 @@ static PARAMS_INSURANCEPRODUCT: [SearchParam; 14] = [
         code: "owned-by",
         param_type: SearchParamType::Reference,
         path: JsonPath::Field(&["ownedBy"]),
-    },
-    SearchParam {
-        code: "phonetic",
-        param_type: SearchParamType::String,
-        path: JsonPath::Field(&["name"]),
     },
     SearchParam {
         code: "status",
@@ -6718,7 +6724,7 @@ static PARAMS_OPERATIONDEFINITION: [SearchParam; 22] = [
     },
 ];
 
-static PARAMS_ORGANIZATION: [SearchParam; 13] = [
+static PARAMS_ORGANIZATION: [SearchParam; 12] = [
     SearchParam {
         code: "active",
         param_type: SearchParamType::Token,
@@ -6773,11 +6779,6 @@ static PARAMS_ORGANIZATION: [SearchParam; 13] = [
         code: "partof",
         param_type: SearchParamType::Reference,
         path: JsonPath::Field(&["partOf"]),
-    },
-    SearchParam {
-        code: "phonetic",
-        param_type: SearchParamType::String,
-        path: JsonPath::Field(&["name"]),
     },
     SearchParam {
         code: "type",
@@ -6927,7 +6928,7 @@ static PARAMS_PACKAGEDPRODUCTDEFINITION: [SearchParam; 11] = [
     },
 ];
 
-static PARAMS_PATIENT: [SearchParam; 23] = [
+static PARAMS_PATIENT: [SearchParam; 22] = [
     SearchParam {
         code: "active",
         param_type: SearchParamType::Token,
@@ -6976,7 +6977,7 @@ static PARAMS_PATIENT: [SearchParam; 23] = [
     SearchParam {
         code: "deceased",
         param_type: SearchParamType::Token,
-        path: JsonPath::Exists(&["deceased"]),
+        path: JsonPath::ExistsAlternatives(&[&["deceasedBoolean"], &["deceasedDateTime"]]),
     },
     SearchParam {
         code: "email",
@@ -7042,11 +7043,6 @@ static PARAMS_PATIENT: [SearchParam; 23] = [
             filter_value: "phone",
             suffix: &[],
         },
-    },
-    SearchParam {
-        code: "phonetic",
-        param_type: SearchParamType::String,
-        path: JsonPath::Field(&["name"]),
     },
     SearchParam {
         code: "telecom",
@@ -7146,7 +7142,7 @@ static PARAMS_PAYMENTRECONCILIATION: [SearchParam; 10] = [
     },
 ];
 
-static PARAMS_PERSON: [SearchParam; 23] = [
+static PARAMS_PERSON: [SearchParam; 22] = [
     SearchParam {
         code: "identifier",
         param_type: SearchParamType::Token,
@@ -7218,11 +7214,6 @@ static PARAMS_PERSON: [SearchParam; 23] = [
         },
     },
     SearchParam {
-        code: "phonetic",
-        param_type: SearchParamType::String,
-        path: JsonPath::Field(&["name"]),
-    },
-    SearchParam {
         code: "telecom",
         param_type: SearchParamType::Token,
         path: JsonPath::Field(&["telecom"]),
@@ -7235,7 +7226,7 @@ static PARAMS_PERSON: [SearchParam; 23] = [
     SearchParam {
         code: "deceased",
         param_type: SearchParamType::Token,
-        path: JsonPath::Exists(&["deceased"]),
+        path: JsonPath::ExistsAlternatives(&[&["deceasedBoolean"], &["deceasedDateTime"]]),
     },
     SearchParam {
         code: "family",
@@ -7427,7 +7418,7 @@ static PARAMS_PLANDEFINITION: [SearchParam; 25] = [
     },
 ];
 
-static PARAMS_PRACTITIONER: [SearchParam; 21] = [
+static PARAMS_PRACTITIONER: [SearchParam; 20] = [
     SearchParam {
         code: "address",
         param_type: SearchParamType::String,
@@ -7494,11 +7485,6 @@ static PARAMS_PRACTITIONER: [SearchParam; 21] = [
         },
     },
     SearchParam {
-        code: "phonetic",
-        param_type: SearchParamType::String,
-        path: JsonPath::Field(&["name"]),
-    },
-    SearchParam {
         code: "telecom",
         param_type: SearchParamType::Token,
         path: JsonPath::Field(&["telecom"]),
@@ -7521,7 +7507,7 @@ static PARAMS_PRACTITIONER: [SearchParam; 21] = [
     SearchParam {
         code: "deceased",
         param_type: SearchParamType::Token,
-        path: JsonPath::Exists(&["deceased"]),
+        path: JsonPath::ExistsAlternatives(&[&["deceasedBoolean"], &["deceasedDateTime"]]),
     },
     SearchParam {
         code: "identifier",
@@ -8009,7 +7995,7 @@ static PARAMS_REGULATEDAUTHORIZATION: [SearchParam; 9] = [
     },
 ];
 
-static PARAMS_RELATEDPERSON: [SearchParam; 20] = [
+static PARAMS_RELATEDPERSON: [SearchParam; 19] = [
     SearchParam {
         code: "identifier",
         param_type: SearchParamType::Token,
@@ -8079,11 +8065,6 @@ static PARAMS_RELATEDPERSON: [SearchParam; 20] = [
             filter_value: "phone",
             suffix: &[],
         },
-    },
-    SearchParam {
-        code: "phonetic",
-        param_type: SearchParamType::String,
-        path: JsonPath::Field(&["name"]),
     },
     SearchParam {
         code: "telecom",

@@ -52,6 +52,11 @@ pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
             "type": "string",
             "documentation": "Comma-separated list of sort keys, each optionally prefixed with '-' for descending order, applied in the order given. See this resource's sortParameter for the keys accepted; an unsupported, unknown, or unindexed key is rejected with a 400."
         }),
+        json!({
+            "name": "_id",
+            "type": "token",
+            "documentation": "Matches a resource by its logical id."
+        }),
     ];
 
     // Build concrete resource entries dynamically from the schema-derived
@@ -237,6 +242,7 @@ mod tests {
 
         assert!(names.contains(&"_count"));
         assert!(names.contains(&"_after_id"));
+        assert!(names.contains(&"_id"));
     }
 
     /// Extract the `sortParameter` extension's `valueCode`s from one resource
@@ -322,6 +328,8 @@ mod tests {
         assert!(patient_params.contains(&"name"));
         assert!(patient_params.contains(&"birthdate"));
         assert!(patient_params.contains(&"identifier"));
+        assert!(patient_params.contains(&"_id"));
+        assert!(!patient_params.contains(&"phonetic"));
         assert!(observation_params.contains(&"code"));
         assert!(observation_params.contains(&"status"));
         assert!(observation_params.contains(&"subject"));

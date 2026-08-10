@@ -270,6 +270,181 @@ async fn patient_search_filters_by_name() {
 }
 
 #[tokio::test]
+async fn patient_string_search_is_prefix_based_and_phonetic_or_modifiers_are_rejected() {
+    let pool = setup_test_db().await;
+    clean_tenant(&pool, "search-patient-string-contract").await;
+    let token = tenant_token("search-patient-string-contract");
+
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, peter) = send_request(
+        app,
+        post_resource_with_token("Patient", &test_data::patient_peter_chalmers(), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, body) = send_request(
+        app,
+        search_resource_with_token("Patient", Some("given=pet"), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        entry_ids(&body),
+        vec![peter["id"].as_str().unwrap().to_owned()]
+    );
+
+    // `eter` is a substring but not a FHIR-default prefix match.
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, body) = send_request(
+        app,
+        search_resource_with_token("Patient", Some("given=eter"), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 0);
+
+    for query in ["phonetic=peter", "given:exact=Peter", "given:contains=eter"] {
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, body) = send_request(
+            app,
+            search_resource_with_token("Patient", Some(query), &token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn patient_search_supports_standard_id_and_representative_parameter_types() {
+    let pool = setup_test_db().await;
+    clean_tenant(&pool, "search-patient-parameter-types").await;
+    let token = tenant_token("search-patient-parameter-types");
+
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, peter) = send_request(
+        app,
+        post_resource_with_token("Patient", &test_data::patient_peter_chalmers(), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let peter_id = peter["id"].as_str().unwrap();
+
+    for query in [
+        format!("_id={peter_id}"),
+        "email=Jim@example.org".to_owned(),
+        "address-city=Plea".to_owned(),
+        "organization=Organization/1".to_owned(),
+        "birthdate=ge1974".to_owned(),
+    ] {
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, body) = send_request(
+            app,
+            search_resource_with_token("Patient", Some(&query), &token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+        assert_eq!(
+            entry_ids(&body),
+            vec![peter_id.to_owned()],
+            "{query}: {body}"
+        );
+    }
+
+    let app = build_test_app_auth_required(pool);
+    let (status, body) = send_request(
+        app,
+        search_resource_with_token("Patient", Some("_id=not|a-token"), &token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[tokio::test]
+async fn patient_deceased_and_death_date_searches_have_boolean_and_date_semantics() {
+    let pool = setup_test_db().await;
+    clean_tenant(&pool, "search-patient-deceased").await;
+    let token = tenant_token("search-patient-deceased");
+
+    let mut living = test_data::minimal_patient();
+    living["deceasedBoolean"] = serde_json::json!(false);
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, living) =
+        send_request(app, post_resource_with_token("Patient", &living, &token)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let mut deceased = test_data::minimal_patient();
+    deceased["deceasedDateTime"] = serde_json::json!("2020-05-01");
+    let app = build_test_app_auth_required(pool.clone());
+    let (status, deceased) =
+        send_request(app, post_resource_with_token("Patient", &deceased, &token)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    for (query, expected_id) in [
+        ("deceased=true", deceased["id"].as_str().unwrap()),
+        ("deceased=false", living["id"].as_str().unwrap()),
+        ("death-date=2020-05-01", deceased["id"].as_str().unwrap()),
+    ] {
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, body) = send_request(
+            app,
+            search_resource_with_token("Patient", Some(query), &token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{query}: {body}");
+        assert_eq!(
+            entry_ids(&body),
+            vec![expected_id.to_owned()],
+            "{query}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn filtered_last_updated_sort_paginates_without_duplicates_or_gaps() {
+    let pool = setup_test_db().await;
+    clean_tenant(&pool, "search-filtered-sorted-pages").await;
+    let token = tenant_token("search-filtered-sorted-pages");
+
+    let mut expected_ids = Vec::new();
+    for gender in ["female", "male", "female", "female"] {
+        let mut patient = test_data::minimal_patient();
+        patient["gender"] = serde_json::json!(gender);
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, created) =
+            send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        if gender == "female" {
+            expected_ids.push(created["id"].as_str().unwrap().to_owned());
+        }
+    }
+
+    let mut query = Some("gender=female&_sort=-_lastUpdated&_count=1".to_owned());
+    let mut found_ids = Vec::new();
+    while let Some(current_query) = query.take() {
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, body) = send_request(
+            app,
+            search_resource_with_token("Patient", Some(&current_query), &token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{current_query}: {body}");
+        assert_eq!(body["total"], 3);
+        found_ids.extend(entry_ids(&body));
+        query = next_link_query(&body).and_then(|path_and_query| {
+            path_and_query
+                .split_once('?')
+                .map(|(_, query)| query.to_owned())
+        });
+    }
+
+    expected_ids.sort();
+    found_ids.sort();
+    assert_eq!(found_ids, expected_ids);
+}
+
+#[tokio::test]
 async fn search_injection_canary_is_bound_and_cannot_change_the_query() {
     let pool = setup_test_db().await;
     clean_tenant(&pool, "search-injection-canary").await;
