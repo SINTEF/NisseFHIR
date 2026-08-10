@@ -97,22 +97,23 @@ async fn search_uses_cursor_pagination() {
         "http://localhost:8080/fhir/Patient?_count=2"
     );
     assert_eq!(first_page["link"][1]["relation"], "next");
-    assert_eq!(
-        first_page["link"][1]["url"],
-        format!(
-            "http://localhost:8080/fhir/Patient?_count=2&_after_id={}",
-            created_ids[1]
-        )
-    );
+    let next_query = next_link_query(&first_page)
+        .and_then(|path_and_query| {
+            path_and_query
+                .split_once('?')
+                .map(|(_, query)| query.to_owned())
+        })
+        .expect("first page must include a next link with a query string");
+    let next_params: Vec<_> = url::form_urlencoded::parse(next_query.as_bytes()).collect();
+    assert!(next_params.contains(&("_count".into(), "2".into())));
+    assert!(next_params.iter().any(|(key, value)| {
+        key == "_after_id" && !value.is_empty() && value.starts_with("v1\u{1f}")
+    }));
 
     let app = build_test_app_auth_required(pool);
     let (status, second_page) = send_request(
         app,
-        search_resource_with_token(
-            "Patient",
-            Some(&format!("_count=2&_after_id={}", created_ids[1])),
-            &token,
-        ),
+        search_resource_with_token("Patient", Some(&next_query), &token),
     )
     .await;
 
@@ -449,19 +450,16 @@ async fn search_preserves_filters_in_self_and_next_links() {
     clean_tenant(&pool, "search-links").await;
     let token = tenant_token("search-links");
 
-    let mut created_ids = Vec::new();
     for id in ["patient-a", "patient-b", "patient-c"] {
         let mut patient = test_data::patient_infant();
         patient["id"] = serde_json::json!(id);
         patient["name"][0]["family"] = serde_json::json!("Smith");
 
         let app = build_test_app_auth_required(pool.clone());
-        let (status, created) =
+        let (status, _) =
             send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
         assert_eq!(status, StatusCode::CREATED);
-        created_ids.push(created["id"].as_str().unwrap().to_owned());
     }
-    created_ids.sort();
 
     let app = build_test_app_auth_required(pool);
     let (status, body) = send_request(
@@ -475,13 +473,19 @@ async fn search_preserves_filters_in_self_and_next_links() {
         body["link"][0]["url"],
         "http://localhost:8080/fhir/Patient?_count=2&name=smith"
     );
-    assert_eq!(
-        body["link"][1]["url"],
-        format!(
-            "http://localhost:8080/fhir/Patient?_count=2&_after_id={}&name=smith",
-            created_ids[1]
-        )
-    );
+    let next_query = next_link_query(&body)
+        .and_then(|path_and_query| {
+            path_and_query
+                .split_once('?')
+                .map(|(_, query)| query.to_owned())
+        })
+        .expect("first page must include a next link with a query string");
+    let next_params: Vec<_> = url::form_urlencoded::parse(next_query.as_bytes()).collect();
+    assert!(next_params.contains(&("_count".into(), "2".into())));
+    assert!(next_params.contains(&("name".into(), "smith".into())));
+    assert!(next_params.iter().any(|(key, value)| {
+        key == "_after_id" && !value.is_empty() && value.starts_with("v1\u{1f}")
+    }));
 }
 
 #[tokio::test]
