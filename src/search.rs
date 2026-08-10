@@ -18,13 +18,10 @@ pub(crate) struct ParsedSearchParams {
     /// The client's `_sort` value, unchanged, or `None` when the request did
     /// not request a sort order (default id-ascending order applies).
     pub(crate) sort_raw: Option<String>,
-    /// The effective sort order (requested keys plus the `_id` tiebreak) used
-    /// to build the sorted query and its keyset cursor. `None` iff `sort_raw`
-    /// is `None`.
-    pub(crate) sort: Option<Vec<crate::sort::SortKey>>,
-    /// The decoded and validated `_after_id` cursor for a sorted search.
-    /// `None` on a first page, or whenever `sort` is `None` (the legacy
-    /// plain-id cursor in `after_id` is used directly in that case).
+    /// The effective sort order (requested keys plus the `_id` tiebreak), or
+    /// the default `_id` ascending order when `_sort` was omitted.
+    pub(crate) sort: Vec<crate::sort::SortKey>,
+    /// The decoded and validated opaque `_after_id` cursor, if present.
     pub(crate) sort_cursor: Option<Vec<crate::sort::SortCursorValue>>,
 }
 
@@ -289,21 +286,22 @@ pub(crate) fn parse_search_params(
         }
     }
 
-    let sort = sort_raw
-        .as_deref()
-        .map(|raw| {
-            crate::sort::parse_sort_param(raw).map(|keys| crate::sort::effective_sort(&keys))
-        })
-        .transpose()?;
+    let sort = match sort_raw.as_deref() {
+        Some(raw) => {
+            crate::sort::parse_sort_param(raw).map(|keys| crate::sort::effective_sort(&keys))?
+        }
+        None => crate::sort::default_sort(),
+    };
+    let cursor_sort = sort_raw.as_deref().unwrap_or(crate::sort::DEFAULT_SORT);
 
-    let sort_cursor = match (&sort, &after_id) {
-        (Some(effective), Some(raw)) => Some(crate::sort::decode_cursor(
+    let sort_cursor = match after_id.as_deref() {
+        Some(raw) => Some(crate::sort::decode_cursor(
             raw,
-            effective,
-            sort_raw.as_deref().expect("sort implies sort_raw"),
+            &sort,
+            cursor_sort,
             &canonical_filters,
         )?),
-        _ => None,
+        None => None,
     };
 
     Ok(ParsedSearchParams {
@@ -915,10 +913,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_search_params_accepts_after_id_cursor() {
+    fn parse_search_params_accepts_opaque_after_id_cursor() {
+        let cursor = crate::sort::encode_cursor(
+            crate::sort::DEFAULT_SORT,
+            &[],
+            &[crate::sort::SortCursorValue::Id("patient-123".to_owned())],
+        );
         let params = parse_search_params(
             "Patient",
-            vec![("_after_id".to_owned(), "patient-123".to_owned())],
+            vec![("_after_id".to_owned(), cursor.clone())],
             SearchConfig {
                 default_count: 50,
                 max_count: 500,
@@ -927,7 +930,30 @@ mod tests {
         .unwrap();
 
         assert_eq!(params.count, 50);
-        assert_eq!(params.after_id.as_deref(), Some("patient-123"));
+        assert_eq!(params.after_id.as_deref(), Some(cursor.as_str()));
+        assert_eq!(
+            params.sort_cursor,
+            Some(vec![crate::sort::SortCursorValue::Id(
+                "patient-123".to_owned()
+            )])
+        );
+    }
+
+    #[test]
+    fn parse_search_params_rejects_non_cursor_after_id() {
+        for cursor in ["patient-123", "patient id", "under_score"] {
+            let error = parse_search_params(
+                "Patient",
+                vec![("_after_id".to_owned(), cursor.to_owned())],
+                SearchConfig {
+                    default_count: 50,
+                    max_count: 500,
+                },
+            )
+            .expect_err("non-opaque cursor must be rejected");
+
+            assert!(error.to_string().contains("not a valid cursor"));
+        }
     }
 
     #[test]

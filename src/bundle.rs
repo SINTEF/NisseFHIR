@@ -13,7 +13,7 @@ use crate::{
     audit::{MutationAuditContext, NewAuditEvent},
     auth::AccessContext,
     error::{AppError, OperationIssue},
-    fhir::{assign_resource_id, parse_if_match_value, validate_resource_payload},
+    fhir::{assign_resource_id, parse_if_match_value, validate_fhir_id, validate_resource_payload},
     validation::FhirSchemaValidator,
 };
 
@@ -288,6 +288,9 @@ fn parse_entry_request(entry: &Value) -> Result<EntryRequest, String> {
         .ok_or("entry.request.url must contain a resource type")?
         .to_owned();
     let id = parts.next().map(|s| s.to_owned());
+    if let Some(id) = id.as_deref() {
+        validate_fhir_id(id).map_err(|error| error.to_string())?;
+    }
     let if_match = request
         .get("ifMatch")
         .map(|value| {

@@ -25,6 +25,10 @@ use crate::store::StoredResource;
 /// Sort keys accepted by `_sort`, in the order they are advertised.
 pub const SORTABLE_KEYS: &[&str] = &[SortColumn::Id.code(), SortColumn::LastUpdated.code()];
 
+/// The effective order for collection searches without an explicit `_sort`.
+/// Its stable textual form is fingerprinted into their opaque cursors.
+pub const DEFAULT_SORT: &str = "_id";
+
 /// Upper bound on the number of sort keys accepted in one `_sort` value.
 /// Only two keys are currently sortable, so this is mostly defensive: it
 /// gives a clear error message instead of relying solely on the
@@ -77,6 +81,13 @@ pub enum SortDirection {
 pub struct SortKey {
     pub column: SortColumn,
     pub direction: SortDirection,
+}
+
+pub fn default_sort() -> Vec<SortKey> {
+    vec![SortKey {
+        column: SortColumn::Id,
+        direction: SortDirection::Ascending,
+    }]
 }
 
 /// A typed value extracted from one row for one sort column, used both to
@@ -290,7 +301,7 @@ pub fn decode_cursor(
         .zip(&fields[2..])
         .map(|(key, field)| match key.column {
             SortColumn::Id => {
-                if field.is_empty() {
+                if crate::fhir::validate_fhir_id(field).is_err() {
                     return Err(invalid());
                 }
                 Ok(SortCursorValue::Id((*field).to_owned()))
@@ -452,6 +463,19 @@ mod tests {
     fn cursor_rejected_when_malformed() {
         let sort = effective_sort(&parse_sort_param("_id").unwrap());
         let error = decode_cursor("not-a-cursor", &sort, "_id", &[]).unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn cursor_rejected_when_id_is_not_a_fhir_id() {
+        let sort = effective_sort(&parse_sort_param("_id").unwrap());
+        let encoded = encode_cursor(
+            "_id",
+            &[],
+            &[SortCursorValue::Id("not a FHIR id".to_owned())],
+        );
+
+        let error = decode_cursor(&encoded, &sort, "_id", &[]).unwrap_err();
         assert!(matches!(error, AppError::BadRequest(_)));
     }
 

@@ -144,6 +144,7 @@ pub async fn search_audit_events(
                         "entity must be ResourceType/id".to_owned(),
                     ));
                 }
+                validate_fhir_id(resource_id)?;
                 filter.entity_type = Some(resource_type.to_owned());
                 filter.entity_id = Some(resource_id.to_owned());
                 canonical_filters.push((key, value));
@@ -299,42 +300,28 @@ pub async fn search_resources(
     let query = crate::search::parse_query_pairs(query.as_deref().unwrap_or(""));
     let params = crate::search::parse_search_params(&resource_type, query, state.search)?;
 
-    let (total, resources, next_after_id) = if let Some(sort) = &params.sort {
-        let results = state
-            .store
-            .search_sorted(
-                &access.tenant_id,
-                &resource_type,
-                &params.filters,
-                i64::from(params.count),
-                sort,
-                params.sort_cursor.as_deref(),
-            )
-            .await?;
-        let next_after_id = results.next_cursor_values.map(|values| {
-            crate::sort::encode_cursor(
-                params
-                    .sort_raw
-                    .as_deref()
-                    .expect("params.sort implies params.sort_raw"),
-                &params.canonical_filters,
-                &values,
-            )
-        });
-        (results.total, results.resources, next_after_id)
-    } else {
-        let results = state
-            .store
-            .search(
-                &access.tenant_id,
-                &resource_type,
-                &params.filters,
-                i64::from(params.count),
-                params.after_id.as_deref(),
-            )
-            .await?;
-        (results.total, results.resources, results.next_after_id)
-    };
+    let results = state
+        .store
+        .search_sorted(
+            &access.tenant_id,
+            &resource_type,
+            &params.filters,
+            i64::from(params.count),
+            &params.sort,
+            params.sort_cursor.as_deref(),
+        )
+        .await?;
+    let next_after_id = results.next_cursor_values.map(|values| {
+        crate::sort::encode_cursor(
+            params
+                .sort_raw
+                .as_deref()
+                .unwrap_or(crate::sort::DEFAULT_SORT),
+            &params.canonical_filters,
+            &values,
+        )
+    });
+    let (total, resources) = (results.total, results.resources);
 
     let response = Json(crate::search::build_search_bundle(
         &state.fhir_base_url,
@@ -526,6 +513,7 @@ pub async fn read_resource(
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
     validate_path_resource_type(&resource_type)?;
+    validate_fhir_id(&id)?;
     if !access.can_read || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -564,6 +552,7 @@ pub async fn read_resource_history(
 ) -> Result<Response, AppError> {
     let access = extract_access_context(&headers, &state.auth)?;
     validate_path_resource_type(&resource_type)?;
+    validate_fhir_id(&id)?;
     if !access.can_read || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -621,6 +610,7 @@ pub async fn update_resource(
         .ok_or_else(|| AppError::Internal("missing mutation audit context".to_owned()))?
         .0;
     validate_path_resource_type(&resource_type)?;
+    validate_fhir_id(&id)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -731,6 +721,7 @@ pub async fn delete_resource(
         .ok_or_else(|| AppError::Internal("missing mutation audit context".to_owned()))?
         .0;
     validate_path_resource_type(&resource_type)?;
+    validate_fhir_id(&id)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -774,6 +765,7 @@ pub async fn patch_resource(
         .ok_or_else(|| AppError::Internal("missing mutation audit context".to_owned()))?
         .0;
     validate_path_resource_type(&resource_type)?;
+    validate_fhir_id(&id)?;
     if !access.can_write || !access.can_access_resource_type(&resource_type) {
         return Err(AppError::Forbidden);
     }
@@ -1090,6 +1082,23 @@ pub(crate) fn assign_resource_id(
     Ok(())
 }
 
+/// Validate the FHIR `id` primitive: one to 64 ASCII letters, digits, hyphens,
+/// or full stops. A byte-wise check makes the ASCII-only requirement explicit
+/// and avoids accepting Unicode look-alikes.
+pub(crate) fn validate_fhir_id(id: &str) -> Result<(), AppError> {
+    if (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
+    {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "id must match the FHIR id pattern [A-Za-z0-9\\-.]{1,64}".to_owned(),
+        ))
+    }
+}
+
 fn validate_path_resource_type(resource_type: &str) -> Result<(), AppError> {
     if search_params::is_valid_resource_type(resource_type) {
         Ok(())
@@ -1111,7 +1120,10 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt;
 
-    use super::{assign_resource_id, validate_path_resource_type, validate_resource_payload};
+    use super::{
+        assign_resource_id, validate_fhir_id, validate_path_resource_type,
+        validate_resource_payload,
+    };
     use crate::{
         AppState, SearchConfig, auth::AuthConfig, build_router, search_params::sql::GeoSearchMode,
         store::PgStore, validation::FhirSchemaValidator,
@@ -1150,6 +1162,24 @@ mod tests {
             err.to_string()
                 .contains("unsupported FHIR resource type 'ObviouslyNotAValidType'")
         );
+    }
+
+    #[test]
+    fn validates_fhir_ids() {
+        for id in ["a", "Patient-01.2", &"a".repeat(64)] {
+            validate_fhir_id(id).expect("valid FHIR id");
+        }
+
+        for id in [
+            "",
+            "has space",
+            "under_score",
+            "slash/id",
+            "\u{00e5}",
+            &"a".repeat(65),
+        ] {
+            assert!(validate_fhir_id(id).is_err(), "{id:?} must be rejected");
+        }
     }
 
     #[tokio::test]

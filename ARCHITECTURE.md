@@ -297,14 +297,13 @@ resources with equal sort values still have a stable relative order across
 pages.
 
 Sorting and paging are one design because the pagination cursor's meaning
-depends on the sort order the page was generated under. When `_sort` is
-present, `_after_id` carries an opaque, versioned cursor encoding the sort
-column values of the last row on the page (not just its id) together with a
-fingerprint of the `_sort` value and filters it was minted under. Replaying
-that cursor against a different `_sort` or a different filter set is
-rejected with `400` — a cursor is never silently reinterpreted. Without
-`_sort`, `_after_id` keeps behaving exactly as it does today (the last row's
-plain id), so existing clients are unaffected.
+depends on the sort order the page was generated under. `_after_id` always
+carries an opaque, versioned cursor encoding the sort column values of the
+last row on the page (not just its id), together with a fingerprint of the
+effective sort and filters it was minted under. When `_sort` is absent, the
+effective sort is `_id` ascending. Replaying a cursor against a different
+sort or filter set is rejected with `400` — a cursor is never silently
+reinterpreted.
 
 `_sort` is preserved unchanged in the generated `self` and `next` Bundle
 links, so following `next` repeatedly never requires the client to re-supply
