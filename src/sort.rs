@@ -253,7 +253,7 @@ pub fn encode_cursor(
     for value in values {
         fields.push(match value {
             SortCursorValue::Id(id) => id.clone(),
-            SortCursorValue::LastUpdated(dt) => dt.to_rfc3339_opts(SecondsFormat::Micros, true),
+            SortCursorValue::LastUpdated(dt) => dt.to_rfc3339_opts(SecondsFormat::Nanos, true),
         });
     }
     fields.join(&CURSOR_FIELD_SEP.to_string())
