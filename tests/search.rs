@@ -415,6 +415,41 @@ async fn patient_search_supports_standard_id_and_representative_parameter_types(
 }
 
 #[tokio::test]
+async fn patient_search_by_id_accepts_a_comma_separated_set_of_ids() {
+    let pool = setup_test_db().await;
+    clean_tenant(&pool, "search-patient-id-set").await;
+    let token = tenant_token("search-patient-id-set");
+
+    let mut created_ids = Vec::new();
+    for _ in 0..3 {
+        let patient = test_data::minimal_patient();
+
+        let app = build_test_app_auth_required(pool.clone());
+        let (status, created) =
+            send_request(app, post_resource_with_token("Patient", &patient, &token)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        created_ids.push(created["id"].as_str().unwrap().to_owned());
+    }
+
+    let requested_ids = vec![created_ids[2].clone(), created_ids[0].clone()];
+    let query = format!("_id={},{}", requested_ids[0], requested_ids[1]);
+    let app = build_test_app_auth_required(pool);
+    let (status, body) = send_request(
+        app,
+        search_resource_with_token("Patient", Some(&query), &token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["total"], 2, "{body}");
+    let mut returned_ids = entry_ids(&body);
+    returned_ids.sort();
+    let mut expected_ids = requested_ids;
+    expected_ids.sort();
+    assert_eq!(returned_ids, expected_ids, "{body}");
+}
+
+#[tokio::test]
 async fn patient_deceased_and_death_date_searches_have_boolean_and_date_semantics() {
     let pool = setup_test_db().await;
     clean_tenant(&pool, "search-patient-deceased").await;

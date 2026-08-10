@@ -1273,6 +1273,14 @@ mod tests {
     }
 
     #[test]
+    fn resource_id_filter_targets_the_indexed_id_column() {
+        let mut query: QueryBuilder<Postgres> = QueryBuilder::new("SELECT 1 FROM t WHERE 1=1");
+        push_token_filter(&mut query, &JsonPath::ResourceId, "patient-123");
+
+        assert!(query.into_sql().as_str().contains("AND id = $1"));
+    }
+
+    #[test]
     fn build_jsonb_path_single() {
         assert_eq!(
             build_jsonb_path("resource", &["status"]),

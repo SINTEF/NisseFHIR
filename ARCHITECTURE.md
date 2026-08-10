@@ -272,22 +272,29 @@ ascending by `id` — unchanged.
 
 ### Sortable keys
 
-Only `_id` and `_lastUpdated` are sortable. Both map directly to `NOT NULL`
-columns on `fhir_resources` (`id`, `last_updated`), so there is no null
-handling to define — every resource has a value for both, and neither
-repeats. Extending `_sort` to registry-backed search parameters (e.g.
-`status`, `subject`) is an explicit, documented non-goal of this feature:
-those paths can be absent, repeated, or backed by an index that does not
-support ordering, none of which is true of the two storage columns. A key
-outside this set — unknown, unindexed, or otherwise unsupported — returns a
-privacy-safe `400` rather than being silently ignored or substituted, per the
-same fail-closed rule as unsupported filter parameters. A repeated `_sort`
-parameter, or more sort keys than the server allows in one request, is also
-rejected with `400`. The CapabilityStatement advertises the accepted keys for
-each resource type as a repeating `sortParameter` extension (there is no
-standard CapabilityStatement field for this) on `rest.resource`, verified by
-a test that cross-checks the advertised set against what parsing actually
-accepts.
+Every resource accepts `_id` and `_lastUpdated`. A deliberately small,
+resource-specific allow-list adds singular scalar search parameters where they
+are useful for a catalogue, workflow, or clinical timeline. The current list
+is the executable `sortable_search_param_codes_for` registry: Patient
+(`birthdate`, `death-date`, `gender`, `active`), Organization (`active`,
+`name`), Observation (`status`, `value-string`), Questionnaire (`date`,
+`name`, `status`, `title`), QuestionnaireResponse (`authored`, `status`),
+Task (`authored-on`, `modified`, `status`), Composition (`date`, `status`,
+`title`), CommunicationRequest (`authored`, `status`), MedicationRequest
+(`authoredon`, `status`), Condition (`recorded-date`), Immunization (`date`,
+`status`), DocumentReference (`date`, `status`), and ServiceRequest
+(`authored`, `status`).
+
+Complex, repeated, reference, quantity, and questionnaire-answer parameters
+are intentionally not sortable: they have no single obvious value to order
+by. A key outside the allow-list — unknown, unindexed, or unsupported for the
+resource type — returns a privacy-safe `400` rather than being silently
+ignored or substituted. A repeated `_sort` parameter, or more sort keys than
+the server allows in one request, is also rejected with `400`. The
+CapabilityStatement advertises the accepted keys for each resource type as a
+repeating `sortParameter` extension (there is no standard
+CapabilityStatement field for this) on `rest.resource`, verified by a test
+that cross-checks advertised and accepted keys.
 
 ### Ordering and pagination
 
