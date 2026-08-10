@@ -29,7 +29,7 @@ pub struct MetricsConfig {
     pub bind_addr: SocketAddr,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AppConfig {
     pub bind_addr: String,
     pub database_url: String,
@@ -40,12 +40,35 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     pub fhir_base_url: String,
     pub search: SearchConfig,
+    pub everything_cursor_secret: Arc<[u8]>,
     /// Upper bound, in seconds, that the server will wait for in-flight
     /// requests to drain after a shutdown signal before forcing exit.
     pub shutdown_timeout_secs: u64,
     pub cors_allowed_origins: Vec<HeaderValue>,
     pub serve_docs: bool,
     pub metrics: MetricsConfig,
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AppConfig")
+            .field("bind_addr", &self.bind_addr)
+            .field("database_url", &"<redacted>")
+            .field("db_connect_timeout_secs", &self.db_connect_timeout_secs)
+            .field("db_acquire_timeout_secs", &self.db_acquire_timeout_secs)
+            .field("db_statement_timeout_ms", &self.db_statement_timeout_ms)
+            .field("db_pool", &self.db_pool)
+            .field("auth", &self.auth)
+            .field("fhir_base_url", &self.fhir_base_url)
+            .field("search", &self.search)
+            .field("everything_cursor_secret", &"<redacted>")
+            .field("shutdown_timeout_secs", &self.shutdown_timeout_secs)
+            .field("cors_allowed_origins", &self.cors_allowed_origins)
+            .field("serve_docs", &self.serve_docs)
+            .field("metrics", &self.metrics)
+            .finish()
+    }
 }
 
 impl AppConfig {
@@ -77,6 +100,7 @@ impl AppConfig {
         let fhir_base_url =
             env::var("FHIR_BASE_URL").unwrap_or_else(|_| "http://localhost:8080/fhir".to_owned());
         let search = load_search_config()?;
+        let everything_cursor_secret = load_everything_cursor_secret()?;
         let auth = load_auth_config()?;
         let cors_allowed_origins = parse_cors_allowed_origins()?;
         let serve_docs = env_flag("SERVE_DOCS");
@@ -92,12 +116,25 @@ impl AppConfig {
             auth,
             fhir_base_url,
             search,
+            everything_cursor_secret,
             shutdown_timeout_secs,
             cors_allowed_origins,
             serve_docs,
             metrics,
         })
     }
+}
+
+fn load_everything_cursor_secret() -> Result<Arc<[u8]>> {
+    let secret = match load_env_or_file("EVERYTHING_CURSOR_SECRET")? {
+        Some(secret) => secret,
+        None => load_env_or_file("JWT_SECRET")?
+            .context("missing EVERYTHING_CURSOR_SECRET (or JWT_SECRET fallback)")?,
+    };
+    if secret.len() < 32 {
+        bail!("EVERYTHING_CURSOR_SECRET must be at least 32 characters");
+    }
+    Ok(Arc::from(secret.into_bytes()))
 }
 
 // ---------------------------------------------------------------------------

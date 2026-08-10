@@ -42,6 +42,8 @@ pub enum AppError {
     Conflict(String),
     #[error("payload too large")]
     PayloadTooLarge,
+    #[error("unprocessable entity: {0}")]
+    UnprocessableEntity(String),
     #[error("unsupported media type: {0}")]
     UnsupportedMediaType(String),
     #[error("not acceptable: {0}")]
@@ -117,6 +119,10 @@ impl IntoResponse for AppError {
                     "too-costly",
                     "request payload exceeds the maximum allowed size",
                 )],
+            ),
+            AppError::UnprocessableEntity(message) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                vec![OperationIssue::error("not-supported", message)],
             ),
             AppError::UnsupportedMediaType(message) => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,

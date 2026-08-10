@@ -11,7 +11,7 @@ import re
 import os
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SEARCH_PARAMS_JSON = os.path.join(BASE, "examples", "search-parameters.json")
+SEARCH_PARAMS_JSON = os.path.join(BASE, "src", "search_parameters.json")
 SCHEMA_JSON = os.path.join(BASE, "fhir.schema.json")
 OUT_DIR = os.path.join(BASE, "src", "search_params")
 
@@ -176,6 +176,23 @@ def extract_date_path_alternatives(resource_type, expression):
     return alternatives
 
 
+def extract_reference_path_alternatives(resource_type, expression):
+    """Return every direct Reference branch for one resource type.
+
+    Global parameters such as `patient` commonly contain several branches for
+    the same resource. Keeping only the first one corrupts compartment
+    membership, even when ordinary search chooses to expose one SQL path.
+    """
+    alternatives = []
+    for part in (expression or "").split("|"):
+        path_info, category = extract_json_path_segments(resource_type, part.strip())
+        if isinstance(path_info, list) and category in (
+            "simple", "nested", "ofType", "as_type", "repeat", "resolve_filter"
+        ) and path_info not in alternatives:
+            alternatives.append(path_info)
+    return alternatives
+
+
 def sp_type_to_rust(sp_type):
     mapping = {
         "string": "String",
@@ -319,6 +336,17 @@ def generate_registry_rs(resource_types, registry):
                     ]
                     supported_params.append(
                         f'    SearchParam {{ code: "{p["code"]}", param_type: SearchParamType::Date, path: JsonPath::FieldAlternatives(&[{", ".join(path_exprs)}]) }}'
+                    )
+                    continue
+
+            if p["type"] == "reference":
+                alternatives = extract_reference_path_alternatives(
+                    rt, p.get("expression")
+                )
+                if len(alternatives) > 1:
+                    path_exprs = [json_path_to_rust_expr(path) for path in alternatives]
+                    supported_params.append(
+                        f'    SearchParam {{ code: "{p["code"]}", param_type: SearchParamType::Reference, path: JsonPath::FieldAlternatives(&[{", ".join(path_exprs)}]) }}'
                     )
                     continue
 

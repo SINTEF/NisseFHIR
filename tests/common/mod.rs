@@ -13,6 +13,7 @@ use jsonwebtoken::{EncodingKey, Header, encode};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 use fhir_server::search_params::sql::GeoSearchMode;
 
@@ -24,6 +25,12 @@ use fhir_server::validation::FhirSchemaValidator;
 /// per-test saves significant CPU time.
 static SHARED_VALIDATOR: LazyLock<Arc<FhirSchemaValidator>> =
     LazyLock::new(|| Arc::new(FhirSchemaValidator::new().expect("validator should load")));
+
+/// Each integration-test process gets an isolated PostgreSQL schema. This
+/// prevents independently launched `cargo test` processes from sharing fixed
+/// test tenant ids (and therefore from changing one another's version ids).
+static TEST_SCHEMA: LazyLock<String> =
+    LazyLock::new(|| format!("fhir_test_{}", Uuid::new_v4().simple()));
 
 pub const TEST_JWT_SECRET: &str = "test-secret-0123456789abcdef012345";
 
@@ -73,13 +80,16 @@ pub fn build_test_app_with_geo_mode(
     use fhir_server::{AppState, build_router};
 
     let state = AppState {
-        store: PgStore::new(pool, geo_mode),
+        store: PgStore::new(pool, geo_mode)
+            .with_fhir_base_url("http://localhost:8080/fhir")
+            .expect("test FHIR base URL must be valid"),
         auth: AuthConfig::from_hmac_secret(jsonwebtoken::Algorithm::HS256, TEST_JWT_SECRET),
         fhir_base_url: "http://localhost:8080/fhir".to_owned(),
         search: SearchConfig {
             default_count: 50,
             max_count: 500,
         },
+        everything_cursor_secret: Arc::from(TEST_JWT_SECRET.as_bytes()),
         validator: Arc::clone(&SHARED_VALIDATOR),
         cors_allowed_origins,
         serve_docs,
@@ -155,9 +165,9 @@ pub fn expired_token(tenant: &str) -> String {
 
 /// Acquire a connection pool pointed at the test database and run migrations.
 ///
-/// Each call returns a pool connected to the same database. Tests running in
-/// parallel share the database but use the default "public" tenant (when
-/// unauthenticated) or specific tenant identifiers, keeping data isolated.
+/// Each call returns a pool connected to this process's private schema. Tests
+/// can retain readable fixed tenant ids while separate `cargo test` processes
+/// remain fully isolated from one another.
 ///
 /// Each test gets its own pool to avoid cross-runtime lifetime issues
 /// (each #[tokio::test] has its own runtime). The expensive part — parsing
@@ -175,8 +185,50 @@ pub fn lazy_pool() -> PgPool {
 pub async fn setup_test_db() -> PgPool {
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1/fhir_test".to_owned());
+    let bootstrap_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("failed to connect to test database");
+    // setup_test_db() can be called concurrently by tests in this process.
+    // Serialise CREATE SCHEMA because PostgreSQL's IF NOT EXISTS still has a
+    // catalog unique-index race under concurrent DDL.
+    let setup_lock = format!("fhir-test-schema:{}", &*TEST_SCHEMA);
+    sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
+        .bind(&setup_lock)
+        .execute(&bootstrap_pool)
+        .await
+        .expect("failed to lock isolated test schema setup");
+    // TEST_SCHEMA is generated locally from a UUID and contains only safe SQL
+    // identifier characters. It must be interpolated because PostgreSQL does
+    // not support binding identifiers.
+    let create_schema = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE SCHEMA IF NOT EXISTS {}",
+        *TEST_SCHEMA
+    )))
+    .execute(&bootstrap_pool)
+    .await;
+    sqlx::query("SELECT pg_advisory_unlock(hashtext($1))")
+        .bind(&setup_lock)
+        .execute(&bootstrap_pool)
+        .await
+        .expect("failed to unlock isolated test schema setup");
+    create_schema.expect("failed to create isolated test schema");
+    bootstrap_pool.close().await;
+
+    let search_path = format!("{}, public", *TEST_SCHEMA);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
+        .after_connect(move |connection, _| {
+            let search_path = search_path.clone();
+            Box::pin(async move {
+                sqlx::query("SELECT set_config('search_path', $1, false)")
+                    .bind(search_path)
+                    .execute(connection)
+                    .await
+                    .map(|_| ())
+            })
+        })
         .connect(&url)
         .await
         .expect("failed to connect to test database");
@@ -191,6 +243,12 @@ pub async fn setup_test_db() -> PgPool {
 
 /// Clean all data for a specific tenant.
 pub async fn clean_tenant(pool: &PgPool, tenant_id: &str) {
+    sqlx::query("DELETE FROM fhir_resource_references WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .expect("failed to clean tenant references");
+
     sqlx::query("DELETE FROM fhir_resource_history WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)

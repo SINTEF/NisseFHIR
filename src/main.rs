@@ -97,10 +97,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let state = AppState {
-        store: PgStore::new(pool.clone(), geo_mode),
+        store: PgStore::new(pool.clone(), geo_mode).with_fhir_base_url(&config.fhir_base_url)?,
         auth: config.auth.clone(),
         fhir_base_url: config.fhir_base_url,
         search: config.search,
+        everything_cursor_secret: config.everything_cursor_secret,
         validator: Arc::new(FhirSchemaValidator::new()?),
         cors_allowed_origins: config.cors_allowed_origins.clone(),
         serve_docs: config.serve_docs,

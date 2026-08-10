@@ -34,6 +34,7 @@ pub type TxExecutor<'a> = sqlx::Transaction<'a, Postgres>;
 pub struct PgStore {
     pool: PgPool,
     geo_mode: GeoSearchMode,
+    local_base_url: Option<url::Url>,
 }
 
 #[derive(Debug)]
@@ -89,6 +90,23 @@ pub struct HistoricalResource {
     pub resource: Value,
 }
 
+/// One deduplicated member of a Patient/Group `$everything` result set.
+#[derive(Debug)]
+pub struct EverythingCandidate {
+    pub resource_type: String,
+    pub id: String,
+    pub version_id: i64,
+    pub last_updated: DateTime<Utc>,
+    pub resource: Value,
+    pub is_primary: bool,
+    pub is_historical: bool,
+}
+
+pub struct EverythingPage {
+    pub total: i64,
+    pub candidates: Vec<EverythingCandidate>,
+}
+
 /// A page of instance-history versions plus the cursor for the next page.
 pub struct HistoryResults {
     pub exists: bool,
@@ -97,6 +115,196 @@ pub struct HistoryResults {
 }
 
 impl PgStore {
+    /// Page a heterogeneous extraction in PostgreSQL. The CTE carries only
+    /// keys and timestamps until after the cursor and LIMIT have been applied;
+    /// JSON resource bodies are fetched solely for the requested page.
+    pub async fn everything_page(
+        &self,
+        tenant_id: &str,
+        patient_ids: &[String],
+        allowed_types: &[String],
+        since: Option<DateTime<Utc>>,
+        after: Option<(&str, &str, i64, bool)>,
+        count: i64,
+    ) -> Result<EverythingPage, AppError> {
+        let (after_type, after_id, after_version, after_rank) = after
+            .map(|(resource_type, id, version, _historical)| {
+                (
+                    Some(resource_type),
+                    Some(id),
+                    version,
+                    i32::from(resource_type != "Patient"),
+                )
+            })
+            .unwrap_or((None, None, 0, 0));
+        let rows = sqlx::query(
+            r#"
+            WITH seed(patient_id) AS (SELECT unnest($2::text[])),
+            primary_keys(resource_type, id, version_id, is_primary) AS (
+                SELECT 'Patient', r.id, NULL::bigint, TRUE
+                FROM fhir_resources r JOIN seed s ON s.patient_id = r.id
+                WHERE r.tenant_id = $1 AND r.resource_type = 'Patient'
+                UNION
+                SELECT rr.source_type, rr.source_id, NULL::bigint, TRUE
+                FROM fhir_resource_references rr
+                JOIN seed s ON s.patient_id = rr.target_id
+                JOIN fhir_resources source ON source.tenant_id = rr.tenant_id
+                  AND source.resource_type = rr.source_type AND source.id = rr.source_id
+                  AND source.version_id = rr.source_version_id
+                WHERE rr.tenant_id = $1 AND rr.target_type = 'Patient'
+                  AND rr.search_param_code = 'patient'
+                  AND ($6::timestamptz IS NULL OR source.last_updated >= $6)
+            ),
+            support_one(resource_type, id, version_id, is_primary) AS (
+                SELECT rr.target_type, rr.target_id, rr.target_version_id, FALSE
+                FROM fhir_resource_references rr JOIN primary_keys p
+                  ON p.resource_type = rr.source_type AND p.id = rr.source_id
+                WHERE rr.tenant_id = $1 AND rr.target_type = ANY($4::text[])
+                  AND rr.target_type NOT IN ('Patient', 'Group')
+            ),
+            support_two(resource_type, id, version_id, is_primary) AS (
+                SELECT rr.target_type, rr.target_id, rr.target_version_id, FALSE
+                FROM fhir_resource_references rr JOIN support_one s
+                  ON s.resource_type = rr.source_type AND s.id = rr.source_id AND s.version_id IS NULL
+                WHERE rr.tenant_id = $1 AND s.resource_type = 'PractitionerRole'
+                  AND rr.target_type = ANY($4::text[]) AND rr.target_type NOT IN ('Patient', 'Group')
+            ),
+            keys AS (
+                SELECT resource_type, id, version_id, bool_or(is_primary) AS is_primary
+                FROM (SELECT * FROM primary_keys UNION ALL SELECT * FROM support_one UNION ALL SELECT * FROM support_two) all_keys
+                WHERE resource_type = ANY($3::text[])
+                GROUP BY resource_type, id, version_id
+            ),
+            resolved_keys AS (
+                SELECT k.resource_type, k.id, r.version_id, r.last_updated, k.is_primary, FALSE AS is_historical
+                FROM keys k JOIN fhir_resources r ON r.tenant_id = $1 AND r.resource_type = k.resource_type AND r.id = k.id
+                WHERE k.version_id IS NULL
+                UNION ALL
+                SELECT k.resource_type, k.id, h.version_id, h.last_updated, k.is_primary, TRUE AS is_historical
+                FROM keys k JOIN fhir_resource_history h ON h.tenant_id = $1 AND h.resource_type = k.resource_type AND h.id = k.id AND h.version_id = k.version_id
+                WHERE k.version_id IS NOT NULL AND NOT h.deleted
+            ),
+            ordered_keys AS (
+                SELECT resource_type, id, version_id, last_updated, bool_or(is_primary) AS is_primary,
+                       bool_or(is_historical) AS is_historical,
+                       count(*) OVER() AS total
+                FROM resolved_keys
+                WHERE resource_type = 'Patient' OR $6::timestamptz IS NULL OR last_updated >= $6
+                GROUP BY resource_type, id, version_id, last_updated
+            ),
+            paged_keys AS (
+                SELECT * FROM ordered_keys
+                WHERE $7::text IS NULL OR
+                  (CASE WHEN resource_type = 'Patient' THEN 0 ELSE 1 END, resource_type, id,
+                   CASE WHEN is_historical THEN version_id ELSE 0 END) >
+                  ($10::integer, $7::text, $8::text, $9::bigint)
+                ORDER BY CASE WHEN resource_type = 'Patient' THEN 0 ELSE 1 END, resource_type, id,
+                         CASE WHEN is_historical THEN version_id ELSE 0 END
+                LIMIT $5
+            )
+            SELECT p.resource_type, p.id, p.version_id, p.last_updated, p.is_primary, p.is_historical, p.total,
+                   COALESCE(current.resource, historical.resource) AS resource
+            FROM paged_keys p
+            LEFT JOIN fhir_resources current ON NOT p.is_historical AND current.tenant_id = $1 AND current.resource_type = p.resource_type AND current.id = p.id
+            LEFT JOIN fhir_resource_history historical ON p.is_historical AND historical.tenant_id = $1 AND historical.resource_type = p.resource_type AND historical.id = p.id AND historical.version_id = p.version_id
+            ORDER BY CASE WHEN p.resource_type = 'Patient' THEN 0 ELSE 1 END, p.resource_type, p.id,
+                     CASE WHEN p.is_historical THEN p.version_id ELSE 0 END
+            "#,
+        )
+        .bind(tenant_id).bind(patient_ids).bind(allowed_types).bind(crate::everything::SUPPORT_RESOURCE_TYPES)
+        .bind(count + 1).bind(since).bind(after_type).bind(after_id).bind(after_version).bind(after_rank)
+        .fetch_all(&self.pool).await?;
+        let total = rows.first().map(|row| row.get("total")).unwrap_or(0);
+        let candidates = rows
+            .into_iter()
+            .map(|row| EverythingCandidate {
+                resource_type: row.get("resource_type"),
+                id: row.get("id"),
+                version_id: row.get("version_id"),
+                last_updated: row.get("last_updated"),
+                resource: row.get("resource"),
+                is_primary: row.get("is_primary"),
+                is_historical: row.get("is_historical"),
+            })
+            .collect();
+        Ok(EverythingPage { total, candidates })
+    }
+    async fn replace_references_in_tx(
+        tx: &mut TxExecutor<'_>,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+        version_id: i64,
+        resource: &Value,
+        local_base_url: Option<&url::Url>,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            "DELETE FROM fhir_resource_references WHERE tenant_id = $1 AND source_type = $2 AND source_id = $3",
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+
+        // The generated registry limits extraction to known Reference-valued
+        // paths. Relative references are unambiguously local; absolute
+        // references must match the configured server origin and base path.
+        let references = crate::everything::references::extract_references(
+            resource_type,
+            resource,
+            local_base_url,
+        );
+        for reference in references {
+            sqlx::query(
+                r#"
+                INSERT INTO fhir_resource_references (
+                    tenant_id, source_type, source_id, source_version_id,
+                    search_param_code, json_path, target_type, target_id,
+                    target_version_id
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                ON CONFLICT (tenant_id, source_type, source_id, json_path,
+                             target_type, target_id, target_version_id)
+                DO UPDATE SET
+                    source_version_id = EXCLUDED.source_version_id,
+                    search_param_code = CASE
+                        WHEN EXCLUDED.search_param_code = 'patient' THEN 'patient'
+                        ELSE fhir_resource_references.search_param_code
+                    END
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(resource_type)
+            .bind(id)
+            .bind(version_id)
+            .bind(reference.search_param_code)
+            .bind(reference.json_path)
+            .bind(reference.target_type)
+            .bind(reference.target_id)
+            .bind(reference.target_version_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_references_in_tx(
+        tx: &mut TxExecutor<'_>,
+        tenant_id: &str,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            "DELETE FROM fhir_resource_references WHERE tenant_id = $1 AND source_type = $2 AND source_id = $3",
+        )
+        .bind(tenant_id)
+        .bind(resource_type)
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
     async fn record_success_and_commit(
         mut tx: TxExecutor<'_>,
         event: crate::audit::NewAuditEvent,
@@ -113,7 +321,19 @@ impl PgStore {
     }
 
     pub fn new(pool: PgPool, geo_mode: GeoSearchMode) -> Self {
-        Self { pool, geo_mode }
+        Self {
+            pool,
+            geo_mode,
+            local_base_url: None,
+        }
+    }
+
+    pub fn with_fhir_base_url(mut self, base_url: &str) -> Result<Self, AppError> {
+        self.local_base_url = Some(
+            url::Url::parse(base_url)
+                .map_err(|error| AppError::Internal(format!("invalid FHIR base URL: {error}")))?,
+        );
+        Ok(self)
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -158,6 +378,119 @@ impl PgStore {
         }))
     }
 
+    /// Build the heterogeneous Patient compartment plus its bounded forward
+    /// support graph, then resolve current and explicitly versioned targets.
+    pub async fn everything_candidates(
+        &self,
+        tenant_id: &str,
+        patient_ids: &[String],
+        allowed_types: &[String],
+        since: Option<DateTime<Utc>>,
+        discovered_limit: i64,
+    ) -> Result<Vec<EverythingCandidate>, AppError> {
+        let rows = sqlx::query(
+            r#"
+            WITH seed(patient_id) AS (SELECT unnest($2::text[])),
+            primary_keys(resource_type, id, version_id, is_primary) AS (
+                SELECT 'Patient', r.id, NULL::bigint, TRUE
+                FROM fhir_resources r
+                JOIN seed s ON s.patient_id = r.id
+                WHERE r.tenant_id = $1 AND r.resource_type = 'Patient'
+                UNION
+                SELECT rr.source_type, rr.source_id, NULL::bigint, TRUE
+                FROM fhir_resource_references rr
+                JOIN seed s ON s.patient_id = rr.target_id
+                JOIN fhir_resources current_source
+                  ON current_source.tenant_id = rr.tenant_id
+                 AND current_source.resource_type = rr.source_type
+                 AND current_source.id = rr.source_id
+                 AND current_source.version_id = rr.source_version_id
+                WHERE rr.tenant_id = $1
+                  AND rr.target_type = 'Patient'
+                  AND rr.search_param_code = 'patient'
+                  AND ($6::timestamptz IS NULL OR current_source.last_updated >= $6)
+            ),
+            support_one(resource_type, id, version_id, is_primary) AS (
+                SELECT rr.target_type, rr.target_id, rr.target_version_id, FALSE
+                FROM fhir_resource_references rr
+                JOIN primary_keys p
+                  ON p.resource_type = rr.source_type AND p.id = rr.source_id
+                WHERE rr.tenant_id = $1
+                  AND rr.target_type = ANY($4::text[])
+                  AND rr.target_type NOT IN ('Patient', 'Group')
+            ),
+            support_two(resource_type, id, version_id, is_primary) AS (
+                SELECT rr.target_type, rr.target_id, rr.target_version_id, FALSE
+                FROM fhir_resource_references rr
+                JOIN support_one s
+                  ON s.resource_type = rr.source_type AND s.id = rr.source_id
+                 AND s.version_id IS NULL
+                WHERE rr.tenant_id = $1
+                  AND s.resource_type = 'PractitionerRole'
+                  AND rr.target_type = ANY($4::text[])
+                  AND rr.target_type NOT IN ('Patient', 'Group')
+            ),
+            all_keys AS (
+                SELECT resource_type, id, version_id, bool_or(is_primary) AS is_primary
+                FROM (
+                    SELECT * FROM primary_keys
+                    UNION ALL SELECT * FROM support_one
+                    UNION ALL SELECT * FROM support_two
+                ) keys
+                WHERE resource_type = ANY($3::text[])
+                GROUP BY resource_type, id, version_id
+            ),
+            resolved AS (
+                SELECT k.resource_type, k.id, r.version_id, r.last_updated,
+                       r.resource, k.is_primary, FALSE AS is_historical
+                FROM all_keys k
+                JOIN fhir_resources r
+                  ON r.tenant_id = $1 AND r.resource_type = k.resource_type
+                 AND r.id = k.id
+                WHERE k.version_id IS NULL
+                UNION ALL
+                SELECT k.resource_type, k.id, h.version_id, h.last_updated,
+                       h.resource, k.is_primary, TRUE AS is_historical
+                FROM all_keys k
+                JOIN fhir_resource_history h
+                  ON h.tenant_id = $1 AND h.resource_type = k.resource_type
+                 AND h.id = k.id AND h.version_id = k.version_id
+                WHERE k.version_id IS NOT NULL AND NOT h.deleted
+            )
+            SELECT resource_type, id, version_id, last_updated, resource,
+                   bool_or(is_primary) AS is_primary,
+                   bool_or(is_historical) AS is_historical
+            FROM resolved
+            WHERE resource_type = 'Patient' OR $6::timestamptz IS NULL OR last_updated >= $6
+            GROUP BY resource_type, id, version_id, last_updated, resource
+            ORDER BY CASE WHEN resource_type = 'Patient' THEN 0 ELSE 1 END,
+                     resource_type, id, version_id
+            LIMIT $5
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(patient_ids)
+        .bind(allowed_types)
+        .bind(crate::everything::SUPPORT_RESOURCE_TYPES)
+        .bind(discovered_limit + 1)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| EverythingCandidate {
+                resource_type: row.get("resource_type"),
+                id: row.get("id"),
+                version_id: row.get("version_id"),
+                last_updated: row.get("last_updated"),
+                resource: row.get("resource"),
+                is_primary: row.get("is_primary"),
+                is_historical: row.get("is_historical"),
+            })
+            .collect())
+    }
+
     pub async fn upsert(
         &self,
         tenant_id: &str,
@@ -165,72 +498,18 @@ impl PgStore {
         id: &str,
         resource: Value,
     ) -> Result<UpsertResult, AppError> {
-        let row = sqlx::query(
-            r#"
-            WITH existing AS (
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM fhir_resources
-                    WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
-                ) AS existed
-            ),
-            next_version AS (
-                SELECT COALESCE(
-                    (
-                        SELECT version_id + 1
-                        FROM fhir_resources
-                        WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
-                    ),
-                    (
-                        SELECT MAX(version_id) + 1
-                        FROM fhir_resource_history
-                        WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
-                    ),
-                    1
-                ) AS version_id
-            ),
-            upserted AS (
-                INSERT INTO fhir_resources (tenant_id, resource_type, id, version_id, resource)
-                SELECT $1, $2, $3, next_version.version_id, $4
-                FROM next_version
-                ON CONFLICT (resource_type, tenant_id, id)
-                DO UPDATE SET
-                    resource = EXCLUDED.resource,
-                    version_id = fhir_resources.version_id + 1,
-                    last_updated = now()
-                RETURNING version_id, last_updated, resource
-            )
-            INSERT INTO fhir_resource_history (
-                tenant_id,
-                resource_type,
-                id,
-                version_id,
-                last_updated,
-                deleted,
-                resource
-            )
-            SELECT $1, $2, $3, version_id, last_updated, FALSE, resource
-            FROM upserted
-            RETURNING version_id, last_updated, resource,
-                NOT (SELECT existed FROM existing) AS created
-            "#,
+        let mut tx = self.pool.begin().await?;
+        let result = Self::upsert_in_tx(
+            &mut tx,
+            tenant_id,
+            resource_type,
+            id,
+            resource,
+            self.local_base_url.as_ref(),
         )
-        .bind(tenant_id)
-        .bind(resource_type)
-        .bind(id)
-        .bind(resource)
-        .fetch_one(&self.pool)
         .await?;
-
-        Ok(UpsertResult {
-            stored: StoredResource {
-                id: id.to_owned(),
-                version_id: row.get::<i64, _>("version_id"),
-                last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
-                resource: row.get::<Value, _>("resource"),
-            },
-            created: row.get::<bool, _>("created"),
-        })
+        tx.commit().await?;
+        Ok(result)
     }
 
     /// Create a resource without ever changing an existing logical resource.
@@ -245,48 +524,22 @@ impl PgStore {
         id: &str,
         resource: Value,
     ) -> Result<Option<StoredResource>, AppError> {
-        let row = sqlx::query(
-            r#"
-            WITH created AS (
-                INSERT INTO fhir_resources (
-                    tenant_id, resource_type, id, version_id, resource
-                )
-                SELECT $1, $2, $3, 1, $4
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM fhir_resource_history
-                    WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
-                )
-                ON CONFLICT (resource_type, tenant_id, id) DO NOTHING
-                RETURNING version_id, last_updated, resource
-            )
-            INSERT INTO fhir_resource_history (
-                tenant_id,
-                resource_type,
-                id,
-                version_id,
-                last_updated,
-                deleted,
-                resource
-            )
-            SELECT $1, $2, $3, version_id, last_updated, FALSE, resource
-            FROM created
-            RETURNING version_id, last_updated, resource
-            "#,
+        let mut tx = self.pool.begin().await?;
+        let stored = Self::create_in_tx(
+            &mut tx,
+            tenant_id,
+            resource_type,
+            id,
+            resource,
+            self.local_base_url.as_ref(),
         )
-        .bind(tenant_id)
-        .bind(resource_type)
-        .bind(id)
-        .bind(resource)
-        .fetch_optional(&self.pool)
         .await?;
-
-        Ok(row.map(|row| StoredResource {
-            id: id.to_owned(),
-            version_id: row.get::<i64, _>("version_id"),
-            last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
-            resource: row.get::<Value, _>("resource"),
-        }))
+        if stored.is_some() {
+            tx.commit().await?;
+        } else {
+            tx.rollback().await?;
+        }
+        Ok(stored)
     }
 
     /// Create a resource and its successful audit evidence atomically.
@@ -299,7 +552,15 @@ impl PgStore {
         audit: &MutationAuditContext,
     ) -> Result<Option<StoredResource>, AppError> {
         let mut tx = self.pool.begin().await?;
-        let stored = Self::create_in_tx(&mut tx, tenant_id, resource_type, id, resource).await?;
+        let stored = Self::create_in_tx(
+            &mut tx,
+            tenant_id,
+            resource_type,
+            id,
+            resource,
+            self.local_base_url.as_ref(),
+        )
+        .await?;
         let Some(stored) = stored else {
             tx.rollback().await?;
             return Ok(None);
@@ -330,7 +591,15 @@ impl PgStore {
         audit: &MutationAuditContext,
     ) -> Result<UpsertResult, AppError> {
         let mut tx = self.pool.begin().await?;
-        let result = Self::upsert_in_tx(&mut tx, tenant_id, resource_type, id, resource).await?;
+        let result = Self::upsert_in_tx(
+            &mut tx,
+            tenant_id,
+            resource_type,
+            id,
+            resource,
+            self.local_base_url.as_ref(),
+        )
+        .await?;
         let status = if result.created { 201 } else { 200 };
         Self::record_success_and_commit(
             tx,
@@ -367,6 +636,7 @@ impl PgStore {
             id,
             expected_version,
             resource,
+            self.local_base_url.as_ref(),
         )
         .await?;
         let Some(stored) = stored else {
@@ -399,7 +669,15 @@ impl PgStore {
         audit: &MutationAuditContext,
     ) -> Result<Option<StoredResource>, AppError> {
         let mut tx = self.pool.begin().await?;
-        let stored = Self::update_in_tx(&mut tx, tenant_id, resource_type, id, resource).await?;
+        let stored = Self::update_in_tx(
+            &mut tx,
+            tenant_id,
+            resource_type,
+            id,
+            resource,
+            self.local_base_url.as_ref(),
+        )
+        .await?;
         let Some(stored) = stored else {
             tx.rollback().await?;
             return Ok(None);
@@ -429,68 +707,22 @@ impl PgStore {
         resource: Value,
     ) -> Result<Option<StoredResource>, AppError> {
         let mut tx = self.pool.begin().await?;
-
-        let updated = sqlx::query(
-            r#"
-            UPDATE fhir_resources
-            SET resource = $4,
-                version_id = version_id + 1,
-                last_updated = now()
-            WHERE tenant_id = $1
-              AND resource_type = $2
-              AND id = $3
-              AND version_id = $5
-            RETURNING version_id, last_updated, resource
-            "#,
+        let stored = Self::update_if_version_matches_in_tx(
+            &mut tx,
+            tenant_id,
+            resource_type,
+            id,
+            expected_version,
+            resource,
+            self.local_base_url.as_ref(),
         )
-        .bind(tenant_id)
-        .bind(resource_type)
-        .bind(id)
-        .bind(resource)
-        .bind(expected_version)
-        .fetch_optional(&mut *tx)
         .await?;
-
-        let Some(updated_row) = updated else {
+        let Some(stored) = stored else {
             tx.rollback().await?;
             return Ok(None);
         };
-
-        let new_version_id = updated_row.get::<i64, _>("version_id");
-        let last_updated = updated_row.get::<DateTime<Utc>, _>("last_updated");
-        let updated_resource = updated_row.get::<Value, _>("resource");
-
-        sqlx::query(
-            r#"
-            INSERT INTO fhir_resource_history (
-                tenant_id,
-                resource_type,
-                id,
-                version_id,
-                last_updated,
-                deleted,
-                resource
-            )
-            VALUES ($1, $2, $3, $4, $5, FALSE, $6)
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(resource_type)
-        .bind(id)
-        .bind(new_version_id)
-        .bind(last_updated)
-        .bind(updated_resource.clone())
-        .execute(&mut *tx)
-        .await?;
-
         tx.commit().await?;
-
-        Ok(Some(StoredResource {
-            id: id.to_owned(),
-            version_id: new_version_id,
-            last_updated,
-            resource: updated_resource,
-        }))
+        Ok(Some(stored))
     }
 
     pub async fn update_existing(
@@ -501,66 +733,21 @@ impl PgStore {
         resource: Value,
     ) -> Result<Option<StoredResource>, AppError> {
         let mut tx = self.pool.begin().await?;
-
-        let updated = sqlx::query(
-            r#"
-            UPDATE fhir_resources
-            SET resource = $4,
-                version_id = version_id + 1,
-                last_updated = now()
-            WHERE tenant_id = $1
-              AND resource_type = $2
-              AND id = $3
-            RETURNING version_id, last_updated, resource
-            "#,
+        let stored = Self::update_in_tx(
+            &mut tx,
+            tenant_id,
+            resource_type,
+            id,
+            resource,
+            self.local_base_url.as_ref(),
         )
-        .bind(tenant_id)
-        .bind(resource_type)
-        .bind(id)
-        .bind(resource)
-        .fetch_optional(&mut *tx)
         .await?;
-
-        let Some(updated_row) = updated else {
+        let Some(stored) = stored else {
             tx.rollback().await?;
             return Ok(None);
         };
-
-        let new_version_id = updated_row.get::<i64, _>("version_id");
-        let last_updated = updated_row.get::<DateTime<Utc>, _>("last_updated");
-        let updated_resource = updated_row.get::<Value, _>("resource");
-
-        sqlx::query(
-            r#"
-            INSERT INTO fhir_resource_history (
-                tenant_id,
-                resource_type,
-                id,
-                version_id,
-                last_updated,
-                deleted,
-                resource
-            )
-            VALUES ($1, $2, $3, $4, $5, FALSE, $6)
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(resource_type)
-        .bind(id)
-        .bind(new_version_id)
-        .bind(last_updated)
-        .bind(updated_resource.clone())
-        .execute(&mut *tx)
-        .await?;
-
         tx.commit().await?;
-
-        Ok(Some(StoredResource {
-            id: id.to_owned(),
-            version_id: new_version_id,
-            last_updated,
-            resource: updated_resource,
-        }))
+        Ok(Some(stored))
     }
 
     /// Delete a resource only if its current version matches `expected_version`.
@@ -601,51 +788,13 @@ impl PgStore {
         id: &str,
     ) -> Result<Option<i64>, AppError> {
         let mut tx = self.pool.begin().await?;
-        let deleted = sqlx::query(
-            r#"
-            DELETE FROM fhir_resources
-            WHERE tenant_id = $1 AND resource_type = $2 AND id = $3
-            RETURNING version_id, resource
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(resource_type)
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        let Some(row) = deleted else {
+        let version = Self::delete_in_tx(&mut tx, tenant_id, resource_type, id).await?;
+        let Some(version) = version else {
             tx.rollback().await?;
             return Ok(None);
         };
-
-        let version_id = row.get::<i64, _>("version_id") + 1;
-        let resource = row.get::<Value, _>("resource");
-
-        sqlx::query(
-            r#"
-            INSERT INTO fhir_resource_history (
-                tenant_id,
-                resource_type,
-                id,
-                version_id,
-                last_updated,
-                deleted,
-                resource
-            )
-            VALUES ($1, $2, $3, $4, now(), TRUE, $5)
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(resource_type)
-        .bind(id)
-        .bind(version_id)
-        .bind(resource)
-        .execute(&mut *tx)
-        .await?;
-
         tx.commit().await?;
-        Ok(Some(version_id))
+        Ok(Some(version))
     }
 
     /// Delete (optionally version-checked) and write its successful audit row
@@ -943,11 +1092,18 @@ impl PgStore {
         }
 
         // Zero matches: create the new resource within the same transaction.
-        let created = Self::create_in_tx(&mut tx, tenant_id, resource_type, id, resource)
-            .await?
-            .ok_or_else(|| {
-                AppError::Conflict("a resource with the generated id already exists".to_owned())
-            })?;
+        let created = Self::create_in_tx(
+            &mut tx,
+            tenant_id,
+            resource_type,
+            id,
+            resource,
+            self.local_base_url.as_ref(),
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict("a resource with the generated id already exists".to_owned())
+        })?;
 
         tx.commit().await?;
 
@@ -1005,11 +1161,18 @@ impl PgStore {
             );
             (ConditionalCreateOutcome::Existing(stored), event)
         } else {
-            let stored = Self::create_in_tx(&mut tx, tenant_id, resource_type, id, resource)
-                .await?
-                .ok_or_else(|| {
-                    AppError::Conflict("a resource with the generated id already exists".to_owned())
-                })?;
+            let stored = Self::create_in_tx(
+                &mut tx,
+                tenant_id,
+                resource_type,
+                id,
+                resource,
+                self.local_base_url.as_ref(),
+            )
+            .await?
+            .ok_or_else(|| {
+                AppError::Conflict("a resource with the generated id already exists".to_owned())
+            })?;
             let event = audit.success_event(
                 "create",
                 'C',
@@ -1032,6 +1195,7 @@ impl PgStore {
         resource_type: &str,
         id: &str,
         resource: Value,
+        local_base_url: Option<&url::Url>,
     ) -> Result<Option<StoredResource>, AppError> {
         let row = sqlx::query(
             r#"
@@ -1063,12 +1227,25 @@ impl PgStore {
         .fetch_optional(&mut **tx)
         .await?;
 
-        Ok(row.map(|row| StoredResource {
+        let stored = row.map(|row| StoredResource {
             id: id.to_owned(),
             version_id: row.get::<i64, _>("version_id"),
             last_updated: row.get::<DateTime<Utc>, _>("last_updated"),
             resource: row.get::<Value, _>("resource"),
-        }))
+        });
+        if let Some(stored) = &stored {
+            Self::replace_references_in_tx(
+                tx,
+                tenant_id,
+                resource_type,
+                id,
+                stored.version_id,
+                &stored.resource,
+                local_base_url,
+            )
+            .await?;
+        }
+        Ok(stored)
     }
 
     /// Upsert a resource inside an existing transaction.
@@ -1078,6 +1255,7 @@ impl PgStore {
         resource_type: &str,
         id: &str,
         resource: Value,
+        local_base_url: Option<&url::Url>,
     ) -> Result<UpsertResult, AppError> {
         let row = sqlx::query(
             r#"
@@ -1130,7 +1308,7 @@ impl PgStore {
         .fetch_one(&mut **tx)
         .await?;
 
-        Ok(UpsertResult {
+        let result = UpsertResult {
             stored: StoredResource {
                 id: id.to_owned(),
                 version_id: row.get::<i64, _>("version_id"),
@@ -1138,7 +1316,18 @@ impl PgStore {
                 resource: row.get::<Value, _>("resource"),
             },
             created: row.get::<bool, _>("created"),
-        })
+        };
+        Self::replace_references_in_tx(
+            tx,
+            tenant_id,
+            resource_type,
+            id,
+            result.stored.version_id,
+            &result.stored.resource,
+            local_base_url,
+        )
+        .await?;
+        Ok(result)
     }
 
     /// Read a resource inside an existing transaction.
@@ -1176,6 +1365,7 @@ impl PgStore {
         resource_type: &str,
         id: &str,
         resource: Value,
+        local_base_url: Option<&url::Url>,
     ) -> Result<Option<StoredResource>, AppError> {
         let updated = sqlx::query(
             r#"
@@ -1219,6 +1409,17 @@ impl PgStore {
         .execute(&mut **tx)
         .await?;
 
+        Self::replace_references_in_tx(
+            tx,
+            tenant_id,
+            resource_type,
+            id,
+            new_version_id,
+            &updated_resource,
+            local_base_url,
+        )
+        .await?;
+
         Ok(Some(StoredResource {
             id: id.to_owned(),
             version_id: new_version_id,
@@ -1235,6 +1436,7 @@ impl PgStore {
         id: &str,
         expected_version: i64,
         resource: Value,
+        local_base_url: Option<&url::Url>,
     ) -> Result<Option<StoredResource>, AppError> {
         let updated = sqlx::query(
             r#"
@@ -1280,6 +1482,17 @@ impl PgStore {
         .bind(last_updated)
         .bind(&updated_resource)
         .execute(&mut **tx)
+        .await?;
+
+        Self::replace_references_in_tx(
+            tx,
+            tenant_id,
+            resource_type,
+            id,
+            new_version_id,
+            &updated_resource,
+            local_base_url,
+        )
         .await?;
 
         Ok(Some(StoredResource {
@@ -1349,6 +1562,8 @@ impl PgStore {
         .execute(&mut **tx)
         .await?;
 
+        Self::delete_references_in_tx(tx, tenant_id, resource_type, id).await?;
+
         Ok(DeleteIfMatchOutcome::Deleted {
             new_version_id: version_id,
         })
@@ -1396,6 +1611,8 @@ impl PgStore {
         .bind(resource)
         .execute(&mut **tx)
         .await?;
+
+        Self::delete_references_in_tx(tx, tenant_id, resource_type, id).await?;
 
         Ok(Some(version_id))
     }

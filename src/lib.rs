@@ -4,6 +4,7 @@ pub mod bundle;
 pub mod capability;
 pub mod config;
 pub mod error;
+pub mod everything;
 pub mod fhir;
 pub mod jwks;
 pub mod media_type;
@@ -63,6 +64,8 @@ pub struct AppState {
     pub auth: AuthConfig,
     pub fhir_base_url: String,
     pub search: SearchConfig,
+    /// HMAC key used for short-lived, authorization-bound operation cursors.
+    pub everything_cursor_secret: Arc<[u8]>,
     pub validator: Arc<FhirSchemaValidator>,
     pub cors_allowed_origins: Vec<header::HeaderValue>,
     pub serve_docs: bool,
@@ -277,6 +280,15 @@ fn audit_request_shape(
     } else {
         None
     };
+    if parts.last() == Some(&"$everything") {
+        let interaction = if parts.first() == Some(&"Group") {
+            "group-everything"
+        } else {
+            "patient-everything"
+        };
+        let context_id = (parts.len() >= 3).then(|| parts[1].to_owned());
+        return (interaction, 'E', resource_type, context_id, "standalone");
+    }
     let (interaction, action) = match method {
         "POST" => ("create", 'C'),
         "PUT" | "PATCH" => ("update", 'U'),
@@ -294,6 +306,27 @@ fn audit_request_shape(
         "standalone",
     )
 }
+
+#[cfg(test)]
+mod operation_audit_tests {
+    use super::audit_request_shape;
+
+    #[test]
+    fn everything_routes_have_dedicated_audit_interactions() {
+        let patient = audit_request_shape("GET", "/fhir/Patient/p1/$everything");
+        assert_eq!(patient.0, "patient-everything");
+        assert_eq!(patient.2.as_deref(), Some("Patient"));
+        assert_eq!(patient.3.as_deref(), Some("p1"));
+
+        let group = audit_request_shape("POST", "/fhir/Group/g1/$everything");
+        assert_eq!(group.0, "group-everything");
+        assert_eq!(group.3.as_deref(), Some("g1"));
+
+        let patient_type = audit_request_shape("GET", "/fhir/Patient/$everything");
+        assert_eq!(patient_type.0, "patient-everything");
+        assert!(patient_type.3.is_none());
+    }
+}
 fn normalized_reason(status: u16) -> Option<&'static str> {
     match status {
         400 => Some("bad-request"),
@@ -303,6 +336,7 @@ fn normalized_reason(status: u16) -> Option<&'static str> {
         409 => Some("conflict"),
         412 => Some("precondition-failed"),
         413 => Some("payload-too-large"),
+        422 => Some("unprocessable-entity"),
         415 => Some("unsupported-media-type"),
         500..=599 => Some("server-error"),
         _ => None,

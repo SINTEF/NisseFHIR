@@ -830,8 +830,10 @@ version = "0.1.4"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "fluent-uri",
+ "hmac 0.12.1",
  "http",
  "http-body-util",
  "json-patch",
@@ -844,6 +846,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror",
  "tokio",

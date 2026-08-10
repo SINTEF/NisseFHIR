@@ -28,6 +28,18 @@ pub fn routes() -> Router<AppState> {
         .route("/fhir/AuditEvent", get(search_audit_events))
         .route("/fhir/AuditEvent/{id}", get(read_audit_event))
         .route(
+            "/fhir/Patient/{id}/$everything",
+            get(crate::everything::patient_get).post(crate::everything::patient_post),
+        )
+        .route(
+            "/fhir/Patient/$everything",
+            get(crate::everything::patient_type_get).post(crate::everything::patient_type_post),
+        )
+        .route(
+            "/fhir/Group/{id}/$everything",
+            get(crate::everything::group_get).post(crate::everything::group_post),
+        )
+        .route(
             "/fhir/{resource_type}",
             get(search_resources).post(create_resource),
         )
@@ -1197,6 +1209,7 @@ mod tests {
                 default_count: 50,
                 max_count: 500,
             },
+            everything_cursor_secret: Arc::from(TEST_SECRET.as_bytes()),
             validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
             cors_allowed_origins: Vec::new(),
             serve_docs: false,
@@ -1255,6 +1268,7 @@ mod tests {
                 default_count: 50,
                 max_count: 500,
             },
+            everything_cursor_secret: Arc::from(TEST_SECRET.as_bytes()),
             validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
             cors_allowed_origins: Vec::new(),
             serve_docs: false,
@@ -1316,6 +1330,7 @@ mod tests {
                 default_count: 50,
                 max_count: 500,
             },
+            everything_cursor_secret: Arc::from(TEST_SECRET.as_bytes()),
             validator: Arc::new(FhirSchemaValidator::new().expect("validator should load")),
             cors_allowed_origins: Vec::new(),
             serve_docs: false,

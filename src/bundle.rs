@@ -383,6 +383,7 @@ impl EntryError {
             AppError::PreconditionFailed(msg) => EntryError::PreconditionFailed(msg),
             AppError::Validation(issues) => EntryError::Validation(issues),
             AppError::BadRequest(msg) => EntryError::BadRequest(msg),
+            AppError::UnprocessableEntity(msg) => EntryError::BadRequest(msg),
             AppError::PayloadTooLarge => EntryError::BadRequest(
                 "request payload exceeds the maximum allowed size".to_owned(),
             ),
@@ -941,6 +942,7 @@ trait BundleExecutor {
 /// Executor that operates inside an existing database transaction.
 struct TxBundleExecutor<'a> {
     tx: crate::store::TxExecutor<'a>,
+    local_base_url: url::Url,
 }
 
 impl BundleExecutor for TxBundleExecutor<'_> {
@@ -951,8 +953,15 @@ impl BundleExecutor for TxBundleExecutor<'_> {
         id: &str,
         resource: Value,
     ) -> Result<Option<crate::store::StoredResource>, AppError> {
-        crate::store::PgStore::create_in_tx(&mut self.tx, tenant_id, resource_type, id, resource)
-            .await
+        crate::store::PgStore::create_in_tx(
+            &mut self.tx,
+            tenant_id,
+            resource_type,
+            id,
+            resource,
+            Some(&self.local_base_url),
+        )
+        .await
     }
 
     async fn exec_upsert(
@@ -962,8 +971,15 @@ impl BundleExecutor for TxBundleExecutor<'_> {
         id: &str,
         resource: Value,
     ) -> Result<crate::store::UpsertResult, AppError> {
-        crate::store::PgStore::upsert_in_tx(&mut self.tx, tenant_id, resource_type, id, resource)
-            .await
+        crate::store::PgStore::upsert_in_tx(
+            &mut self.tx,
+            tenant_id,
+            resource_type,
+            id,
+            resource,
+            Some(&self.local_base_url),
+        )
+        .await
     }
 
     async fn exec_update_if_version_matches(
@@ -981,6 +997,7 @@ impl BundleExecutor for TxBundleExecutor<'_> {
             id,
             expected_version,
             resource,
+            Some(&self.local_base_url),
         )
         .await
     }
@@ -1128,6 +1145,8 @@ pub(crate) async fn process_transaction(
     let base_url = state.fhir_base_url.trim_end_matches('/');
     let mut executor = TxBundleExecutor {
         tx: state.store.begin_tx().await?,
+        local_base_url: url::Url::parse(&state.fhir_base_url)
+            .map_err(|error| AppError::Internal(format!("invalid FHIR base URL: {error}")))?,
     };
     if crate::store::PgStore::append_audit_in_tx(
         &mut executor.tx,
@@ -1264,7 +1283,19 @@ pub(crate) async fn process_batch(
     for (index, entry) in entries.iter().enumerate() {
         let fact = entry_audit_fact(index, entry);
         let mut executor = match state.store.begin_tx().await {
-            Ok(tx) => TxBundleExecutor { tx },
+            Ok(tx) => TxBundleExecutor {
+                tx,
+                local_base_url: match url::Url::parse(&state.fhir_base_url) {
+                    Ok(url) => url,
+                    Err(_) => {
+                        had_failure = true;
+                        had_serious_failure = true;
+                        append_failed_batch_child(state, audit, parent_id, &fact, 500).await;
+                        response_entries.push(error_entry(&EntryError::Internal));
+                        continue;
+                    }
+                },
+            },
             Err(_) => {
                 had_failure = true;
                 had_serious_failure = true;

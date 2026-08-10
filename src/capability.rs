@@ -103,14 +103,28 @@ pub fn capability_statement(base_url: &str, cors_enabled: bool) -> Value {
             search_params.push(parameter);
         }
 
-        resource_entries.push(json!({
+        let mut resource = json!({
             "type": rt,
             "interaction": generic_interactions,
             "conditionalCreate": !executable_params.is_empty(),
             "updateCreate": true,
             "searchParam": search_params,
             "extension": sort_parameter_extensions(&crate::sort::sortable_keys_for(rt)),
-        }));
+        });
+        if rt == "Patient" {
+            resource["operation"] = json!([{
+                "name": "everything",
+                "definition": "http://hl7.org/fhir/OperationDefinition/Patient-everything",
+                "documentation": "Instance-level GET and POST are supported with mandatory bounded paging and signed 15-minute keyset cursors. Type-level invocation fails closed until authorization supplies an explicit Patient set. The nominated Patient is returned even when _type omits Patient. start/end requires _type narrowed to Encounter, Observation, Procedure, Condition, MedicationRequest, DocumentReference, Immunization, Patient, or a documented supporting context type."
+            }]);
+        } else if rt == "Group" {
+            resource["operation"] = json!([{
+                "name": "everything",
+                "definition": "http://hl7.org/fhir/OperationDefinition/Group-everything",
+                "documentation": "Instance-level GET and POST are supported for enumerated/actual person Groups of at most 100 local Patient members."
+            }]);
+        }
+        resource_entries.push(resource);
     }
     // AuditEvent search does not support `_sort` (task 040): it is strictly
     // ordered by id (see `search_audit_events`), so no sort-parameter
@@ -214,6 +228,29 @@ mod tests {
     fn capability_has_rest_server_mode() {
         let value = capability_statement("http://localhost:8080/fhir");
         assert_eq!(value["rest"][0]["mode"], "server");
+    }
+
+    #[test]
+    fn capability_advertises_instance_everything_operations() {
+        let value = capability_statement("http://localhost:8080/fhir");
+        let resources = value["rest"][0]["resource"].as_array().unwrap();
+        for (resource_type, canonical) in [
+            (
+                "Patient",
+                "http://hl7.org/fhir/OperationDefinition/Patient-everything",
+            ),
+            (
+                "Group",
+                "http://hl7.org/fhir/OperationDefinition/Group-everything",
+            ),
+        ] {
+            let resource = resources
+                .iter()
+                .find(|entry| entry["type"] == resource_type)
+                .unwrap();
+            assert_eq!(resource["operation"][0]["name"], "everything");
+            assert_eq!(resource["operation"][0]["definition"], canonical);
+        }
     }
 
     #[test]
