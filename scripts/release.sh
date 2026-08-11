@@ -44,8 +44,8 @@ cargo update --workspace
 # 3. Dockerfile OCI label
 sed -i "s/org.opencontainers.image.version=\"$OLD\"/org.opencontainers.image.version=\"$NEW\"/" Dockerfile
 
-# 4. docker-compose.yml image tag
-sed -i "s|nissefhir:$OLD|nissefhir:$NEW|" docker-compose.yml
+# 4. compose.yaml image tag
+sed -i "s|nissefhir:$OLD|nissefhir:$NEW|" compose.yaml
 
 # 5. Helm Chart.yaml (version + appVersion)
 sed -i "s/^version: $OLD/version: $NEW/" charts/nissefhir/Chart.yaml

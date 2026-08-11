@@ -302,4 +302,4 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: docker compose -f docker-compose.e2e.yml down -v
+        run: docker compose -f compose.e2e.yaml down -v

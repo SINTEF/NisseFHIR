@@ -171,7 +171,7 @@ metrics:
 The chart rejects invalid ports, non-positive durations, and a
 `scrapeTimeout` greater than `interval` at render time.
 
-To verify metrics locally with docker-compose:
+To verify metrics locally with Docker Compose:
 
 ```bash
 curl --fail http://localhost:9090/metrics

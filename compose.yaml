@@ -28,7 +28,7 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/fhir
       BIND_ADDR: 0.0.0.0:8080
       JWT_MODE: "static"
-      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET before starting docker-compose}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET before starting Docker Compose}
       FHIR_BASE_URL: http://localhost:8080/fhir
       SERVE_DOCS: "true"
       RUST_LOG: fhir_server=info,tower_http=info

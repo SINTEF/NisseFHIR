@@ -28,7 +28,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 SERVER_DIR = ROOT_DIR
 EXAMPLES_DIR = ROOT_DIR / "examples"
 EXAMPLES_ZIP = EXAMPLES_DIR / "examples-json.zip"
-COMPOSE_FILE = ROOT_DIR / "docker-compose.e2e.yml"
+COMPOSE_FILE = ROOT_DIR / "compose.e2e.yaml"
 BASELINE_FILE = ROOT_DIR / "scripts" / "e2e_baseline.json"
 
 # Additional example directories from fhir-test-cases submodule
@@ -1157,7 +1157,7 @@ def run_docker_mode(dataset: str, workers: int) -> None:
             output_dir.mkdir(parents=True, exist_ok=True)
             try:
                 compose_logs = docker_compose("logs", "--no-color", capture_output=True)
-                (output_dir / "docker-compose.log").write_text(
+                (output_dir / "compose.log").write_text(
                     compose_logs.stdout, encoding="utf-8"
                 )
             except subprocess.CalledProcessError as exc:

@@ -174,7 +174,7 @@ python3 scripts/e2e_examples.py --mode docker --dataset all-plus-smoke --workers
 What it does:
 
 - Ensures the HL7 `examples-json.zip` dataset is present, downloading and extracting it automatically when needed.
-- In native mode, prefers a local PostgreSQL instance when available and falls back to disposable PostgreSQL via `docker compose -f docker-compose.e2e.yml`.
+- In native mode, prefers a local PostgreSQL instance when available and falls back to disposable PostgreSQL via `docker compose -f compose.e2e.yaml`.
 - Runs the server natively with `cargo run --release` or as the built container.
 - Scans the whole `examples/` directory, infers each example type from its top-level `resourceType`, and uses parallel HTTP requests to keep the run time reasonable.
 - Treats schema-valid examples as accepted resources, schema-invalid official examples as expected `OperationOutcome` rejections, and oversized payload transport failures as an explicit current limitation.

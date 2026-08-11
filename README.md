@@ -17,7 +17,7 @@ The human software engineer supervising the development states that NisseFHIR is
 export JWT_SECRET="$(openssl rand -hex 32)"
 
 # Start the server and the database
-docker-compose up -d
+docker compose up -d
 
 # Generate a JWT token for local development
 python3 scripts/generate_static_jwt.py \

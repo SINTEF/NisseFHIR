@@ -33,7 +33,7 @@ Some items from the original report are better treated as deployment responsibil
 - public `/metadata`
 - optional docs exposure when explicitly enabled
 - client-side HTML escaping responsibilities
-- local test credentials in `docker-compose.e2e.yml`
+- local test credentials in `compose.e2e.yaml`
 
 ---
 
@@ -86,7 +86,7 @@ These were reported in the original audit, but they are better treated as deploy
 - If your architecture already expects this at the gateway, ingress, proxy, or API-management layer, that is a reasonable boundary.
 - If this server is ever exposed directly, revisit that decision.
 
-### 3. Local test credentials in `docker-compose.e2e.yml`
+### 3. Local test credentials in `compose.e2e.yaml`
 
 - The compose file still contains local test credentials.
 - For an e2e-only local setup, this is acceptable.
